@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "cli_version": "0.1.0",
-  "repository": "OWNER/REPO",
+  "repository": "jsvitkin/backet",
   "default_ref": "main",
   "release_artifact_pattern": "backet-{version}-py3-none-any.whl",
   "skills_manifest_path": "skills/manifest.json",

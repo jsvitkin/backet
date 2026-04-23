@@ -5,14 +5,14 @@ from zipfile import ZipFile
 
 import pytest
 
-from backet.distribution import load_distribution_metadata, prepare_remote_skill_source
+from backet.distribution import DistributionMetadata, load_distribution_metadata, prepare_remote_skill_source
 from backet.errors import AppError
 
 
 def test_distribution_metadata_loads_from_repo() -> None:
     metadata = load_distribution_metadata()
 
-    assert metadata.repository == "OWNER/REPO"
+    assert metadata.repository == "jsvitkin/backet"
     assert metadata.default_ref == "main"
     assert metadata.release_artifact_name("0.1.0") == "backet-0.1.0-py3-none-any.whl"
 
@@ -32,9 +32,23 @@ def test_skills_archive_url_honors_env_override(monkeypatch: pytest.MonkeyPatch)
     assert metadata.skills_archive_url(repository="example/backet", ref="main") == "file:///tmp/custom.zip"
 
 
-def test_prepare_remote_skill_source_requires_explicit_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_remote_skill_source_errors_when_repository_metadata_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("BACKET_REPOSITORY", raising=False)
     monkeypatch.delenv("BACKET_SKILLS_ARCHIVE_URL", raising=False)
+    monkeypatch.setattr(
+        "backet.distribution.load_distribution_metadata",
+        lambda: DistributionMetadata(
+            schema_version=1,
+            cli_version="0.1.0",
+            repository="OWNER/REPO",
+            default_ref="main",
+            release_artifact_pattern="backet-{version}-py3-none-any.whl",
+            skills_manifest_path="skills/manifest.json",
+            skills_archive_url_template="https://codeload.github.com/{repository}/zip/refs/heads/{ref}",
+        ),
+    )
 
     with pytest.raises(AppError, match="No GitHub repository is configured"):
         with prepare_remote_skill_source():

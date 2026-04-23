@@ -15,6 +15,7 @@ authors = [
 dependencies = [
   "packaging>=24.1",
   "platformdirs>=4.3.6",
+  "PyMuPDF>=1.25.1",
   "PyYAML>=6.0.2",
   "rich>=13.9.4",
   "typer>=0.12.5",
@@ -34,9 +35,9 @@ retrieval = [
 backet = "backet.cli:run"
 
 [project.urls]
-Homepage = "https://github.com/OWNER/REPO"
-Repository = "https://github.com/OWNER/REPO"
-Issues = "https://github.com/OWNER/REPO/issues"
+Homepage = "https://github.com/jsvitkin/backet"
+Repository = "https://github.com/jsvitkin/backet"
+Issues = "https://github.com/jsvitkin/backet/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/backet"]

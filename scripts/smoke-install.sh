@@ -28,8 +28,10 @@ PATH="${PIPX_BIN_DIR}:${PATH}"
 export PATH
 
 BACKET_BIN="${PIPX_BIN_DIR}/backet"
+BACKET_PYTHON="${PIPX_HOME}/venvs/backet/bin/python"
 VAULT_DIR="${TMP_ROOT}/vault"
 ARCHIVE_PATH="${TMP_ROOT}/skills-repo.zip"
+RULES_PDF_PATH="${TMP_ROOT}/core-rulebook.pdf"
 
 mkdir -p "$VAULT_DIR"
 
@@ -66,3 +68,35 @@ BACKET_SKILLS_ARCHIVE_URL="file://${ARCHIVE_PATH}" \
   | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok"'
 
 "$BACKET_BIN" --json skills status | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["installed"] is True'
+
+"$BACKET_PYTHON" - "$RULES_PDF_PATH" <<'PY'
+import sys
+
+import fitz
+
+pdf_path = sys.argv[1]
+document = fitz.open()
+try:
+    page = document.new_page()
+    box = fitz.Rect(36, 36, page.rect.width - 36, page.rect.height - 36)
+    page.insert_textbox(
+        box,
+        (
+            "Feeding Rights\n"
+            "Blood dolls suffer addiction and emotional dependence after repeated feeding. "
+            "Repeated access to vitae can create uneven consent, social fallout, and political scrutiny "
+            "inside a Camarilla domain."
+        ),
+        fontsize=12,
+    )
+    document.save(pdf_path)
+finally:
+    document.close()
+PY
+
+"$BACKET_BIN" --json rules ingest "$VAULT_DIR" "$RULES_PDF_PATH" --book-id core-v5 --title "Core Rulebook" --tier core \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["book_id"] == "core-v5"'
+"$BACKET_BIN" --json rules query "$VAULT_DIR" "blood dolls vitae consent" --book-id core-v5 \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["primary_results"]'
+"$BACKET_BIN" --json rules audit "$VAULT_DIR" --book-id core-v5 \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["books"]'

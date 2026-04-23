@@ -11,14 +11,17 @@ from backet.indexing import index_vault
 from backet.memory import build_memory_capsules
 from backet.output import CLIState, emit_error, emit_success, emit_version, ensure_state
 from backet.retrieval import build_context_bundle
+from backet.rules import audit_rules, ingest_rulebook, query_rules, repair_rules
 from backet.skills import install_skills, skills_status, update_skills
 from backet.vault import diagnose_vault, initialize_vault
 
 app = typer.Typer(no_args_is_help=True, help="backet CLI")
 skills_app = typer.Typer(help="Manage the backet Codex skill pack.")
 memory_app = typer.Typer(help="Manage derived vault memory capsules.")
+rules_app = typer.Typer(help="Manage ingested rulebook PDFs and raw rules retrieval.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(memory_app, name="memory")
+app.add_typer(rules_app, name="rules")
 
 @app.callback(invoke_without_command=True)
 def main(
@@ -188,6 +191,101 @@ def memory_build_command(
     state = ensure_state(ctx)
     try:
         result = build_memory_capsules(vault.resolve(), family=family, refresh=refresh)
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("ingest")
+def rules_ingest_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    pdf: Annotated[Path, typer.Argument(help="Local path to the source PDF.", file_okay=True, dir_okay=False)] = Path("."),
+    book_id: Annotated[str, typer.Option("--book-id", help="Stable identifier for the ingested book.")] = "",
+    title: Annotated[str | None, typer.Option("--title", help="Display title for the ingested book.")] = None,
+    tier: Annotated[str, typer.Option("--tier", help="Precedence tier: core or supplement.")] = "core",
+    scope_tags: Annotated[
+        list[str] | None,
+        typer.Option("--scope-tag", help="Repeatable scope tag used for supplement precedence."),
+    ] = None,
+    force_ocr: Annotated[bool, typer.Option("--force-ocr", help="Force OCR instead of direct text extraction.")] = False,
+    pages: Annotated[str | None, typer.Option("--pages", help="Optional page range, for example `3-5,9`.")] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        if not book_id.strip():
+            raise AppError(
+                code="rules_book_id_missing",
+                message="A stable `--book-id` is required for rulebook ingestion.",
+                hint="Re-run the command with `--book-id some-book-id`.",
+                exit_code=2,
+            )
+        result = ingest_rulebook(
+            vault_root=vault.resolve(),
+            pdf_path=pdf.resolve(),
+            book_id=book_id,
+            title=title,
+            tier=tier,
+            scope_tags=scope_tags or [],
+            force_ocr=force_ocr,
+            pages_spec=pages,
+        )
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("query")
+def rules_query_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    query: Annotated[str, typer.Argument(help="Rule query text for raw chunk retrieval.")] = "",
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of primary or fallback chunks to return.")] = 6,
+    book_id: Annotated[str | None, typer.Option("--book-id", help="Restrict retrieval to a single ingested book.")] = None,
+    scope_tags: Annotated[
+        list[str] | None,
+        typer.Option("--scope-tag", help="Repeatable scope tag used for precedence or filtering."),
+    ] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = query_rules(
+            vault_root=vault.resolve(),
+            query=query,
+            limit=limit,
+            book_id=book_id,
+            scope_tags=scope_tags or [],
+        )
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("audit")
+def rules_audit_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    book_id: Annotated[str | None, typer.Option("--book-id", help="Optional book identifier to audit.")] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = audit_rules(vault.resolve(), book_id=book_id)
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("repair")
+def rules_repair_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    book_id: Annotated[str, typer.Argument(help="Book identifier to repair.")] = "",
+    pages: Annotated[str | None, typer.Option("--pages", help="Optional targeted page range, for example `3-5,9`.")] = None,
+    force_ocr: Annotated[bool, typer.Option("--force-ocr", help="Force OCR during targeted repair.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = repair_rules(vault.resolve(), book_id=book_id, pages_spec=pages, force_ocr=force_ocr)
         emit_success(state, result)
     except AppError as error:
         _handle_error(ctx, error)

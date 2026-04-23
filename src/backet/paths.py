@@ -11,6 +11,7 @@ BACKET_DIRNAME = ".backet"
 BACKET_CONFIG_FILENAME = "config.yaml"
 BACKET_GITIGNORE_FILENAME = ".gitignore"
 INDEX_DB_FILENAME = "vault-index.sqlite3"
+RULES_DB_FILENAME = "rules.sqlite3"
 SAFE_REBUILD_DIRS = ("cache", "temp")
 DURABLE_DIRS = ("state", "memory", "rules")
 OPTIONAL_SAFE_DIRS = ("ocr-work",)
@@ -66,3 +67,7 @@ def rules_dir(vault_root: Path) -> Path:
 
 def index_db_path(vault_root: Path) -> Path:
     return state_dir(vault_root) / INDEX_DB_FILENAME
+
+
+def rules_db_path(vault_root: Path) -> Path:
+    return rules_dir(vault_root) / RULES_DB_FILENAME

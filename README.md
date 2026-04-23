@@ -9,19 +9,19 @@ The supported v1 install path is a GitHub-hosted wheel installed with `pipx`.
 Primary installer UX:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/install.sh | bash -s -- --repo OWNER/REPO
+curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash
 ```
 
 Transparent fallback:
 
 ```bash
-pipx install https://github.com/OWNER/REPO/releases/download/v0.1.0/backet-0.1.0-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.0/backet-0.1.0-py3-none-any.whl
 ```
 
 Upgrade:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/upgrade.sh | bash -s -- --repo OWNER/REPO
+curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/upgrade.sh | bash
 ```
 
 If `pipx` is missing on macOS:
@@ -73,9 +73,26 @@ backet memory build /path/to/vault
 Install or refresh the skill pack from the repository:
 
 ```bash
-backet skills install --repo OWNER/REPO
+backet skills install
 backet skills update
 backet skills status --json
+```
+
+Ingest and query local rulebook PDFs:
+
+```bash
+backet rules ingest /path/to/vault /path/to/core-rulebook.pdf --book-id core-v5 --title "Core Rulebook" --tier core
+backet rules ingest /path/to/vault /path/to/camarilla.pdf --book-id camarilla --title "Camarilla" --tier supplement --scope-tag camarilla
+backet rules query /path/to/vault "feeding rights blood doll" --scope-tag camarilla --json
+backet rules audit /path/to/vault
+```
+
+Source PDFs stay outside the vault. `backet` stores the ingested rules corpus under `.backet/rules/` so it can travel with the vault backup.
+
+OCR fallback needs Tesseract on the local machine. On macOS:
+
+```bash
+brew install tesseract
 ```
 
 For higher-quality local semantic retrieval, install the optional Sentence Transformers backend into the `pipx` environment:

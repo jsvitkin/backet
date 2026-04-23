@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO=""
+REPO="jsvitkin/backet"
 VERSION=""
 PYTHON_BIN="${PYTHON:-python3}"
 
 usage() {
   cat <<'EOF'
-Usage: install.sh --repo OWNER/REPO [--version X.Y.Z] [--python /path/to/python]
+Usage: install.sh [--repo OWNER/REPO] [--version X.Y.Z] [--python /path/to/python]
 EOF
 }
 
@@ -36,11 +36,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ -z "$REPO" ]]; then
-  echo "--repo OWNER/REPO is required." >&2
-  exit 2
-fi
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "Python interpreter not found: $PYTHON_BIN" >&2
