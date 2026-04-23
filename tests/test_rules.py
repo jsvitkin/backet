@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import json
+from contextlib import closing
+from pathlib import Path
+
+import fitz
+import pytest
+
+from backet.cli import app
+from backet.errors import AppError
+from backet.rules import normalize_scope_tags, open_rules_connection, parse_pages_spec, split_rule_chunks
+
+
+def test_parse_pages_spec_and_scope_tag_normalization() -> None:
+    assert parse_pages_spec("1-3,5", 7) == [1, 2, 3, 5]
+    assert normalize_scope_tags([" Camarilla ", "camarilla", " Discipline "]) == ["camarilla", "discipline"]
+    with pytest.raises(AppError, match="whole page numbers"):
+        parse_pages_spec("1-a", 7)
+
+
+def test_split_rule_chunks_preserves_paragraph_boundaries() -> None:
+    text = "\n\n".join(f"Paragraph {index} " + ("word " * 70) for index in range(1, 6))
+
+    chunks = split_rule_chunks(text)
+
+    assert len(chunks) >= 2
+    assert chunks[0].startswith("Paragraph 1")
+
+
+def test_rules_ingest_clean_pdf_and_query_metadata(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "core-rulebook.pdf",
+        [
+            _rule_page(
+                "Feeding Rights",
+                "Blood dolls suffer addiction and emotional dependence after repeated feeding. Repeated access to vitae can create an uneven bond, strained consent, and visible social fallout inside a domain.",
+            ),
+            _rule_page(
+                "Elysium Etiquette",
+                "Court etiquette enforces strict behavior in front of the Prince. Even minor breaches of protocol can trigger public punishment, political humiliation, or feeding restrictions inside Elysium.",
+            ),
+        ],
+    )
+
+    ingest_result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "ingest",
+            str(vault),
+            str(pdf_path),
+            "--book-id",
+            "core-v5",
+            "--title",
+            "Core Rulebook",
+            "--tier",
+            "core",
+        ],
+    )
+
+    assert ingest_result.exit_code == 0
+    ingest_payload = json.loads(ingest_result.stdout)
+    assert ingest_payload["data"]["book_id"] == "core-v5"
+    assert ingest_payload["data"]["ocr_used_on_pages"] == []
+
+    query_result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "blood doll addiction", "--limit", "3"],
+    )
+    assert query_result.exit_code == 0
+    query_payload = json.loads(query_result.stdout)
+    assert query_payload["data"]["primary_results"][0]["book_id"] == "core-v5"
+    assert query_payload["data"]["primary_results"][0]["page_start"] == 1
+
+    with closing(open_rules_connection(vault)) as connection:
+        row = connection.execute("SELECT * FROM rule_chunks WHERE book_id = 'core-v5'").fetchone()
+
+    assert row is not None
+    assert row["section_label"] == "Feeding Rights"
+
+
+def test_rules_ingest_uses_ocr_fallback_for_image_only_pdf(
+    runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_image_only_pdf(
+        tmp_path / "ocr-only.pdf",
+        "Blood dolls are often controlled through coercion and secrecy.",
+    )
+    monkeypatch.setattr(
+        "backet.rules._ocr_page",
+        lambda page, pdf_path, page_number: "Blood dolls are often controlled through coercion and secrecy.",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "ingest",
+            str(vault),
+            str(pdf_path),
+            "--book-id",
+            "camarilla-guide",
+            "--title",
+            "Camarilla Guide",
+            "--tier",
+            "supplement",
+            "--scope-tag",
+            "camarilla",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["ocr_used_on_pages"] == [1]
+
+
+def test_rules_query_applies_supplement_precedence_and_core_fallback(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    core_pdf = _create_text_pdf(
+        tmp_path / "core.pdf",
+        [
+            _rule_page(
+                "Feeding Rights",
+                "Core rules describe feeding rights in broad strokes. Domains may set customs, but the baseline text stays general and leaves room for local enforcement.",
+            )
+        ],
+    )
+    supplement_pdf = _create_text_pdf(
+        tmp_path / "camarilla.pdf",
+        [
+            _rule_page(
+                "Feeding Rights",
+                "Camarilla domains restrict blood doll feeding through formal permission. Feeding access is treated as a privilege that must be granted and monitored by the local court.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, core_pdf, "core-v5", "Core Rulebook", "core")
+    _ingest_book(runner, vault, supplement_pdf, "camarilla", "Camarilla", "supplement", ["camarilla"])
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "query",
+            str(vault),
+            "feeding rights blood doll permission",
+            "--scope-tag",
+            "camarilla",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["primary_results"][0]["book_id"] == "camarilla"
+    assert payload["data"]["fallback_results"][0]["book_id"] == "core-v5"
+
+
+def test_rules_query_surfaces_ambiguous_specific_sources(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    first_pdf = _create_text_pdf(
+        tmp_path / "camarilla-a.pdf",
+        [
+            _rule_page(
+                "Feeding Rights",
+                "The Camarilla forbids feeding from blood dolls without approval. Permission must be explicit, public enough to verify, and revocable by local authority.",
+            )
+        ],
+    )
+    second_pdf = _create_text_pdf(
+        tmp_path / "camarilla-b.pdf",
+        [
+            _rule_page(
+                "Feeding Rights",
+                "The Camarilla requires formal approval before blood doll feeding. Local officers maintain records and may punish any unlicensed access to blood dolls.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, first_pdf, "camarilla-a", "Camarilla A", "supplement", ["camarilla"])
+    _ingest_book(runner, vault, second_pdf, "camarilla-b", "Camarilla B", "supplement", ["camarilla"])
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "query",
+            str(vault),
+            "camarilla blood doll approval feeding",
+            "--scope-tag",
+            "camarilla",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "rules_query_ambiguous"
+    assert len(payload["error"]["details"]["conflicting_books"]) == 2
+
+
+def test_rules_audit_and_targeted_repair(runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_image_only_pdf(
+        tmp_path / "repair.pdf",
+        "The first scan is unreadable without proper OCR repair.",
+    )
+    monkeypatch.setattr("backet.rules._ocr_page", lambda page, pdf_path, page_number: "bad")
+    _ingest_book(runner, vault, pdf_path, "ocr-book", "OCR Book", "supplement", ["ritual"])
+
+    audit_result = runner.invoke(app, ["--json", "rules", "audit", str(vault), "--book-id", "ocr-book"])
+    assert audit_result.exit_code == 0
+    audit_payload = json.loads(audit_result.stdout)
+    assert audit_payload["data"]["books"][0]["suspect_pages"][0]["page_number"] == 1
+
+    monkeypatch.setattr(
+        "backet.rules._ocr_page",
+        lambda page, pdf_path, page_number: "Proper OCR repair restored the ritual text and page clarity.",
+    )
+    repair_result = runner.invoke(
+        app,
+        ["--json", "rules", "repair", str(vault), "ocr-book", "--pages", "1", "--force-ocr"],
+    )
+    assert repair_result.exit_code == 0
+
+    query_result = runner.invoke(app, ["--json", "rules", "query", str(vault), "ritual text clarity", "--book-id", "ocr-book"])
+    assert query_result.exit_code == 0
+    query_payload = json.loads(query_result.stdout)
+    assert "Proper OCR repair" in query_payload["data"]["primary_results"][0]["content"]
+
+
+def _make_bootstrapped_vault(runner, tmp_path: Path) -> Path:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    result = runner.invoke(app, ["init", str(vault)])
+    assert result.exit_code == 0
+    return vault
+
+
+def _ingest_book(
+    runner,
+    vault: Path,
+    pdf_path: Path,
+    book_id: str,
+    title: str,
+    tier: str,
+    scope_tags: list[str] | None = None,
+) -> None:
+    args = [
+        "--json",
+        "rules",
+        "ingest",
+        str(vault),
+        str(pdf_path),
+        "--book-id",
+        book_id,
+        "--title",
+        title,
+        "--tier",
+        tier,
+    ]
+    for tag in scope_tags or []:
+        args.extend(["--scope-tag", tag])
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.stdout
+
+
+def _create_text_pdf(path: Path, page_texts: list[str]) -> Path:
+    document = fitz.open()
+    try:
+        for text in page_texts:
+            page = document.new_page()
+            box = fitz.Rect(36, 36, page.rect.width - 36, page.rect.height - 36)
+            page.insert_textbox(box, text, fontsize=12)
+        document.save(path)
+    finally:
+        document.close()
+    return path
+
+
+def _create_image_only_pdf(path: Path, text: str) -> Path:
+    source = fitz.open()
+    image_doc = fitz.open()
+    try:
+        page = source.new_page()
+        box = fitz.Rect(36, 36, page.rect.width - 36, page.rect.height - 36)
+        page.insert_textbox(box, text, fontsize=12)
+        pixmap = page.get_pixmap(dpi=200, alpha=False)
+        image_page = image_doc.new_page(width=page.rect.width, height=page.rect.height)
+        image_page.insert_image(image_page.rect, stream=pixmap.tobytes("png"))
+        image_doc.save(path)
+    finally:
+        source.close()
+        image_doc.close()
+    return path
+
+
+def _rule_page(title: str, body: str) -> str:
+    return f"{title}\n{body}"

@@ -1,0 +1,81 @@
+schema: spec-driven
+
+context: |
+  Project purpose: Build a toolkit for creating and maintaining an Obsidian-based Vampire: The Masquerade "city by night" campaign setting.
+
+  Primary products:
+  - A CLI for transactional operations such as scaffolding files and folders, validating note metadata, and installing or updating Codex skills from this repo.
+  - A set of Codex skills that guide content creation and maintenance for campaign assets such as NPCs, locations, factions, lore, districts, plots, and session material.
+
+  Product boundaries:
+  - This repository is not an Obsidian vault. It contains the CLI, skills, templates, and supporting assets only.
+  - Keep the CLI and skills in the same repository, but design them as separately releasable and separately updateable units.
+  - The CLI is installed on the user's machine and then initialized inside one or more vaults, similar to the OpenSpec install/init model.
+  - Distribute installable CLI artifacts from the repository and GitHub releases rather than relying on a public Python package index.
+  - Treat skills as the authoring layer and the CLI as the operational layer.
+  - Treat the user's Obsidian vault as a first-class target. Prefer a configurable vault path over assuming the repo itself is the vault.
+  - Treat per-vault state as a distinct product surface, separate from the CLI package and from the skill pack.
+  - Bootstrap per-vault state under `.backet/`, and manage machine-specific artifacts with `.backet/.gitignore` instead of assuming changes to the vault root `.gitignore`.
+
+  Skill requirements:
+  - Skills must follow current OpenAI/Codex skill conventions and remain compatible with the Agent Skills format.
+  - Favor multiple narrow, reusable skills over one monolithic end-to-end skill.
+  - Keep SKILL.md concise and use progressive disclosure with references, scripts, and assets when needed.
+  - Skills should stay thin and delegate retrieval, indexing, and context assembly to the CLI instead of embedding large bodies of campaign or rules knowledge directly.
+
+  System architecture:
+  - The product has four moving parts: the CLI, the skill pack, per-vault state and derived memory, and a private rules corpus sourced from user-owned PDFs.
+  - Human-authored vault notes are the source of truth for campaign canon.
+  - Derived memory is allowed, but it must be rebuildable, scoped, and never treated as the canonical source.
+  - Prefer committing durable, portable per-vault state. Machine-specific caches or scratch artifacts must be rebuildable and ignored from Git.
+  - The system must support hierarchical context retrieval across campaign-wide canon, district or faction scope, local plotline scope, target artifact scope, and relevant rules or meta-lore.
+  - Retrieval should use a hybrid RAG approach that combines exact search, vector search, metadata filters, and hierarchy-aware expansion.
+  - Avoid designs that rely on loading whole vault sections or whole rulebooks into model context.
+
+  Rules and lore ingestion:
+  - Source rule PDFs are provided from paths elsewhere on the user's machine; the repo does not store them.
+  - Ingested rules data may live in per-vault state under `.backet/` so it can be backed up with the vault.
+  - The system should accept owned rulebooks as PDFs and ingest them without requiring the user to pre-chunk or manually prepare the files.
+  - Ingestion should extract or OCR text as needed, detect structure where possible, and create reusable chunks with source metadata.
+  - Ingested rules must carry book-level metadata so retrieval can apply precedence such as specific supplement rules over core rules, with user intervention when multiple specific rules conflict.
+  - Retrieval over rules should support raw source chunks for explanatory context. More normalized mechanics layers can be added in later changes.
+
+  Domain assumptions:
+  - The domain is tabletop RPG worldbuilding for Vampire: The Masquerade, with an emphasis on city-level campaign design and long-lived setting maintenance.
+  - Output should fit Obsidian-friendly Markdown, folder structures, note templates, and frontmatter-based metadata where appropriate.
+  - The tool should support authoring structured setting content such as NPCs, locations, factions, lore, plot hooks, relationships, and session prep.
+  - The system must understand and support top-down campaign development, where users move from city-wide canon and institutions down to local plots, scenes, and individual NPCs.
+
+  Working style:
+  - Use OpenSpec to clarify scope before implementation.
+  - During exploration, prefer defining workflows, information architecture, and release boundaries before choosing implementation details.
+  - Preserve room to debate vault information architecture; do not assume the current numbered Prague-by-Night chapter structure is the only valid future vault model.
+  - Require strong automated test coverage with unit, integration, and install or smoke coverage proportionate to the risk of each change.
+  - Validate installability of release artifacts before deployment so broken install flows are caught in CI instead of after release.
+
+rules:
+  proposal:
+    - State clearly what belongs in the CLI, what belongs in skills, and what belongs in the Obsidian vault.
+    - State clearly what belongs in the per-vault state, what is committed, and what is ignored as machine-specific.
+    - State clearly what belongs in the ingested rules corpus versus external source PDFs.
+    - Include explicit non-goals for the initial slice.
+    - Call out how CLI updates and skill updates can ship independently.
+    - Explain how retrieval scope is bounded so proposals do not imply loading the entire vault or entire rulebooks.
+  specs:
+    - Describe user-facing workflows and note-authoring behaviors, not only internal implementation details.
+    - Distinguish content-authoring workflows from filesystem or maintenance workflows when relevant.
+    - Distinguish canonical vault content from derived memory and indexed retrieval artifacts when relevant.
+    - Describe scope-aware workflows that start from broad campaign context and narrow toward concrete note generation.
+  design:
+    - Show repository layout, packaging boundaries, and vault integration points.
+    - Include note schema or frontmatter strategy when relevant.
+    - Include how skills will be validated against current OpenAI/Codex skill conventions.
+    - Include the testing and release-validation strategy for the change when it affects installation, persistence, or retrieval correctness.
+    - Show how hybrid retrieval works across exact search, vector search, metadata filters, and hierarchy-aware expansion.
+    - Show where per-vault indexes and ingested rules data live, what is committed, and what is ignored or rebuildable.
+    - Show how PDF ingestion, chunking, OCR recovery, and rule-precedence metadata fit into the system.
+    - Account for both human-friendly terminal UX and deterministic agent-facing command output.
+  tasks:
+    - Separate work for CLI, skill pack, and release or update plumbing.
+    - Separate work for per-vault state management and private rules ingestion when relevant.
+    - Include explicit testing and validation tasks for every change, not only implementation tasks.
