@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "backet"
+version = "0.1.0"
+description = "CLI and skill-pack manager for Obsidian-based Vampire: The Masquerade campaign vaults."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Jansvitkin" }
+]
+dependencies = [
+  "packaging>=24.1",
+  "platformdirs>=4.3.6",
+  "PyYAML>=6.0.2",
+  "rich>=13.9.4",
+  "typer>=0.12.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.2.post1",
+  "pytest>=8.3.3",
+  "pytest-cov>=6.0.0",
+]
+
+[project.scripts]
+backet = "backet.cli:run"
+
+[project.urls]
+Homepage = "https://github.com/OWNER/REPO"
+Repository = "https://github.com/OWNER/REPO"
+Issues = "https://github.com/OWNER/REPO/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/backet"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"metadata/compatibility.json" = "backet/resources/compatibility.json"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
