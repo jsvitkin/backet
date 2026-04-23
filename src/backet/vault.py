@@ -22,6 +22,31 @@ ocr-work/
 """
 
 
+def ensure_vault_directory(vault_root: Path) -> None:
+    if not vault_root.exists() or not vault_root.is_dir():
+        raise AppError(
+            code="vault_not_found",
+            message=f"Vault path does not exist: {vault_root}",
+            hint="Check the vault path and try again.",
+            details={"vault": str(vault_root)},
+            exit_code=2,
+        )
+
+
+def ensure_bootstrapped_vault(vault_root: Path) -> Path:
+    ensure_vault_directory(vault_root)
+    root = backet_root(vault_root)
+    if not root.exists():
+        raise AppError(
+            code="not_bootstrapped",
+            message="Vault is not bootstrapped for backet yet.",
+            hint="Run `backet init <vault>` first.",
+            details={"vault": str(vault_root)},
+            exit_code=2,
+        )
+    return root
+
+
 def initialize_vault(vault_root: Path, cli_version: str) -> CommandResult:
     if not vault_root.exists() or not vault_root.is_dir():
         raise AppError(
@@ -80,24 +105,7 @@ def initialize_vault(vault_root: Path, cli_version: str) -> CommandResult:
 
 
 def diagnose_vault(vault_root: Path, fix: bool) -> CommandResult:
-    if not vault_root.exists() or not vault_root.is_dir():
-        raise AppError(
-            code="vault_not_found",
-            message=f"Vault path does not exist: {vault_root}",
-            hint="Check the vault path and try again.",
-            details={"vault": str(vault_root)},
-            exit_code=2,
-        )
-
-    root = backet_root(vault_root)
-    if not root.exists():
-        raise AppError(
-            code="not_bootstrapped",
-            message="Vault is not bootstrapped for backet yet.",
-            hint="Run `backet init <vault>` first.",
-            details={"vault": str(vault_root)},
-            exit_code=2,
-        )
+    root = ensure_bootstrapped_vault(vault_root)
 
     issues: list[Issue] = []
     fixed: list[str] = []

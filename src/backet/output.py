@@ -6,6 +6,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.pretty import Pretty
 
 from backet.errors import AppError
 from backet.models import CommandResult
@@ -52,6 +53,10 @@ def emit_success(state: CLIState, result: CommandResult) -> None:
                 console.print(f"    hint: {issue.hint}")
     for key, value in result.data.items():
         if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            console.print(f"{key}:")
+            console.print(Pretty(value, expand_all=True))
             continue
         console.print(f"{key}: {value}")
 
@@ -109,4 +114,3 @@ def ensure_state(ctx: typer.Context) -> CLIState:
     state = CLIState(json_output=False)
     ctx.obj = state
     return state
-

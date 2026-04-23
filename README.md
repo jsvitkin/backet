@@ -51,12 +51,37 @@ See machine-readable output:
 backet doctor /path/to/vault --json
 ```
 
+Index vault Markdown for retrieval:
+
+```bash
+backet index /path/to/vault
+```
+
+Retrieve bounded context bundles:
+
+```bash
+backet context /path/to/vault note Sabine --query "Prince Sabine feeding permits" --json
+backet context /path/to/vault subtree "11. Plotlines" --query "blood doll witnesses"
+```
+
+Rebuild readable memory capsules:
+
+```bash
+backet memory build /path/to/vault
+```
+
 Install or refresh the skill pack from the repository:
 
 ```bash
 backet skills install --repo OWNER/REPO
 backet skills update
 backet skills status --json
+```
+
+For higher-quality local semantic retrieval, install the optional Sentence Transformers backend into the `pipx` environment:
+
+```bash
+pipx inject backet "sentence-transformers>=3.4.1"
 ```
 
 ## Development
