@@ -57,6 +57,14 @@ def state_dir(vault_root: Path) -> Path:
     return backet_root(vault_root) / "state"
 
 
+def blueprints_state_dir(vault_root: Path) -> Path:
+    return state_dir(vault_root) / "blueprints"
+
+
+def blueprint_state_path(vault_root: Path, blueprint_id: str) -> Path:
+    return blueprints_state_dir(vault_root) / f"{blueprint_id}.json"
+
+
 def memory_dir(vault_root: Path) -> Path:
     return backet_root(vault_root) / "memory"
 

@@ -323,7 +323,8 @@ def require_current_index(vault_root: Path, refresh: bool = False) -> IndexState
 def _scan_markdown_notes(vault_root: Path) -> dict[str, str]:
     notes: dict[str, str] = {}
     for relative_path, absolute_path in _scan_markdown_files(vault_root).items():
-        notes[relative_path] = fingerprint_file(absolute_path)
+        text = absolute_path.read_text(encoding="utf-8")
+        notes[relative_path] = fingerprint_text(_strip_frontmatter(text))
     return notes
 
 

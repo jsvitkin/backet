@@ -6,6 +6,7 @@ from typing import Annotated
 import typer
 
 from backet import __version__
+from backet.blueprints import apply_blueprint, blueprint_status
 from backet.errors import AppError
 from backet.indexing import index_vault
 from backet.memory import build_memory_capsules
@@ -19,9 +20,11 @@ app = typer.Typer(no_args_is_help=True, help="backet CLI")
 skills_app = typer.Typer(help="Manage the backet Codex skill pack.")
 memory_app = typer.Typer(help="Manage derived vault memory capsules.")
 rules_app = typer.Typer(help="Manage ingested rulebook PDFs and raw rules retrieval.")
+blueprint_app = typer.Typer(help="Manage workflow blueprint scaffolding and status.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(memory_app, name="memory")
 app.add_typer(rules_app, name="rules")
+app.add_typer(blueprint_app, name="blueprint")
 
 @app.callback(invoke_without_command=True)
 def main(
@@ -170,6 +173,41 @@ def skills_update_command(
     state = ensure_state(ctx)
     try:
         result = update_skills(cli_version=__version__, repository=repo, ref=ref)
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@blueprint_app.command("apply")
+def blueprint_apply_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    blueprint: Annotated[str, typer.Argument(help="Named workflow blueprint identifier.")] = "",
+    slot_paths: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--slot-path",
+            help="Repeatable slot override in `slot-id=relative/path.md` form.",
+        ),
+    ] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = apply_blueprint(vault.resolve(), blueprint_id=blueprint, slot_paths=slot_paths or [])
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@blueprint_app.command("status")
+def blueprint_status_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    blueprint: Annotated[str, typer.Argument(help="Named workflow blueprint identifier.")] = "",
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = blueprint_status(vault.resolve(), blueprint_id=blueprint)
         emit_success(state, result)
     except AppError as error:
         _handle_error(ctx, error)

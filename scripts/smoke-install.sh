@@ -18,12 +18,16 @@ trap cleanup EXIT
 
 PIPX_HOME="${TMP_ROOT}/pipx-home"
 PIPX_BIN_DIR="${TMP_ROOT}/pipx-bin"
+BOOTSTRAP_VENV="${TMP_ROOT}/bootstrap-venv"
 export PIPX_HOME PIPX_BIN_DIR
 export BACKET_CONFIG_HOME="${TMP_ROOT}/machine-config"
 export CODEX_HOME="${TMP_ROOT}/codex-home"
 
-"$PYTHON_BIN" -m pip install --upgrade pip pipx >/dev/null
-"$PYTHON_BIN" -m pipx install "$WHEEL_PATH" >/dev/null
+"$PYTHON_BIN" -m venv "$BOOTSTRAP_VENV"
+BOOTSTRAP_PYTHON="${BOOTSTRAP_VENV}/bin/python"
+
+"$BOOTSTRAP_PYTHON" -m pip install --upgrade pip pipx >/dev/null
+"$BOOTSTRAP_PYTHON" -m pipx install "$WHEEL_PATH" >/dev/null
 PATH="${PIPX_BIN_DIR}:${PATH}"
 export PATH
 
@@ -68,6 +72,17 @@ BACKET_SKILLS_ARCHIVE_URL="file://${ARCHIVE_PATH}" \
   | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok"'
 
 "$BACKET_BIN" --json skills status | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["installed"] is True'
+test -f "${CODEX_HOME}/skills/workflow-authoring/SKILL.md"
+test -f "${CODEX_HOME}/skills/city-foundation/SKILL.md"
+
+"$BACKET_BIN" --json blueprint apply "$VAULT_DIR" city-by-night-v1 \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and len(payload["data"]["slots"]) == 5'
+"$BACKET_BIN" --json blueprint status "$VAULT_DIR" city-by-night-v1 \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and not payload["data"]["missing_slots"]'
+"$BACKET_BIN" --json index "$VAULT_DIR" \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok"'
+"$BACKET_BIN" --json context "$VAULT_DIR" note "1. City Identity & Thematic Structure/1.1 Aesthetic & Mood.md" \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["sources"]'
 
 "$BACKET_PYTHON" - "$RULES_PDF_PATH" <<'PY'
 import sys

@@ -1,0 +1,31 @@
+schema_version: 1
+blueprint_id: city-by-night-v1
+version: "1.0"
+title: City by Night v1
+workflow: city-foundation
+slots:
+  - slot_id: aesthetic-mood
+    title: Aesthetic & Mood
+    default_path: 1. City Identity & Thematic Structure/1.1 Aesthetic & Mood.md
+    template: aesthetic-mood.md
+    priority: 10
+  - slot_id: historical-trauma-memory
+    title: Historical Trauma & Memory
+    default_path: 1. City Identity & Thematic Structure/1.2 Historical Trauma & Memory.md
+    template: historical-trauma-memory.md
+    priority: 20
+  - slot_id: kindred-reputation
+    title: Kindred Reputation (Global Perception)
+    default_path: 1. City Identity & Thematic Structure/1.3 Kindred Reputation (Global Perception).md
+    template: kindred-reputation.md
+    priority: 30
+  - slot_id: human-cultural-tone
+    title: Human Cultural Tone & Urban Personality
+    default_path: 1. City Identity & Thematic Structure/1.4 Human Cultural Tone & Urban Personality.md
+    template: human-cultural-tone.md
+    priority: 40
+  - slot_id: present-night-pressure
+    title: Present-Night Pressure
+    default_path: 2. Cultural & Political Climate/2.0 Present-Night Pressure.md
+    template: present-night-pressure.md
+    priority: 50
