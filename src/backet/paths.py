@@ -34,6 +34,7 @@ def resolve_machine_paths() -> MachinePaths:
     return MachinePaths(
         config_dir=config_dir,
         skill_manifest_path=config_dir / "skills-installed.json",
+        update_cache_path=config_dir / "update-check.json",
         codex_skills_dir=codex_skills_dir,
     )
 

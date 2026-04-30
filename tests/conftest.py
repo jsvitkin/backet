@@ -19,6 +19,7 @@ def isolated_machine_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.setenv("BACKET_CONFIG_HOME", str(tmp_path / "machine-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.setenv("BACKET_EMBEDDING_BACKEND", "hash")
+    monkeypatch.setenv("BACKET_SKIP_UPDATE_CHECK", "1")
 
 
 @pytest.fixture

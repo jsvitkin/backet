@@ -22,6 +22,7 @@ BOOTSTRAP_VENV="${TMP_ROOT}/bootstrap-venv"
 export PIPX_HOME PIPX_BIN_DIR
 export BACKET_CONFIG_HOME="${TMP_ROOT}/machine-config"
 export CODEX_HOME="${TMP_ROOT}/codex-home"
+export BACKET_SKIP_UPDATE_CHECK=1
 
 "$PYTHON_BIN" -m venv "$BOOTSTRAP_VENV"
 BOOTSTRAP_PYTHON="${BOOTSTRAP_VENV}/bin/python"
@@ -40,6 +41,7 @@ RULES_PDF_PATH="${TMP_ROOT}/core-rulebook.pdf"
 mkdir -p "$VAULT_DIR"
 
 "$BACKET_BIN" --json --version | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["data"]["version"]'
+"$BACKET_BIN" --json update check | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and "update_available" in payload["data"]'
 "$BACKET_BIN" --json init "$VAULT_DIR" | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok"'
 
 rm -rf "${VAULT_DIR}/.backet/cache" "${VAULT_DIR}/.backet/temp" "${VAULT_DIR}/.backet/ocr-work"

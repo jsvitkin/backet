@@ -1,12 +1,29 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Annotated
 
+import click
 import typer
 
 from backet import __version__
 from backet.blueprints import apply_blueprint, blueprint_status
+from backet.cli_update import (
+    SKIP_UPDATE_CHECK_ENV,
+    already_current_result,
+    apply_cli_update,
+    check_cli_update,
+    is_interactive_caller,
+    is_update_snoozed,
+    reexec_backet,
+    snooze_update,
+    status_for_version,
+    update_check_result,
+    update_required_error,
+    update_skipped_result,
+)
 from backet.errors import AppError
 from backet.indexing import index_vault
 from backet.memory import build_memory_capsules
@@ -21,10 +38,12 @@ skills_app = typer.Typer(help="Manage the backet Codex skill pack.")
 memory_app = typer.Typer(help="Manage derived vault memory capsules.")
 rules_app = typer.Typer(help="Manage ingested rulebook PDFs and raw rules retrieval.")
 blueprint_app = typer.Typer(help="Manage workflow blueprint scaffolding and status.")
+update_app = typer.Typer(help="Manage the installed backet CLI package.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(memory_app, name="memory")
 app.add_typer(rules_app, name="rules")
 app.add_typer(blueprint_app, name="blueprint")
+app.add_typer(update_app, name="update")
 
 @app.callback(invoke_without_command=True)
 def main(
@@ -35,14 +54,104 @@ def main(
         typer.Option("--version", is_eager=True, help="Show the installed backet version."),
     ] = False,
 ) -> None:
-    ctx.obj = CLIState(json_output=json_output)
+    state = CLIState(json_output=json_output)
+    ctx.obj = state
     if version:
         emit_version(json_output, __version__)
         raise typer.Exit()
+    if not _should_skip_update_preflight(ctx):
+        _run_update_preflight(state)
 
 
 def _handle_error(ctx: typer.Context, error: AppError) -> None:
     emit_error(ensure_state(ctx), error)
+
+
+def _should_skip_update_preflight(ctx: typer.Context) -> bool:
+    skip_value = os.environ.get(SKIP_UPDATE_CHECK_ENV)
+    if skip_value:
+        if skip_value == "rerun":
+            os.environ.pop(SKIP_UPDATE_CHECK_ENV, None)
+        return True
+    return ctx.invoked_subcommand in {None, "update"}
+
+
+def _run_update_preflight(state: CLIState) -> None:
+    status = check_cli_update(__version__, force_refresh=False, fail_on_error=False)
+    if not status.update_available:
+        return
+
+    if is_interactive_caller(json_output=state.json_output):
+        if is_update_snoozed(status):
+            return
+        click.echo(
+            f"A newer Backet CLI is available: {status.installed_version} -> {status.latest_version}",
+            err=True,
+        )
+        if not click.confirm("Update now?", default=True, err=True):
+            snooze_update(status)
+            return
+        try:
+            apply_cli_update(status, capture_output=False)
+        except AppError as error:
+            emit_error(state, error)
+        reexec_backet(sys.argv)
+        raise typer.Exit()
+
+    emit_error(state, update_required_error(status))
+
+
+@update_app.command("check")
+def update_check_command(
+    ctx: typer.Context,
+    fresh: Annotated[bool, typer.Option("--fresh", help="Ignore cached update metadata and check the repository.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = update_check_result(check_cli_update(__version__, force_refresh=fresh, fail_on_error=True))
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@update_app.command("apply")
+def update_apply_command(
+    ctx: typer.Context,
+    yes: Annotated[bool, typer.Option("--yes", help="Apply the update without an interactive confirmation prompt.")] = False,
+    target_version: Annotated[
+        str | None,
+        typer.Option("--version", help="Install a specific Backet CLI version instead of the latest stable release."),
+    ] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        status = (
+            status_for_version(__version__, target_version)
+            if target_version is not None
+            else check_cli_update(__version__, force_refresh=True, fail_on_error=True)
+        )
+        if not status.update_available:
+            emit_success(state, already_current_result(status))
+            return
+        if not yes:
+            if not is_interactive_caller(json_output=state.json_output):
+                raise AppError(
+                    code="cli_update_confirmation_required",
+                    message="Applying a Backet CLI update requires confirmation.",
+                    hint="Re-run with `backet update apply --yes` in non-interactive environments.",
+                    details=status.to_dict(),
+                    exit_code=2,
+                )
+            click.echo(
+                f"A newer Backet CLI is available: {status.installed_version} -> {status.latest_version}",
+                err=True,
+            )
+            if not click.confirm("Update now?", default=True, err=True):
+                emit_success(state, update_skipped_result(status))
+                return
+        emit_success(state, apply_cli_update(status, capture_output=state.json_output))
+    except AppError as error:
+        _handle_error(ctx, error)
 
 
 @app.command("init")

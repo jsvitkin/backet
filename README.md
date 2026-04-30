@@ -22,7 +22,7 @@ Run the installer from any terminal location. It does not need to run inside an 
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.2/backet-0.1.2-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.3/backet-0.1.3-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
@@ -30,10 +30,28 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.2/backet-0.1.2-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.3/backet-0.1.3-py3-none-any.whl
 ```
 
-Upgrade on macOS or Linux:
+After the first install, update the CLI through Backet itself:
+
+```bash
+backet update check
+backet update apply
+```
+
+Normal interactive `backet` commands also check for newer stable CLI releases before doing command work. When an update is available, Backet prompts, applies the update through `pipx` if you accept, and reruns the original command under the updated CLI.
+
+Agent and other non-interactive calls do not get prompted. When an update is required, Backet exits before command work with an `update_required` error. The retry contract is:
+
+```bash
+backet update apply --yes
+# then rerun the original backet command
+```
+
+Update checks are cached in Backet's machine-level config directory, not in any vault. Declining an interactive prompt snoozes that specific latest version for a short period; a newer future release will still be offered. CLI package updates use the supported `pipx install --force <release-wheel>` boundary. Set `BACKET_PIPX` if Backet needs a specific `pipx` command.
+
+The legacy macOS/Linux upgrade script remains available for repair or reinstall flows:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/upgrade.sh | bash
@@ -109,7 +127,7 @@ backet skills update
 backet --json skills status
 ```
 
-By default, release installs fetch the skill pack from the matching release tag. Use `backet skills install --ref main` only when you intentionally want the current `main` branch skill pack.
+By default, release installs fetch the skill pack from the matching release tag. Use `backet skills install --ref main` only when you intentionally want the current `main` branch skill pack. `backet update apply` updates the CLI package; `backet skills update` refreshes installed skills and does not reinstall the CLI.
 
 Scaffold and inspect the default city workflow targets:
 
@@ -193,13 +211,13 @@ python -m build --wheel
 Run the install smoke test against a built wheel on macOS, Linux, WSL, or Git Bash:
 
 ```bash
-scripts/smoke-install.sh dist/backet-0.1.2-py3-none-any.whl "$PWD"
+scripts/smoke-install.sh dist/backet-0.1.3-py3-none-any.whl "$PWD"
 ```
 
 On native Windows PowerShell, validate the built wheel with `pipx`:
 
 ```powershell
-py -3 -m pipx install --force .\dist\backet-0.1.2-py3-none-any.whl
+py -3 -m pipx install --force .\dist\backet-0.1.3-py3-none-any.whl
 backet --version
 py -3 -m pipx uninstall backet
 ```
