@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import shlex
+from typing import Any
+
+from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+
+import backet.output as output
+from backet.models import CommandResult
+from backet.rules import RulesIngestProgressEvent
+
+PHASE_LABELS = {
+    "inspect": "Inspecting PDF",
+    "extract": "Extracting pages",
+    "ocr": "OCR fallback",
+    "fingerprint": "Fingerprinting PDF",
+    "store": "Storing chunks",
+    "index": "Building search index",
+    "audit": "Summarizing quality",
+}
+
+
+class RulesIngestProgressReporter:
+    def __init__(self, console: Console | None = None) -> None:
+        self.console = console or Console(stderr=True)
+        self.interactive = self.console.is_terminal
+        self._progress: Progress | None = None
+        self._task_id: int | None = None
+        self._last_phase: str | None = None
+        self._plain_buckets: dict[str, int] = {}
+
+    def __enter__(self) -> RulesIngestProgressReporter:
+        if self.interactive:
+            self._progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                TextColumn("{task.fields[extra]}"),
+                console=self.console,
+                transient=False,
+            )
+            self._progress.start()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._progress is not None:
+            self._progress.stop()
+
+    def __call__(self, event: RulesIngestProgressEvent) -> None:
+        if event.phase == "start":
+            self._print_start(event)
+            return
+        if self.interactive:
+            self._render_interactive(event)
+            return
+        self._render_plain(event)
+
+    def _print_start(self, event: RulesIngestProgressEvent) -> None:
+        details = event.details
+        title = _detail(details, "book_title", "rulebook")
+        book_id = _detail(details, "book_id", "unknown")
+        tier = _detail(details, "tier", "unknown")
+        selected_pages = _detail(details, "selected_pages", "unknown")
+        page_count = details.get("page_count")
+        pages_label = f"{selected_pages} selected"
+        if page_count:
+            pages_label += f" of {page_count}"
+        pages_spec = details.get("pages_spec")
+        if pages_spec:
+            pages_label += f" ({pages_spec})"
+
+        lines = [
+            f"Ingesting {title}",
+            f"Book:   {book_id} ({tier})",
+            f"Source: {_detail(details, 'pdf_path', 'unknown')}",
+            f"Pages:  {pages_label}",
+            f"Target: {_detail(details, 'rules_db', 'unknown')}",
+        ]
+        for line in lines:
+            self.console.print(line, markup=False, highlight=False)
+
+    def _render_interactive(self, event: RulesIngestProgressEvent) -> None:
+        if self._progress is None:
+            return
+        description = _event_label(event)
+        total = _progress_total(event)
+        current = _progress_current(event, total)
+        extra = _format_counters(event.counters)
+        if self._task_id is None:
+            self._task_id = self._progress.add_task(description, total=total, completed=current, extra=extra)
+            return
+        self._progress.update(self._task_id, description=description, total=total, completed=current, extra=extra)
+
+    def _render_plain(self, event: RulesIngestProgressEvent) -> None:
+        if not self._should_print_plain(event):
+            return
+        self.console.print(_plain_event_line(event), markup=False, highlight=False)
+
+    def _should_print_plain(self, event: RulesIngestProgressEvent) -> bool:
+        if event.phase == "ocr":
+            self._last_phase = event.phase
+            return True
+
+        phase_changed = event.phase != self._last_phase
+        if phase_changed:
+            self._last_phase = event.phase
+            self._plain_buckets[event.phase] = -1
+            return True
+
+        if event.current is None or event.total is None or event.total <= 0:
+            return False
+
+        if event.current >= event.total:
+            return True
+
+        bucket = int((event.current / event.total) * 10)
+        last_bucket = self._plain_buckets.get(event.phase, -1)
+        if bucket > last_bucket:
+            self._plain_buckets[event.phase] = bucket
+            return True
+        return False
+
+
+def emit_rules_ingest_report(result: CommandResult) -> None:
+    data = result.data
+    title = str(data.get("book_title") or data.get("book_id") or "rulebook")
+    book_id = str(data.get("book_id") or "unknown")
+    tier = str(data.get("tier") or "unknown")
+    pages_processed = int(data.get("pages_processed") or 0)
+    chunk_count = int(data.get("chunk_count") or 0)
+    scope_tags = _list_values(data.get("scope_tags"))
+    ocr_pages = _int_values(data.get("ocr_used_on_pages"))
+    suspect_pages = _int_values(data.get("suspect_pages"))
+
+    output.console.print(f"[bold green]Ingested {title}[/bold green]")
+    output.console.print("")
+    output.console.print(f"Book:    {book_id} ({tier})")
+    if scope_tags:
+        output.console.print(f"Scope:   {', '.join(scope_tags)}")
+    output.console.print(f"Pages:   {pages_processed:,} processed")
+    output.console.print(f"Chunks:  {chunk_count:,} stored")
+    if ocr_pages:
+        output.console.print(f"OCR:     {_page_count_label(len(ocr_pages))} required OCR")
+    if suspect_pages:
+        output.console.print(f"Review:  {_page_count_label(len(suspect_pages))} {_review_verb(len(suspect_pages))} review")
+    output.console.print("")
+    output.console.print(f"Stored:  {data.get('rules_db')}")
+    output.console.print(f"Source:  {data.get('pdf_path')}")
+    if result.created:
+        output.console.print("Created:")
+        for item in result.created:
+            output.console.print(f"  - {item}")
+
+    if ocr_pages:
+        output.console.print("")
+        output.console.print(f"Pages requiring OCR: {_page_preview(ocr_pages)}")
+    if suspect_pages:
+        output.console.print("")
+        output.console.print("[bold yellow]Review recommended[/bold yellow]")
+        output.console.print(f"Pages needing review: {_page_preview(suspect_pages)}")
+        output.console.print(f"Run: {audit_command(data)}")
+
+
+def audit_command(data: dict[str, Any]) -> str:
+    vault = shlex.quote(str(data.get("vault") or "."))
+    book_id = shlex.quote(str(data.get("book_id") or ""))
+    return f"backet rules audit {vault} --book-id {book_id}"
+
+
+def _event_label(event: RulesIngestProgressEvent) -> str:
+    if event.phase == "ocr":
+        return event.message
+    return PHASE_LABELS.get(event.phase, event.message or event.phase.title())
+
+
+def _plain_event_line(event: RulesIngestProgressEvent) -> str:
+    parts = [f"[rules ingest] {_event_label(event)}"]
+    if event.current is not None and event.total is not None:
+        parts.append(f"{event.current}/{event.total}")
+    counters = _format_counters(event.counters)
+    if counters:
+        parts.append(f"({counters})")
+    return " ".join(parts)
+
+
+def _format_counters(counters: dict[str, int]) -> str:
+    labels = {
+        "ocr_pages": "OCR",
+        "review_pages": "review",
+        "chunks": "chunks",
+    }
+    parts = [f"{labels.get(key, key)}: {value:,}" for key, value in counters.items() if value]
+    return ", ".join(parts)
+
+
+def _progress_total(event: RulesIngestProgressEvent) -> int:
+    if event.total is None or event.total <= 0:
+        return 1
+    return event.total
+
+
+def _progress_current(event: RulesIngestProgressEvent, total: int) -> int:
+    if event.current is None:
+        return 0
+    return min(max(event.current, 0), total)
+
+
+def _detail(details: dict[str, Any], key: str, default: str) -> str:
+    value = details.get(key)
+    return str(value) if value not in (None, "") else default
+
+
+def _list_values(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item)]
+
+
+def _int_values(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result: list[int] = []
+    for item in value:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _page_preview(page_numbers: list[int], limit: int = 10) -> str:
+    preview = ", ".join(str(page) for page in page_numbers[:limit])
+    remaining = len(page_numbers) - limit
+    if remaining > 0:
+        return f"{preview}, +{remaining} more"
+    return preview
+
+
+def _page_count_label(count: int) -> str:
+    noun = "page" if count == 1 else "pages"
+    return f"{count:,} {noun}"
+
+
+def _review_verb(count: int) -> str:
+    return "needs" if count == 1 else "need"

@@ -22,7 +22,7 @@ Run the installer from any terminal location. It does not need to run inside an 
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.3/backet-0.1.3-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.4/backet-0.1.4-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
@@ -30,7 +30,7 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.3/backet-0.1.3-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.4/backet-0.1.4-py3-none-any.whl
 ```
 
 After the first install, update the CLI through Backet itself:
@@ -148,6 +148,8 @@ backet --json rules query /path/to/vault "feeding rights blood doll" --scope-tag
 backet rules audit /path/to/vault
 ```
 
+Human `rules ingest` runs show progress by default while the PDF is inspected, extracted, OCR-processed, stored, indexed, and summarized. Interactive terminals use live progress; redirected non-JSON runs print plain phase lines. Use `--json` when a script or agent needs deterministic machine-readable output.
+
 Source PDFs stay outside the vault. `backet` stores the ingested rules corpus under `.backet/rules/` so it can travel with the vault backup.
 
 OCR fallback needs Tesseract on the local machine. On macOS:
@@ -211,13 +213,13 @@ python -m build --wheel
 Run the install smoke test against a built wheel on macOS, Linux, WSL, or Git Bash:
 
 ```bash
-scripts/smoke-install.sh dist/backet-0.1.3-py3-none-any.whl "$PWD"
+scripts/smoke-install.sh dist/backet-0.1.4-py3-none-any.whl "$PWD"
 ```
 
 On native Windows PowerShell, validate the built wheel with `pipx`:
 
 ```powershell
-py -3 -m pipx install --force .\dist\backet-0.1.3-py3-none-any.whl
+py -3 -m pipx install --force .\dist\backet-0.1.4-py3-none-any.whl
 backet --version
 py -3 -m pipx uninstall backet
 ```

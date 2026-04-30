@@ -30,6 +30,7 @@ from backet.memory import build_memory_capsules
 from backet.output import CLIState, emit_error, emit_success, emit_version, ensure_state
 from backet.retrieval import build_context_bundle
 from backet.rules import audit_rules, ingest_rulebook, query_rules, repair_rules
+from backet.rules_output import RulesIngestProgressReporter, emit_rules_ingest_report
 from backet.skills import install_skills, skills_status, update_skills
 from backet.vault import diagnose_vault, initialize_vault
 
@@ -367,17 +368,33 @@ def rules_ingest_command(
                 hint="Re-run the command with `--book-id some-book-id`.",
                 exit_code=2,
             )
-        result = ingest_rulebook(
-            vault_root=vault.resolve(),
-            pdf_path=pdf.resolve(),
-            book_id=book_id,
-            title=title,
-            tier=tier,
-            scope_tags=scope_tags or [],
-            force_ocr=force_ocr,
-            pages_spec=pages,
-        )
-        emit_success(state, result)
+        if state.json_output:
+            result = ingest_rulebook(
+                vault_root=vault.resolve(),
+                pdf_path=pdf.resolve(),
+                book_id=book_id,
+                title=title,
+                tier=tier,
+                scope_tags=scope_tags or [],
+                force_ocr=force_ocr,
+                pages_spec=pages,
+            )
+            emit_success(state, result)
+            return
+
+        with RulesIngestProgressReporter() as progress:
+            result = ingest_rulebook(
+                vault_root=vault.resolve(),
+                pdf_path=pdf.resolve(),
+                book_id=book_id,
+                title=title,
+                tier=tier,
+                scope_tags=scope_tags or [],
+                force_ocr=force_ocr,
+                pages_spec=pages,
+                progress=progress,
+            )
+        emit_rules_ingest_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 

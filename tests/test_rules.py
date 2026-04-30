@@ -9,7 +9,7 @@ import pytest
 
 from backet.cli import app
 from backet.errors import AppError
-from backet.rules import normalize_scope_tags, open_rules_connection, parse_pages_spec, split_rule_chunks
+from backet.rules import ingest_rulebook, normalize_scope_tags, open_rules_connection, parse_pages_spec, split_rule_chunks
 
 
 def test_parse_pages_spec_and_scope_tag_normalization() -> None:
@@ -62,6 +62,8 @@ def test_rules_ingest_clean_pdf_and_query_metadata(runner, tmp_path: Path) -> No
     )
 
     assert ingest_result.exit_code == 0
+    assert "Ingesting Core Rulebook" not in ingest_result.stdout
+    assert "[rules ingest]" not in ingest_result.stdout
     ingest_payload = json.loads(ingest_result.stdout)
     assert ingest_payload["data"]["book_id"] == "core-v5"
     assert ingest_payload["data"]["ocr_used_on_pages"] == []
@@ -115,8 +117,115 @@ def test_rules_ingest_uses_ocr_fallback_for_image_only_pdf(
     )
 
     assert result.exit_code == 0
+    assert "Ingesting Camarilla Guide" not in result.stdout
+    assert "[rules ingest]" not in result.stdout
     payload = json.loads(result.stdout)
     assert payload["data"]["ocr_used_on_pages"] == [1]
+
+
+def test_rules_ingest_emits_progress_events(runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "progress.pdf",
+        [
+            _rule_page("First Page", "Direct text exists but OCR is forced for progress coverage."),
+            _rule_page("Second Page", "This page will become suspect after OCR."),
+        ],
+    )
+    monkeypatch.setattr(
+        "backet.rules._ocr_page",
+        lambda page, pdf_path, page_number: (
+            "Readable OCR text with enough words and letters to pass the confidence checks. " * 3
+            if page_number == 1
+            else "bad"
+        ),
+    )
+    events = []
+
+    result = ingest_rulebook(
+        vault_root=vault,
+        pdf_path=pdf_path,
+        book_id="progress-book",
+        title="Progress Book",
+        tier="core",
+        scope_tags=[],
+        force_ocr=True,
+        progress=events.append,
+    )
+
+    phases = [event.phase for event in events]
+    assert result.data["ocr_used_on_pages"] == [1, 2]
+    assert phases[0] == "inspect"
+    assert "start" in phases
+    assert "fingerprint" in phases
+    assert "store" in phases
+    assert "index" in phases
+    assert "audit" in phases
+    assert any(event.phase == "ocr" and event.details["page_number"] == 1 for event in events)
+    assert any(event.phase == "ocr" and event.details["page_number"] == 2 for event in events)
+
+    extraction_complete = [event for event in events if event.phase == "extract" and event.current == 2][-1]
+    assert extraction_complete.total == 2
+    assert extraction_complete.counters["ocr_pages"] == 2
+    assert extraction_complete.counters["review_pages"] == 1
+
+    store_complete = [event for event in events if event.phase == "store" and event.current == 2][-1]
+    assert store_complete.counters["chunks"] >= 1
+    assert any(event.phase == "index" and event.current == event.total for event in events)
+    assert any(event.phase == "audit" and event.current == 1 for event in events)
+
+
+def test_rules_ingest_human_output_shows_progress_and_friendly_report(
+    runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "human-progress.pdf",
+        [
+            _rule_page("First Page", "Direct text exists but OCR is forced."),
+            _rule_page("Second Page", "This page will become suspect after OCR."),
+        ],
+    )
+    monkeypatch.setattr(
+        "backet.rules._ocr_page",
+        lambda page, pdf_path, page_number: (
+            "Readable OCR text with enough words and letters to pass the confidence checks. " * 3
+            if page_number == 1
+            else "bad"
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "rules",
+            "ingest",
+            str(vault),
+            str(pdf_path),
+            "--book-id",
+            "human-progress",
+            "--title",
+            "Human Progress",
+            "--tier",
+            "core",
+            "--force-ocr",
+        ],
+    )
+
+    assert result.exit_code == 0
+    combined_output = result.stdout + getattr(result, "stderr", "")
+    assert "Ingesting Human Progress" in combined_output
+    assert "[rules ingest] Extracting pages" in combined_output
+    assert "OCR fallback on page 1" in combined_output
+    assert "Ingested Human Progress" in combined_output
+    assert "OCR:     2 pages required OCR" in combined_output
+    assert "Review:  1 page needs review" in combined_output
+    assert "Pages requiring OCR: 1, 2" in combined_output
+    assert "Review recommended" in combined_output
+    assert "backet rules audit" in combined_output
+    assert "ocr_used_on_pages" not in combined_output
+    assert "suspect_pages" not in combined_output
+    assert "\x1b[" not in combined_output
 
 
 def test_rules_query_applies_supplement_precedence_and_core_fallback(runner, tmp_path: Path) -> None:

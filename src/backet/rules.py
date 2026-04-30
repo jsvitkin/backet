@@ -8,10 +8,10 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable
 
 from backet.errors import AppError
 from backet.models import CommandResult
@@ -37,6 +37,43 @@ class ExtractedPage:
     suspect: bool
     quality_flags: list[str]
     section_label: str
+
+
+@dataclass(slots=True)
+class RulesIngestProgressEvent:
+    phase: str
+    message: str
+    current: int | None = None
+    total: int | None = None
+    counters: dict[str, int] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+RulesIngestProgressCallback = Callable[[RulesIngestProgressEvent], None]
+
+
+def _emit_progress(
+    progress: RulesIngestProgressCallback | None,
+    *,
+    phase: str,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+    counters: dict[str, int] | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    if progress is None:
+        return
+    progress(
+        RulesIngestProgressEvent(
+            phase=phase,
+            message=message,
+            current=current,
+            total=total,
+            counters=counters or {},
+            details=details or {},
+        )
+    )
 
 
 @dataclass(slots=True)
@@ -156,6 +193,7 @@ def ingest_rulebook(
     scope_tags: list[str],
     force_ocr: bool = False,
     pages_spec: str | None = None,
+    progress: RulesIngestProgressCallback | None = None,
 ) -> CommandResult:
     ensure_bootstrapped_vault(vault_root)
     normalized_tier = tier.strip().lower()
@@ -185,11 +223,48 @@ def ingest_rulebook(
             exit_code=2,
         )
 
+    resolved_title = title or pdf_path.stem
+    rules_db = rules_db_path(vault_root)
+    _emit_progress(
+        progress,
+        phase="inspect",
+        message="Inspecting rulebook PDF",
+        current=0,
+        total=1,
+        details={
+            "book_id": book_id,
+            "book_title": resolved_title,
+            "tier": normalized_tier,
+            "pdf_path": str(pdf_path.resolve()),
+            "rules_db": str(rules_db),
+            "vault": str(vault_root),
+        },
+    )
+
     fitz = _require_pymupdf()
     document = fitz.open(str(pdf_path))
     try:
+        page_count = document.page_count
         page_numbers = parse_pages_spec(pages_spec, document.page_count)
-        extracted_pages = _extract_pages(document, pdf_path, page_numbers, force_ocr=force_ocr)
+        _emit_progress(
+            progress,
+            phase="start",
+            message="Starting rulebook ingestion",
+            current=0,
+            total=len(page_numbers),
+            details={
+                "book_id": book_id,
+                "book_title": resolved_title,
+                "tier": normalized_tier,
+                "pdf_path": str(pdf_path.resolve()),
+                "rules_db": str(rules_db),
+                "vault": str(vault_root),
+                "pages_spec": pages_spec,
+                "page_count": page_count,
+                "selected_pages": len(page_numbers),
+            },
+        )
+        extracted_pages = _extract_pages(document, pdf_path, page_numbers, force_ocr=force_ocr, progress=progress)
     finally:
         document.close()
 
@@ -202,15 +277,16 @@ def ingest_rulebook(
             exit_code=2,
         )
 
+    _emit_progress(progress, phase="fingerprint", message="Fingerprinting PDF", current=0, total=1)
     pdf_fingerprint = fingerprint_bytes(pdf_path.read_bytes())
-    resolved_title = title or pdf_path.stem
+    _emit_progress(progress, phase="fingerprint", message="Fingerprinted PDF", current=1, total=1)
     entry = BookRegistryEntry(
         book_id=book_id,
         title=resolved_title,
         pdf_path=str(pdf_path.resolve()),
         tier=normalized_tier,
         scope_tags=normalized_tags,
-        page_count=document_page_count(pdf_path),
+        page_count=page_count,
         pdf_fingerprint=pdf_fingerprint,
     )
 
@@ -221,8 +297,10 @@ def ingest_rulebook(
 
     with closing(open_rules_connection(vault_root)) as connection:
         _upsert_book(connection, entry)
-        _replace_pages(connection, entry, extracted_pages, pages_spec=pages_spec)
+        _replace_pages(connection, entry, extracted_pages, pages_spec=pages_spec, progress=progress)
+        _emit_progress(progress, phase="audit", message="Summarizing ingest quality", current=0, total=1)
         audit_summary = _audit_summary(connection, book_id)
+        _emit_progress(progress, phase="audit", message="Summarized ingest quality", current=1, total=1)
         connection.commit()
 
     return CommandResult(
@@ -438,18 +516,61 @@ def _require_pymupdf():
     return fitz
 
 
-def _extract_pages(document, pdf_path: Path, page_numbers: list[int], force_ocr: bool) -> list[ExtractedPage]:
+def _extract_pages(
+    document,
+    pdf_path: Path,
+    page_numbers: list[int],
+    force_ocr: bool,
+    progress: RulesIngestProgressCallback | None = None,
+) -> list[ExtractedPage]:
     extracted: list[ExtractedPage] = []
-    for page_number in page_numbers:
+    total = len(page_numbers)
+    ocr_pages = 0
+    review_pages = 0
+    counters = {"ocr_pages": ocr_pages, "review_pages": review_pages}
+    _emit_progress(progress, phase="extract", message="Extracting pages", current=0, total=total, counters=counters)
+    for index, page_number in enumerate(page_numbers, start=1):
         page = document.load_page(page_number - 1)
         direct_text = normalize_text(page.get_text("text"))
         direct_result = _build_page_result(page_number, direct_text, extraction_method="direct")
         if force_ocr or direct_result.suspect:
+            _emit_progress(
+                progress,
+                phase="ocr",
+                message=f"OCR fallback on page {page_number}",
+                current=index - 1,
+                total=total,
+                counters={"ocr_pages": ocr_pages, "review_pages": review_pages},
+                details={"page_number": page_number},
+            )
             ocr_text = _ocr_page(page, pdf_path=pdf_path, page_number=page_number)
             ocr_result = _build_page_result(page_number, ocr_text, extraction_method="ocr")
+            ocr_pages += 1
+            if ocr_result.suspect:
+                review_pages += 1
             extracted.append(ocr_result)
+            _emit_progress(
+                progress,
+                phase="extract",
+                message=f"Extracted page {page_number}",
+                current=index,
+                total=total,
+                counters={"ocr_pages": ocr_pages, "review_pages": review_pages},
+                details={"page_number": page_number},
+            )
             continue
+        if direct_result.suspect:
+            review_pages += 1
         extracted.append(direct_result)
+        _emit_progress(
+            progress,
+            phase="extract",
+            message=f"Extracted page {page_number}",
+            current=index,
+            total=total,
+            counters={"ocr_pages": ocr_pages, "review_pages": review_pages},
+            details={"page_number": page_number},
+        )
     return extracted
 
 
@@ -553,6 +674,7 @@ def _replace_pages(
     entry: BookRegistryEntry,
     pages: list[ExtractedPage],
     pages_spec: str | None,
+    progress: RulesIngestProgressCallback | None = None,
 ) -> None:
     page_numbers = [page.page_number for page in pages]
     placeholders = ", ".join("?" for _ in page_numbers)
@@ -568,7 +690,17 @@ def _replace_pages(
     connection.execute("DELETE FROM rule_chunks_fts WHERE book_id = ?", (entry.book_id,))
 
     # FTS gets rebuilt for the whole book after inserts to keep it consistent.
-    for page in pages:
+    total_pages = len(pages)
+    chunk_count = 0
+    _emit_progress(
+        progress,
+        phase="store",
+        message="Storing extracted pages and chunks",
+        current=0,
+        total=total_pages,
+        counters={"chunks": chunk_count},
+    )
+    for index, page in enumerate(pages, start=1):
         connection.execute(
             """
             INSERT INTO page_audit (
@@ -592,7 +724,8 @@ def _replace_pages(
                 timestamp_now(),
             ),
         )
-        for chunk_index, chunk_text in enumerate(split_rule_chunks(page.text), start=1):
+        page_chunks = split_rule_chunks(page.text)
+        for chunk_index, chunk_text in enumerate(page_chunks, start=1):
             excerpt = summarize_text(chunk_text)
             content_hash = fingerprint_text(chunk_text)
             connection.execute(
@@ -618,6 +751,16 @@ def _replace_pages(
                     content_hash,
                 ),
             )
+        chunk_count += len(page_chunks)
+        _emit_progress(
+            progress,
+            phase="store",
+            message=f"Stored page {page.page_number}",
+            current=index,
+            total=total_pages,
+            counters={"chunks": chunk_count},
+            details={"page_number": page.page_number},
+        )
     chunk_rows = connection.execute(
         """
         SELECT rc.id, rc.book_id, b.book_title, b.tier, rc.scope_tags_json, rc.section_label, rc.content
@@ -628,7 +771,14 @@ def _replace_pages(
         """,
         (entry.book_id,),
     ).fetchall()
-    for row in chunk_rows:
+    _emit_progress(
+        progress,
+        phase="index",
+        message="Building rules search index",
+        current=0,
+        total=len(chunk_rows),
+    )
+    for index, row in enumerate(chunk_rows, start=1):
         connection.execute(
             """
             INSERT INTO rule_chunks_fts (chunk_id, book_id, book_title, tier, scope_tags, section_label, content)
@@ -643,6 +793,13 @@ def _replace_pages(
                 row["section_label"],
                 row["content"],
             ),
+        )
+        _emit_progress(
+            progress,
+            phase="index",
+            message="Building rules search index",
+            current=index,
+            total=len(chunk_rows),
         )
 
 

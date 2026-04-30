@@ -50,7 +50,7 @@ def fake_latest_response(version: str, *, prerelease: bool = False) -> dict[str,
     }
 
 
-def available_status(installed: str = "0.1.3", latest: str = "0.1.4") -> UpdateStatus:
+def available_status(installed: str = "0.1.4", latest: str = "0.1.5") -> UpdateStatus:
     return UpdateStatus(
         installed_version=installed,
         latest_version=latest,
@@ -170,7 +170,7 @@ def test_declined_update_snooze_only_applies_to_that_version() -> None:
 
 
 def test_update_check_command_supports_json_and_human_output(runner, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.4")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.5")))
 
     json_result = runner.invoke(app, ["--json", "update", "check", "--fresh"])
     human_result = runner.invoke(app, ["update", "check"])
@@ -178,7 +178,7 @@ def test_update_check_command_supports_json_and_human_output(runner, monkeypatch
     assert json_result.exit_code == 0
     payload = json.loads(json_result.stdout)
     assert payload["data"]["update_available"] is True
-    assert payload["data"]["latest_version"] == "0.1.4"
+    assert payload["data"]["latest_version"] == "0.1.5"
     assert human_result.exit_code == 0
     assert "A Backet update is available" in human_result.output
 
@@ -188,7 +188,7 @@ def test_update_apply_yes_runs_pipx_install_with_resolved_wheel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[list[str]] = []
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.4")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.5")))
     monkeypatch.setenv("BACKET_PIPX", "/tmp/pipx")
 
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -207,7 +207,7 @@ def test_update_apply_yes_runs_pipx_install_with_resolved_wheel(
             "/tmp/pipx",
             "install",
             "--force",
-            "https://github.com/jsvitkin/backet/releases/download/v0.1.4/backet-0.1.4-py3-none-any.whl",
+            "https://github.com/jsvitkin/backet/releases/download/v0.1.5/backet-0.1.5-py3-none-any.whl",
         ]
     ]
 
@@ -216,7 +216,7 @@ def test_update_apply_reports_already_current_without_reinstalling(
     runner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.3")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.4")))
     monkeypatch.setattr(cli_update.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("pipx should not run"))
 
     result = runner.invoke(app, ["--json", "update", "apply", "--yes"])
@@ -228,7 +228,7 @@ def test_update_apply_reports_already_current_without_reinstalling(
 
 
 def test_update_apply_reports_unsupported_updater(runner, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.4")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.5")))
     monkeypatch.delenv("BACKET_PIPX", raising=False)
     monkeypatch.setattr(cli_update.shutil, "which", lambda _name: None)
 
@@ -246,8 +246,8 @@ def test_normal_commands_run_preflight_before_command_work(runner, tmp_path: Pat
     def fake_check(*_args: object, **_kwargs: object) -> UpdateStatus:
         calls.append("checked")
         return UpdateStatus(
-            installed_version="0.1.3",
-            latest_version="0.1.3",
+            installed_version="0.1.4",
+            latest_version="0.1.4",
             update_available=False,
             repository="jsvitkin/backet",
         )
@@ -268,8 +268,8 @@ def test_update_commands_and_version_skip_preflight(runner, monkeypatch: pytest.
         backet.cli,
         "check_cli_update",
         lambda *_args, **_kwargs: UpdateStatus(
-            installed_version="0.1.3",
-            latest_version="0.1.3",
+            installed_version="0.1.4",
+            latest_version="0.1.4",
             update_available=False,
             repository="jsvitkin/backet",
         ),
@@ -300,7 +300,7 @@ def test_interactive_preflight_accepts_update_and_reexecs(
     result = runner.invoke(app, ["init", str(tmp_path)], input="y\n")
 
     assert result.exit_code == 0
-    assert applied and applied[0].latest_version == "0.1.4"
+    assert applied and applied[0].latest_version == "0.1.5"
     assert reexeced
 
 
@@ -339,7 +339,7 @@ def test_interactive_preflight_decline_snoozes_and_continues(
     result = runner.invoke(app, ["init", str(tmp_path)], input="n\n")
 
     assert result.exit_code == 0
-    assert snoozed and snoozed[0].latest_version == "0.1.4"
+    assert snoozed and snoozed[0].latest_version == "0.1.5"
     assert (tmp_path / ".backet").exists()
 
 
@@ -358,7 +358,7 @@ def test_agent_preflight_emits_update_required_before_command_work(
     assert payload["error"]["code"] == "update_required"
     assert payload["error"]["details"]["update_command"] == "backet update apply --yes"
     assert payload["error"]["details"]["retry_after_update"] is True
-    assert payload["error"]["details"]["latest_version"] == "0.1.4"
+    assert payload["error"]["details"]["latest_version"] == "0.1.5"
 
 
 def test_offline_preflight_without_cached_update_continues_normal_command(
