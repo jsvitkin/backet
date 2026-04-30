@@ -105,7 +105,10 @@ def _run_update_preflight(state: CLIState) -> None:
 @update_app.command("check")
 def update_check_command(
     ctx: typer.Context,
-    fresh: Annotated[bool, typer.Option("--fresh", help="Ignore cached update metadata and check the repository.")] = False,
+    fresh: Annotated[
+        bool,
+        typer.Option("--fresh", help="Deprecated; update checks always query the repository."),
+    ] = False,
 ) -> None:
     state = ensure_state(ctx)
     try:

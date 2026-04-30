@@ -40,5 +40,5 @@ class CommandResult:
 class MachinePaths:
     config_dir: Path
     skill_manifest_path: Path
-    update_cache_path: Path
+    update_state_path: Path
     codex_skills_dir: Path

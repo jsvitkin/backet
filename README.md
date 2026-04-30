@@ -49,7 +49,7 @@ backet update apply --yes
 # then rerun the original backet command
 ```
 
-Update checks are cached in Backet's machine-level config directory, not in any vault. Declining an interactive prompt snoozes that specific latest version for a short period; a newer future release will still be offered. CLI package updates use the supported `pipx install --force <release-wheel>` boundary. Set `BACKET_PIPX` if Backet needs a specific `pipx` command.
+Update checks always query the configured repository and do not use cached release metadata. Declining an interactive prompt records a short machine-level snooze for that specific latest version; a newer future release will still be offered. CLI package updates use the supported `pipx install --force <release-wheel>` boundary. Set `BACKET_PIPX` if Backet needs a specific `pipx` command.
 
 The legacy macOS/Linux upgrade script remains available for repair or reinstall flows:
 

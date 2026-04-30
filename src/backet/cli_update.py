@@ -19,8 +19,7 @@ from backet.errors import AppError
 from backet.models import CommandResult
 from backet.paths import resolve_machine_paths
 
-UPDATE_CACHE_SCHEMA_VERSION = 1
-UPDATE_CACHE_TTL = timedelta(hours=24)
+UPDATE_STATE_SCHEMA_VERSION = 1
 UPDATE_SNOOZE_TTL = timedelta(hours=24)
 UPDATE_REQUIRED_EXIT_CODE = 75
 SKIP_UPDATE_CHECK_ENV = "BACKET_SKIP_UPDATE_CHECK"
@@ -66,25 +65,19 @@ def check_cli_update(
 ) -> UpdateStatus:
     metadata = load_distribution_metadata()
     repository = metadata.resolved_repository()
-    cache_path = resolve_machine_paths().update_cache_path
     current_time = now or _utc_now()
-    cache = read_update_cache(cache_path)
-
-    if not force_refresh and _cache_is_fresh(cache, current_time):
-        return _status_from_cache(cache, installed_version, metadata, source="cache")
+    # Retain the flag for CLI/API compatibility; release discovery is always live.
+    _ = force_refresh
 
     try:
         status = discover_latest_release(installed_version, metadata=metadata, now=current_time)
-        write_update_cache(status, cache_path=cache_path, existing_cache=cache)
         return status
     except AppError as exc:
         if fail_on_error:
             raise
-        return _fallback_status_from_error(
+        return _unknown_status_from_error(
             exc,
-            cache=cache,
             installed_version=installed_version,
-            metadata=metadata,
             repository=repository,
         )
     except Exception as exc:  # pragma: no cover - defensive around urllib/runtime edges
@@ -96,11 +89,9 @@ def check_cli_update(
                 details={"error": str(exc)},
                 exit_code=1,
             ) from exc
-        return _fallback_status_from_error(
+        return _unknown_status_from_error(
             exc,
-            cache=cache,
             installed_version=installed_version,
-            metadata=metadata,
             repository=repository,
         )
 
@@ -298,68 +289,39 @@ def update_required_error(status: UpdateStatus) -> AppError:
     )
 
 
-def read_update_cache(cache_path: Path | None = None) -> dict[str, Any] | None:
-    path = cache_path or resolve_machine_paths().update_cache_path
+def read_update_state(state_path: Path | None = None) -> dict[str, Any] | None:
+    path = state_path or resolve_machine_paths().update_state_path
     if not path.exists():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if payload.get("schema_version") != UPDATE_CACHE_SCHEMA_VERSION:
+    if payload.get("schema_version") != UPDATE_STATE_SCHEMA_VERSION:
         return None
     return payload
 
 
-def write_update_cache(
-    status: UpdateStatus,
-    *,
-    cache_path: Path | None = None,
-    existing_cache: dict[str, Any] | None = None,
-) -> None:
-    if status.latest_version is None:
+def snooze_update(status: UpdateStatus, *, state_path: Path | None = None, now: datetime | None = None) -> None:
+    if not status.latest_version:
         return
-    path = cache_path or resolve_machine_paths().update_cache_path
+    path = state_path or resolve_machine_paths().update_state_path
     payload = {
-        "schema_version": UPDATE_CACHE_SCHEMA_VERSION,
-        "checked_at": status.checked_at or _utc_now().isoformat(),
-        "latest_version": status.latest_version,
-        "update_available": status.update_available,
-        "repository": status.repository,
-        "release_url": status.release_url,
-        "wheel_url": status.wheel_url,
+        "schema_version": UPDATE_STATE_SCHEMA_VERSION,
+        "snoozed_version": status.latest_version,
+        "snoozed_at": (now or _utc_now()).isoformat(),
     }
-    existing = existing_cache or read_update_cache(path) or {}
-    if existing.get("snoozed_version"):
-        payload["snoozed_version"] = existing["snoozed_version"]
-    if existing.get("snoozed_at"):
-        payload["snoozed_at"] = existing["snoozed_at"]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def snooze_update(status: UpdateStatus, *, cache_path: Path | None = None, now: datetime | None = None) -> None:
-    if not status.latest_version:
-        return
-    path = cache_path or resolve_machine_paths().update_cache_path
-    existing = read_update_cache(path) or {}
-    if existing.get("latest_version") != status.latest_version:
-        write_update_cache(status, cache_path=path, existing_cache=existing)
-        existing = read_update_cache(path) or {}
-    existing["schema_version"] = UPDATE_CACHE_SCHEMA_VERSION
-    existing["snoozed_version"] = status.latest_version
-    existing["snoozed_at"] = (now or _utc_now()).isoformat()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
-
-
-def is_update_snoozed(status: UpdateStatus, *, cache_path: Path | None = None, now: datetime | None = None) -> bool:
+def is_update_snoozed(status: UpdateStatus, *, state_path: Path | None = None, now: datetime | None = None) -> bool:
     if not status.latest_version:
         return False
-    cache = read_update_cache(cache_path)
-    if not cache or cache.get("snoozed_version") != status.latest_version:
+    state = read_update_state(state_path)
+    if not state or state.get("snoozed_version") != status.latest_version:
         return False
-    snoozed_at = _parse_timestamp(cache.get("snoozed_at"))
+    snoozed_at = _parse_timestamp(state.get("snoozed_at"))
     if snoozed_at is None:
         return False
     return (now or _utc_now()) - snoozed_at < UPDATE_SNOOZE_TTL
@@ -397,48 +359,12 @@ def is_newer_version(candidate: str | None, installed: str) -> bool:
         return False
 
 
-def _status_from_cache(
-    cache: dict[str, Any] | None,
-    installed_version: str,
-    metadata: DistributionMetadata,
-    *,
-    source: str,
-) -> UpdateStatus:
-    repository = str(cache.get("repository") or metadata.resolved_repository()) if cache else metadata.resolved_repository()
-    latest_version = str(cache.get("latest_version")) if cache and cache.get("latest_version") else None
-    wheel_url = str(cache.get("wheel_url")) if cache and cache.get("wheel_url") else None
-    release_url = str(cache.get("release_url")) if cache and cache.get("release_url") else None
-    if latest_version and wheel_url is None:
-        wheel_url = metadata.release_artifact_url(latest_version, repository=repository)
-    if latest_version and release_url is None:
-        release_url = _release_page_url(repository, latest_version)
-    version_is_newer = is_newer_version(latest_version, installed_version)
-    cached_update_available = bool(cache.get("update_available", version_is_newer)) if cache else version_is_newer
-    return UpdateStatus(
-        installed_version=installed_version,
-        latest_version=latest_version,
-        update_available=cached_update_available and version_is_newer,
-        repository=repository,
-        release_url=release_url,
-        wheel_url=wheel_url,
-        checked_at=str(cache.get("checked_at")) if cache and cache.get("checked_at") else None,
-        source=source,
-    )
-
-
-def _fallback_status_from_error(
+def _unknown_status_from_error(
     exc: Exception,
     *,
-    cache: dict[str, Any] | None,
     installed_version: str,
-    metadata: DistributionMetadata,
     repository: str,
 ) -> UpdateStatus:
-    if cache:
-        cached = _status_from_cache(cache, installed_version, metadata, source="cache-stale")
-        if cached.update_available:
-            cached.error = _error_text(exc)
-            return cached
     return UpdateStatus(
         installed_version=installed_version,
         latest_version=None,
@@ -456,15 +382,6 @@ def _error_text(exc: Exception) -> str:
             return f"{exc.message}: {detail_error}"
         return exc.message
     return str(exc)
-
-
-def _cache_is_fresh(cache: dict[str, Any] | None, now: datetime) -> bool:
-    if not cache:
-        return False
-    checked_at = _parse_timestamp(cache.get("checked_at"))
-    if checked_at is None:
-        return False
-    return now - checked_at < UPDATE_CACHE_TTL
 
 
 def _parse_timestamp(value: Any) -> datetime | None:

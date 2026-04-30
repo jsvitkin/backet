@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +18,9 @@ from backet.cli_update import (
     check_cli_update,
     discover_latest_release,
     is_update_snoozed,
-    read_update_cache,
+    read_update_state,
     snooze_update,
     status_for_version,
-    write_update_cache,
 )
 from backet.distribution import load_distribution_metadata
 from backet.errors import AppError
@@ -63,6 +62,28 @@ def available_status(installed: str = "0.1.4", latest: str = "0.1.5") -> UpdateS
     )
 
 
+def write_legacy_update_cache(latest: str = "0.1.3", *, update_available: bool = True) -> Path:
+    legacy_cache_path = resolve_machine_paths().config_dir / "update-check.json"
+    legacy_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "latest_version": latest,
+                "update_available": update_available,
+                "repository": "jsvitkin/backet",
+                "release_url": f"https://github.com/jsvitkin/backet/releases/tag/v{latest}",
+                "wheel_url": f"https://github.com/jsvitkin/backet/releases/download/v{latest}/backet-{latest}-py3-none-any.whl",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return legacy_cache_path
+
+
 def test_discover_latest_release_resolves_stable_wheel_url(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(request: object, timeout: float) -> FakeResponse:
         assert "releases/latest" in request.full_url  # type: ignore[attr-defined]
@@ -88,18 +109,16 @@ def test_discover_latest_release_ignores_prerelease(monkeypatch: pytest.MonkeyPa
     assert status.update_available is False
 
 
-def test_cached_prerelease_result_does_not_become_required() -> None:
+def test_check_cli_update_ignores_legacy_cached_prerelease(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime(2026, 4, 30, 12, 0, tzinfo=timezone.utc)
-    prerelease_status = available_status(latest="0.2.0")
-    prerelease_status.update_available = False
-    prerelease_status.checked_at = now.isoformat()
-    write_update_cache(prerelease_status)
+    write_legacy_update_cache(latest="0.2.0", update_available=False)
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.5")))
 
     status = check_cli_update("0.1.2", now=now)
 
-    assert status.source == "cache"
-    assert status.latest_version == "0.2.0"
-    assert status.update_available is False
+    assert status.source == "network"
+    assert status.latest_version == "0.1.5"
+    assert status.update_available is True
 
 
 def test_status_for_version_compares_versions_and_builds_artifact_url() -> None:
@@ -111,41 +130,32 @@ def test_status_for_version_compares_versions_and_builds_artifact_url() -> None:
     assert same.update_available is False
 
 
-def test_update_cache_freshness_and_stale_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_check_always_uses_network_when_legacy_cache_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime(2026, 4, 30, 12, 0, tzinfo=timezone.utc)
-    cache_path = resolve_machine_paths().update_cache_path
-    cached = available_status(latest="0.1.3")
-    cached.checked_at = (now - timedelta(hours=1)).isoformat()
-    write_update_cache(cached, cache_path=cache_path)
+    write_legacy_update_cache(latest="0.1.3")
+    calls: list[str] = []
 
-    def fail_if_network_is_used(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("fresh cache should avoid the network")
+    def fake_urlopen(*_args: object, **_kwargs: object) -> FakeResponse:
+        calls.append("network")
+        return FakeResponse(fake_latest_response("0.1.5"))
 
-    monkeypatch.setattr(cli_update, "urlopen", fail_if_network_is_used)
-    fresh = check_cli_update("0.1.2", now=now)
-    assert fresh.source == "cache"
-    assert fresh.latest_version == "0.1.3"
+    monkeypatch.setattr(cli_update, "urlopen", fake_urlopen)
+    status = check_cli_update("0.1.2", now=now)
 
-    stale = available_status(latest="0.1.4")
-    stale.checked_at = (now - timedelta(days=2)).isoformat()
-    write_update_cache(stale, cache_path=cache_path)
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.5")))
-
-    refreshed = check_cli_update("0.1.2", now=now)
-    assert refreshed.source == "network"
-    assert refreshed.latest_version == "0.1.5"
+    assert calls == ["network"]
+    assert status.source == "network"
+    assert status.latest_version == "0.1.5"
 
 
-def test_update_check_falls_back_to_cached_update_on_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    stale = available_status(latest="0.1.3")
-    stale.checked_at = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
-    write_update_cache(stale)
+def test_update_check_ignores_cached_update_on_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    write_legacy_update_cache(latest="0.1.3")
     monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
 
     status = check_cli_update("0.1.2")
 
-    assert status.update_available is True
-    assert status.source == "cache-stale"
+    assert status.update_available is False
+    assert status.source == "unknown"
+    assert status.latest_version is None
     assert "offline" in (status.error or "")
 
 
@@ -169,12 +179,32 @@ def test_declined_update_snooze_only_applies_to_that_version() -> None:
     assert is_update_snoozed(future) is False
 
 
-def test_update_check_command_supports_json_and_human_output(runner, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.6")))
+def test_declined_update_snooze_writes_snooze_only_state() -> None:
+    legacy_cache_path = write_legacy_update_cache(latest="0.1.3")
 
-    json_result = runner.invoke(app, ["--json", "update", "check", "--fresh"])
+    snooze_update(available_status(latest="0.1.5"))
+
+    assert legacy_cache_path.exists()
+    state = read_update_state()
+    assert state is not None
+    assert state["snoozed_version"] == "0.1.5"
+    assert "latest_version" not in state
+    assert "wheel_url" not in state
+
+
+def test_update_check_command_supports_json_and_human_output(runner, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_urlopen(*_args: object, **_kwargs: object) -> FakeResponse:
+        calls.append("network")
+        return FakeResponse(fake_latest_response("0.1.6"))
+
+    monkeypatch.setattr(cli_update, "urlopen", fake_urlopen)
+
+    json_result = runner.invoke(app, ["--json", "update", "check"])
     human_result = runner.invoke(app, ["update", "check"])
 
+    assert calls == ["network", "network"]
     assert json_result.exit_code == 0
     payload = json.loads(json_result.stdout)
     assert payload["data"]["update_available"] is True
@@ -395,4 +425,4 @@ def test_cli_update_does_not_write_vault_state_or_skill_metadata(
     assert result.exit_code == 0
     assert not (vault / ".backet").exists()
     assert not resolve_machine_paths().skill_manifest_path.exists()
-    assert read_update_cache() is not None
+    assert read_update_state() is None

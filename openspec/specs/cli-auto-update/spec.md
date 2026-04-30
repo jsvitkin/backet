@@ -46,29 +46,31 @@ The system MUST discover CLI package updates from the configured repository's st
 - **WHEN** a prerelease exists that is newer than the installed CLI version
 - **THEN** the system MUST NOT require updating to that prerelease in v1
 
-### Requirement: Update checks MUST be cached at machine scope
+### Requirement: Update discovery MUST NOT use cached release metadata
 
-The system MUST store update-check metadata in machine-level Backet configuration, not in per-vault state.
+The system MUST decide CLI update availability from live repository release discovery and MUST NOT use cached latest-version, release URL, wheel URL, or update-availability metadata.
 
-#### Scenario: Cache is fresh
+#### Scenario: Normal preflight performs live discovery
 
-- **WHEN** a normal command runs and the machine-level update cache is still fresh
-- **THEN** the system MUST use the cached update result instead of requiring a live network request
+- **WHEN** a normal command runs
+- **THEN** the system MUST attempt live repository release discovery before deciding whether an update is available
 
-#### Scenario: Cache is stale
+#### Scenario: Explicit check performs live discovery
 
-- **WHEN** a normal command runs and the machine-level update cache is stale
-- **THEN** the system MUST attempt to refresh update metadata before deciding whether an update is available
+- **WHEN** a user or agent runs `backet update check`
+- **THEN** the system MUST query the configured repository even if older update metadata exists on the machine
 
-#### Scenario: Discovery fails without known update
+#### Scenario: Discovery fails
 
-- **WHEN** update discovery fails and no cached newer version is known
+- **WHEN** update discovery fails during normal command preflight
 - **THEN** the system MUST continue the original normal command rather than blocking ordinary offline use
+- **AND** the system MUST NOT fall back to cached release metadata
 
-#### Scenario: Update state is machine-level
+#### Scenario: Snooze state is machine-level
 
-- **WHEN** update-check metadata is written
-- **THEN** the system MUST write it outside the target vault and outside `.backet/` per-vault state
+- **WHEN** an interactive user declines an update prompt
+- **THEN** the system MAY write machine-level snooze metadata for that latest version
+- **AND** the system MUST write it outside the target vault and outside `.backet/` per-vault state
 
 ### Requirement: Interactive users MUST be prompted and updated before command execution
 
@@ -155,4 +157,3 @@ The system MUST keep CLI package update behavior independent from skill-pack upd
 
 - **WHEN** the system checks for or applies a CLI package update
 - **THEN** it MUST NOT write update metadata into `.backet/` or require a target Obsidian vault
-
