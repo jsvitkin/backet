@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.resources import as_file, files
@@ -42,7 +43,8 @@ class DistributionMetadata:
         return override or os.environ.get("BACKET_REPOSITORY") or self.repository
 
     def resolved_ref(self, override: str | None = None) -> str:
-        return override or os.environ.get("BACKET_SKILLS_REF") or self.default_ref
+        ref = override or os.environ.get("BACKET_SKILLS_REF") or self.default_ref
+        return ref.replace("{cli_version}", self.cli_version)
 
     def release_artifact_name(self, version: str) -> str:
         return self.release_artifact_pattern.format(version=version)
@@ -58,7 +60,11 @@ class DistributionMetadata:
             return override
         repo = self.resolved_repository(repository)
         resolved_ref = self.resolved_ref(ref)
-        return self.skills_archive_url_template.format(repository=repo, ref=resolved_ref)
+        return self.skills_archive_url_template.format(
+            repository=repo,
+            ref=resolved_ref,
+            ref_path=archive_ref_path(resolved_ref),
+        )
 
 
 @dataclass(slots=True)
@@ -153,3 +159,13 @@ def _archive_root(names: list[str]) -> str:
     if len(roots) != 1:
         raise ValueError("Archive must contain exactly one top-level directory.")
     return next(iter(roots))
+
+
+def archive_ref_path(ref: str) -> str:
+    if ref.startswith("refs/"):
+        return ref
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
+        return ref
+    if re.fullmatch(r"v\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?", ref):
+        return f"refs/tags/{ref}"
+    return f"refs/heads/{ref}"

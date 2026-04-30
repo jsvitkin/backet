@@ -10,6 +10,7 @@ from backet.models import MachinePaths
 BACKET_DIRNAME = ".backet"
 BACKET_CONFIG_FILENAME = "config.yaml"
 BACKET_GITIGNORE_FILENAME = ".gitignore"
+BACKET_INDEX_IGNORE_FILENAME = ".backetignore"
 INDEX_DB_FILENAME = "vault-index.sqlite3"
 RULES_DB_FILENAME = "rules.sqlite3"
 SAFE_REBUILD_DIRS = ("cache", "temp")
@@ -51,6 +52,10 @@ def config_path(vault_root: Path) -> Path:
 
 def gitignore_path(vault_root: Path) -> Path:
     return backet_root(vault_root) / BACKET_GITIGNORE_FILENAME
+
+
+def index_ignore_path(vault_root: Path) -> Path:
+    return vault_root / BACKET_INDEX_IGNORE_FILENAME
 
 
 def state_dir(vault_root: Path) -> Path:

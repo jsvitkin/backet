@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/instal
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.0/backet-0.1.0-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.1/backet-0.1.1-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
@@ -28,7 +28,7 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.0/backet-0.1.0-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.1/backet-0.1.1-py3-none-any.whl
 ```
 
 Upgrade on macOS or Linux:
@@ -80,6 +80,10 @@ Index vault Markdown for retrieval:
 backet index /path/to/vault
 ```
 
+`backet init` creates a root `.backetignore` file that controls which Markdown files are treated as indexable vault canon. Patterns are relative to the vault root and use gitignore-style matching. The default policy excludes `.backet/`, `.obsidian/`, `.git/`, `.trash/`, `Templates/`, `Archive/`, and `Daily Notes/`.
+
+This is separate from `.backet/.gitignore`: `.backetignore` controls retrieval indexing, while `.backet/.gitignore` controls Git ignore behavior for Backet-owned scratch state.
+
 Retrieve bounded context bundles:
 
 ```bash
@@ -100,6 +104,8 @@ backet skills install
 backet skills update
 backet --json skills status
 ```
+
+By default, release installs fetch the skill pack from the matching release tag. Use `backet skills install --ref main` only when you intentionally want the current `main` branch skill pack.
 
 Scaffold and inspect the default city workflow targets:
 
@@ -183,13 +189,13 @@ python -m build --wheel
 Run the install smoke test against a built wheel on macOS, Linux, WSL, or Git Bash:
 
 ```bash
-scripts/smoke-install.sh dist/backet-0.1.0-py3-none-any.whl "$PWD"
+scripts/smoke-install.sh dist/backet-0.1.1-py3-none-any.whl "$PWD"
 ```
 
 On native Windows PowerShell, validate the built wheel with `pipx`:
 
 ```powershell
-py -3 -m pipx install --force .\dist\backet-0.1.0-py3-none-any.whl
+py -3 -m pipx install --force .\dist\backet-0.1.1-py3-none-any.whl
 backet --version
 py -3 -m pipx uninstall backet
 ```

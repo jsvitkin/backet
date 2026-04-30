@@ -11,6 +11,7 @@ from pathlib import Path
 
 from backet.embeddings import EmbeddingResult, resolve_embedding_backend
 from backet.errors import AppError
+from backet.index_ignore import IndexIgnorePolicy, load_index_ignore_policy
 from backet.models import CommandResult
 from backet.paths import index_db_path
 from backet.vault import ensure_bootstrapped_vault
@@ -58,6 +59,8 @@ class IndexState:
     last_indexed_at: str | None = None
     embedding_backend: str | None = None
     embedding_model: str | None = None
+    index_ignore_path: str | None = None
+    index_ignore_exists: bool | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -72,6 +75,8 @@ class IndexState:
             "last_indexed_at": self.last_indexed_at,
             "embedding_backend": self.embedding_backend,
             "embedding_model": self.embedding_model,
+            "index_ignore_path": self.index_ignore_path,
+            "index_ignore_exists": self.index_ignore_exists,
         }
 
 
@@ -156,7 +161,8 @@ def ensure_index_schema(connection: sqlite3.Connection) -> None:
 
 def inspect_index_state(vault_root: Path) -> IndexState:
     ensure_bootstrapped_vault(vault_root)
-    current_notes = _scan_markdown_notes(vault_root)
+    ignore_policy = load_index_ignore_policy(vault_root)
+    current_notes = _scan_markdown_notes(vault_root, ignore_policy=ignore_policy)
     db_path = index_db_path(vault_root)
     if not db_path.exists():
         return IndexState(
@@ -168,6 +174,8 @@ def inspect_index_state(vault_root: Path) -> IndexState:
             total_notes=len(current_notes),
             indexed_notes=0,
             index_path=str(db_path),
+            index_ignore_path=str(ignore_policy.path),
+            index_ignore_exists=ignore_policy.exists,
         )
 
     with closing(open_index_connection(vault_root)) as connection:
@@ -195,6 +203,8 @@ def inspect_index_state(vault_root: Path) -> IndexState:
         last_indexed_at=meta.get("last_indexed_at"),
         embedding_backend=meta.get("embedding_backend"),
         embedding_model=meta.get("embedding_model"),
+        index_ignore_path=str(ignore_policy.path),
+        index_ignore_exists=ignore_policy.exists,
     )
 
 
@@ -272,6 +282,8 @@ def index_vault(vault_root: Path, full: bool = False) -> CommandResult:
                 "embedding_backend": backend.name,
                 "embedding_model": backend.model_name,
                 "last_indexed_at": state.last_indexed_at,
+                "index_ignore_path": state.index_ignore_path,
+                "index_ignore_exists": state.index_ignore_exists,
             },
         )
 
@@ -286,6 +298,8 @@ def index_vault(vault_root: Path, full: bool = False) -> CommandResult:
             "notes_deleted": len(deleted_paths),
             "embedding_backend": backend.name,
             "embedding_model": backend.model_name,
+            "index_ignore_path": state.index_ignore_path,
+            "index_ignore_exists": state.index_ignore_exists,
             "full_reindex": full,
         },
     )
@@ -320,21 +334,22 @@ def require_current_index(vault_root: Path, refresh: bool = False) -> IndexState
     return state
 
 
-def _scan_markdown_notes(vault_root: Path) -> dict[str, str]:
+def _scan_markdown_notes(vault_root: Path, ignore_policy: IndexIgnorePolicy | None = None) -> dict[str, str]:
     notes: dict[str, str] = {}
-    for relative_path, absolute_path in _scan_markdown_files(vault_root).items():
+    for relative_path, absolute_path in _scan_markdown_files(vault_root, ignore_policy=ignore_policy).items():
         text = absolute_path.read_text(encoding="utf-8")
         notes[relative_path] = fingerprint_text(_strip_frontmatter(text))
     return notes
 
 
-def _scan_markdown_files(vault_root: Path) -> dict[str, Path]:
+def _scan_markdown_files(vault_root: Path, ignore_policy: IndexIgnorePolicy | None = None) -> dict[str, Path]:
+    policy = ignore_policy or load_index_ignore_policy(vault_root)
     notes: dict[str, Path] = {}
     for path in sorted(vault_root.rglob("*.md")):
-        relative_parts = path.relative_to(vault_root).parts
-        if not relative_parts or relative_parts[0] == ".backet":
+        relative_path = path.relative_to(vault_root).as_posix()
+        if policy.ignores(relative_path):
             continue
-        notes[path.relative_to(vault_root).as_posix()] = path
+        notes[relative_path] = path
     return notes
 
 

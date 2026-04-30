@@ -76,12 +76,12 @@ def test_emit_error_supports_human_and_json_output(
 
 
 def test_emit_version_and_ensure_state(capsys: pytest.CaptureFixture[str]) -> None:
-    emit_version(json_output=False, version="0.1.0")
-    assert capsys.readouterr().out.strip() == "0.1.0"
+    emit_version(json_output=False, version="0.1.1")
+    assert capsys.readouterr().out.strip() == "0.1.1"
 
-    emit_version(json_output=True, version="0.1.0")
+    emit_version(json_output=True, version="0.1.1")
     payload = json.loads(capsys.readouterr().out)
-    assert payload["data"]["version"] == "0.1.0"
+    assert payload["data"]["version"] == "0.1.1"
 
     ctx = typer.Context(click.Command("backet"))
     state = ensure_state(ctx)

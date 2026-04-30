@@ -71,6 +71,36 @@ def test_context_semantic_lookup_returns_relevant_plotline_context(runner, retri
     assert any("semantic" in source["match_reasons"] for source in payload["data"]["sources"])
 
 
+def test_context_query_does_not_return_ignored_markdown(runner, retrieval_vault: Path) -> None:
+    archive = retrieval_vault / "Archive"
+    archive.mkdir()
+    (archive / "Forbidden Source.md").write_text(
+        "# Forbidden Source\n\nThe emerald reliquary controls every ghoul ledger.",
+        encoding="utf-8",
+    )
+    runner.invoke(app, ["index", str(retrieval_vault)])
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "context",
+            str(retrieval_vault),
+            "vault",
+            ".",
+            "--query",
+            "emerald reliquary ghoul ledger",
+            "--limit",
+            "8",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    source_paths = [source["relative_path"] for source in payload["data"]["sources"]]
+    assert "Archive/Forbidden Source.md" not in source_paths
+
+
 def test_context_scope_bounded_bundle_stays_inside_subtree(runner, retrieval_vault: Path) -> None:
     runner.invoke(app, ["index", str(retrieval_vault)])
 

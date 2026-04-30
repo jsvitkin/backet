@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 from backet.errors import AppError
+from backet.index_ignore import DEFAULT_INDEX_IGNORE_CONTENT
 from backet.models import CommandResult, Issue
 from backet.paths import (
     DURABLE_DIRS,
@@ -14,6 +15,7 @@ from backet.paths import (
     backet_root,
     config_path,
     gitignore_path,
+    index_ignore_path,
 )
 
 GITIGNORE_CONTENT = """cache/
@@ -94,6 +96,10 @@ def initialize_vault(vault_root: Path, cli_version: str) -> CommandResult:
     ignore_file.write_text(GITIGNORE_CONTENT, encoding="utf-8")
     created.append(str(ignore_file.relative_to(vault_root)))
 
+    index_ignore_file = index_ignore_path(vault_root)
+    index_ignore_file.write_text(DEFAULT_INDEX_IGNORE_CONTENT, encoding="utf-8")
+    created.append(str(index_ignore_file.relative_to(vault_root)))
+
     return CommandResult(
         message=f"Initialized backet in {vault_root}",
         created=created,
@@ -138,6 +144,22 @@ def diagnose_vault(vault_root: Path, fix: bool) -> CommandResult:
         if fix:
             ignore_file.write_text(GITIGNORE_CONTENT, encoding="utf-8")
             fixed.append(str(ignore_file.relative_to(vault_root)))
+
+    index_ignore_file = index_ignore_path(vault_root)
+    if not index_ignore_file.exists():
+        issues.append(
+            Issue(
+                code="missing_index_ignore",
+                severity="warning",
+                message="Missing root .backetignore index policy",
+                path=str(index_ignore_file.relative_to(vault_root)),
+                hint="Run `backet doctor --fix` to restore the default index ignore policy.",
+                safe_to_fix=True,
+            )
+        )
+        if fix:
+            index_ignore_file.write_text(DEFAULT_INDEX_IGNORE_CONTENT, encoding="utf-8")
+            fixed.append(str(index_ignore_file.relative_to(vault_root)))
 
     safe_dirs = [*(root / name for name in SAFE_REBUILD_DIRS), *(root / name for name in OPTIONAL_SAFE_DIRS)]
     for path in safe_dirs:

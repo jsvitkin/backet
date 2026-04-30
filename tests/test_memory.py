@@ -28,6 +28,24 @@ def test_memory_build_writes_city_and_subtree_capsules(runner, retrieval_vault: 
     )
 
 
+def test_memory_build_excludes_ignored_markdown(runner, retrieval_vault: Path) -> None:
+    archive = retrieval_vault / "Archive"
+    archive.mkdir()
+    (archive / "Forbidden Source.md").write_text(
+        "# Forbidden Source\n\nThe emerald reliquary controls every ghoul ledger.",
+        encoding="utf-8",
+    )
+
+    runner.invoke(app, ["index", str(retrieval_vault)])
+    result = runner.invoke(app, ["--json", "memory", "build", str(retrieval_vault)])
+
+    assert result.exit_code == 0
+    city_capsule = retrieval_vault / ".backet" / "memory" / "city" / "overview.md"
+    city_text = city_capsule.read_text(encoding="utf-8")
+    assert "Archive/Forbidden Source.md" not in city_text
+    assert "emerald reliquary" not in city_text
+
+
 def test_memory_capsules_remain_committable(runner, retrieval_vault: Path) -> None:
     runner.invoke(app, ["index", str(retrieval_vault)])
     runner.invoke(app, ["memory", "build", str(retrieval_vault)])
