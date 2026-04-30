@@ -23,14 +23,17 @@ def test_workflow_skills_encode_discuss_before_write_and_rules_aware_grounding()
 
     assert "Canon says" in workflow_skill
     assert "Rules suggest" in workflow_skill
+    assert "External research" in workflow_skill
     assert "Open choices" in workflow_skill
     assert "backet context" in workflow_skill
     assert "backet rules query" in workflow_skill
+    assert "cited support material" in workflow_skill
 
     assert "backet blueprint status" in city_skill
     assert "backet blueprint apply" in city_skill
     assert "backet context" in city_skill
     assert "backet rules query" in city_skill
+    assert "External research" in city_skill
     assert "Do not draft until the user explicitly says to proceed." in city_skill
 
 

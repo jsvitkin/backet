@@ -17,6 +17,7 @@ PHASE_LABELS = {
     "fingerprint": "Fingerprinting PDF",
     "store": "Storing chunks",
     "index": "Building search index",
+    "semantic-index": "Building semantic index",
     "audit": "Summarizing quality",
 }
 
@@ -141,6 +142,15 @@ def emit_rules_ingest_report(result: CommandResult) -> None:
         output.console.print(f"Scope:   {', '.join(scope_tags)}")
     output.console.print(f"Pages:   {pages_processed:,} processed")
     output.console.print(f"Chunks:  {chunk_count:,} stored")
+    semantic_index = data.get("semantic_index")
+    if isinstance(semantic_index, dict):
+        mode = semantic_index.get("retrieval_mode") or "exact_only"
+        backend = semantic_index.get("embedding_backend")
+        model = semantic_index.get("embedding_model")
+        semantic_label = str(mode)
+        if backend and model:
+            semantic_label += f" ({backend}: {model})"
+        output.console.print(f"Search:  {semantic_label}")
     if ocr_pages:
         output.console.print(f"OCR:     {_page_count_label(len(ocr_pages))} required OCR")
     if suspect_pages:
@@ -161,12 +171,23 @@ def emit_rules_ingest_report(result: CommandResult) -> None:
         output.console.print("[bold yellow]Review recommended[/bold yellow]")
         output.console.print(f"Pages needing review: {_page_preview(suspect_pages)}")
         output.console.print(f"Run: {audit_command(data)}")
+    if isinstance(semantic_index, dict) and not semantic_index.get("available", False):
+        output.console.print("")
+        output.console.print("[bold yellow]Semantic rules retrieval unavailable[/bold yellow]")
+        output.console.print("Rules queries will use exact search until the semantic index is refreshed.")
+        output.console.print(f"Run: {rules_index_command(data)}")
 
 
 def audit_command(data: dict[str, Any]) -> str:
     vault = shlex.quote(str(data.get("vault") or "."))
     book_id = shlex.quote(str(data.get("book_id") or ""))
     return f"backet rules audit {vault} --book-id {book_id}"
+
+
+def rules_index_command(data: dict[str, Any]) -> str:
+    vault = shlex.quote(str(data.get("vault") or "."))
+    book_id = shlex.quote(str(data.get("book_id") or ""))
+    return f"backet rules index {vault} --book-id {book_id}"
 
 
 def _event_label(event: RulesIngestProgressEvent) -> str:
@@ -190,6 +211,7 @@ def _format_counters(counters: dict[str, int]) -> str:
         "ocr_pages": "OCR",
         "review_pages": "review",
         "chunks": "chunks",
+        "embeddings": "embeddings",
     }
     parts = [f"{labels.get(key, key)}: {value:,}" for key, value in counters.items() if value]
     return ", ".join(parts)

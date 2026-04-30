@@ -29,7 +29,7 @@ from backet.indexing import index_vault
 from backet.memory import build_memory_capsules
 from backet.output import CLIState, emit_error, emit_success, emit_version, ensure_state
 from backet.retrieval import build_context_bundle
-from backet.rules import audit_rules, ingest_rulebook, query_rules, repair_rules
+from backet.rules import audit_rules, index_rules, ingest_rulebook, query_rules, repair_rules
 from backet.rules_output import RulesIngestProgressReporter, emit_rules_ingest_report
 from backet.skills import install_skills, skills_status, update_skills
 from backet.vault import diagnose_vault, initialize_vault
@@ -420,6 +420,21 @@ def rules_query_command(
             book_id=book_id,
             scope_tags=scope_tags or [],
         )
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("index")
+def rules_index_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    book_id: Annotated[str | None, typer.Option("--book-id", help="Optional book identifier to index.")] = None,
+    full: Annotated[bool, typer.Option("--full", help="Force a full semantic rules reindex.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = index_rules(vault.resolve(), book_id=book_id, full=full)
         emit_success(state, result)
     except AppError as error:
         _handle_error(ctx, error)

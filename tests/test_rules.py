@@ -8,8 +8,16 @@ import fitz
 import pytest
 
 from backet.cli import app
+from backet.embeddings import EmbeddingResult
 from backet.errors import AppError
-from backet.rules import ingest_rulebook, normalize_scope_tags, open_rules_connection, parse_pages_spec, split_rule_chunks
+from backet.rules import (
+    classify_rule_chunk,
+    ingest_rulebook,
+    normalize_scope_tags,
+    open_rules_connection,
+    parse_pages_spec,
+    split_rule_chunks,
+)
 
 
 def test_parse_pages_spec_and_scope_tag_normalization() -> None:
@@ -82,6 +90,208 @@ def test_rules_ingest_clean_pdf_and_query_metadata(runner, tmp_path: Path) -> No
 
     assert row is not None
     assert row["section_label"] == "Feeding Rights"
+
+
+def test_rules_index_reports_semantic_schema_and_refreshes_stale_chunks(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "core-index.pdf",
+        [
+            _rule_page(
+                "Domain Traits",
+                "Chasse, Portillon, and Lien describe domain reach, access, and mortal awareness for hunting territory.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    with closing(open_rules_connection(vault)) as connection:
+        embedding_count = connection.execute("SELECT COUNT(*) AS count FROM rule_chunk_embeddings").fetchone()["count"]
+        metadata_count = connection.execute("SELECT COUNT(*) AS count FROM rule_chunk_retrieval_metadata").fetchone()["count"]
+        connection.execute("UPDATE rule_chunks SET content_hash = 'changed-hash' WHERE book_id = 'core-v5'")
+        connection.commit()
+
+    assert embedding_count > 0
+    assert metadata_count > 0
+
+    audit_result = runner.invoke(app, ["--json", "rules", "audit", str(vault), "--book-id", "core-v5"])
+    assert audit_result.exit_code == 0
+    audit_payload = json.loads(audit_result.stdout)
+    assert audit_payload["data"]["semantic_index"]["stale_embeddings"] > 0
+    assert audit_payload["data"]["semantic_index"]["stale_metadata"] > 0
+    assert "backet rules index" in audit_payload["data"]["semantic_index"]["repair_hint"]
+
+    index_result = runner.invoke(app, ["--json", "rules", "index", str(vault), "--book-id", "core-v5"])
+    assert index_result.exit_code == 0
+    index_payload = json.loads(index_result.stdout)
+    assert index_payload["data"]["embedding_backend"] == "hash"
+    assert index_payload["data"]["indexed_chunks"] == index_payload["data"]["total_chunks"]
+    assert index_payload["data"]["missing_count"] == 0
+    assert index_payload["data"]["stale_count"] == 0
+    assert index_payload["data"]["stale_embeddings_before"] > 0
+    assert index_payload["data"]["stale_metadata_before"] > 0
+    assert index_payload["data"]["refreshed_embeddings"] > 0
+    assert index_payload["data"]["refreshed_metadata"] > 0
+
+
+def test_rules_query_can_return_semantic_only_matches_with_diagnostics(
+    runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _StubRuleEmbeddingBackend()
+    monkeypatch.setattr("backet.rules.resolve_embedding_backend", lambda: backend)
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "semantic-core.pdf",
+        [
+            _rule_page(
+                "Domain Traits",
+                "Chasse, Portillon, and Lien describe domain reach, access, and mortal awareness for feeding territory.",
+            ),
+            _rule_page(
+                "Feeding Rights",
+                "Blood dolls suffer addiction and dependence after repeated feeding from a vampire.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    semantic_result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "neighborhood control", "--limit", "2"],
+    )
+    assert semantic_result.exit_code == 0
+    semantic_payload = json.loads(semantic_result.stdout)
+    semantic_first = semantic_payload["data"]["primary_results"][0]
+    assert semantic_payload["data"]["retrieval_mode"] == "hybrid"
+    assert semantic_payload["data"]["embedding_backend"] == "stub"
+    assert semantic_payload["data"]["candidate_counts"]["exact"] == 0
+    assert semantic_first["section_label"] == "Domain Traits"
+    assert "semantic" in semantic_first["match_reasons"]
+    assert semantic_first["exact_score"] == 0
+
+    exact_result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "blood doll feeding", "--limit", "2"],
+    )
+    assert exact_result.exit_code == 0
+    exact_payload = json.loads(exact_result.stdout)
+    exact_first = exact_payload["data"]["primary_results"][0]
+    assert exact_first["section_label"] == "Feeding Rights"
+    assert "exact" in exact_first["match_reasons"]
+
+
+def test_rules_query_falls_back_to_exact_when_semantic_backend_is_unavailable(
+    runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "exact-only.pdf",
+        [
+            _rule_page(
+                "Feeding Rights",
+                "Feeding rights govern blood doll access, permission, punishment, and court accountability inside a contested domain.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    def unavailable_backend():
+        raise AppError(
+            code="embedding_backend_unavailable",
+            message="No semantic backend is available.",
+            hint="Use the hash backend for tests.",
+            exit_code=2,
+        )
+
+    monkeypatch.setattr("backet.rules.resolve_embedding_backend", unavailable_backend)
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "feeding rights", "--limit", "1"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["retrieval_mode"] == "semantic_unavailable"
+    assert payload["data"]["semantic_error"]["code"] == "embedding_backend_unavailable"
+    assert payload["data"]["primary_results"][0]["section_label"] == "Feeding Rights"
+    assert payload["data"]["primary_results"][0]["match_reasons"] == ["exact", "retrieval-metadata"]
+
+
+def test_rules_query_downranks_non_answer_sections(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "noisy-core.pdf",
+        [
+            _rule_page(
+                "Table of Contents",
+                "Domain rules, feeding rules, combat rules, character rules, and storyteller rules are listed here for navigation only.",
+            ),
+            _rule_page(
+                "Domain Systems",
+                "Domain rules explain how Chasse, Portillon, and Lien shape hunting pressure, mortal access, and Kindred control.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "domain rules", "--limit", "2"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    results = payload["data"]["primary_results"]
+    assert results[0]["section_label"] == "Domain Systems"
+    assert results[1]["section_label"] == "Table of Contents"
+    assert "quality-penalty" in results[1]["match_reasons"]
+    assert results[1]["section_kind"] == "toc"
+
+
+def test_rules_query_downranks_suspect_ocr_when_clean_text_also_matches(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    repeated_text = _rule_page(
+        "Domain Systems",
+        "Domain rules explain hunting access, feeding control, mortal awareness, and coterie pressure in contested territory.",
+    )
+    pdf_path = _create_text_pdf(tmp_path / "ocr-penalty.pdf", [repeated_text, repeated_text])
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+    with closing(open_rules_connection(vault)) as connection:
+        chunk_id = connection.execute(
+            "SELECT id FROM rule_chunks WHERE book_id = 'core-v5' AND page_start = 1"
+        ).fetchone()["id"]
+        connection.execute(
+            "UPDATE rule_chunks SET confidence = 0.65, extraction_method = 'ocr' WHERE id = ?",
+            (chunk_id,),
+        )
+        connection.execute(
+            """
+            UPDATE rule_chunk_retrieval_metadata
+            SET retrieval_flags_json = ?, section_kind = 'rules'
+            WHERE chunk_id = ?
+            """,
+            (json.dumps(["suspect_ocr"]), chunk_id),
+        )
+        connection.commit()
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "domain hunting access", "--limit", "2"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    results = payload["data"]["primary_results"]
+    assert results[0]["page_start"] == 2
+    assert results[1]["page_start"] == 1
+    assert "quality-penalty" in results[1]["match_reasons"]
+    assert "suspect_ocr" in results[1]["retrieval_flags"]
+
+
+def test_rule_retrieval_metadata_classifies_common_non_answer_chunks() -> None:
+    assert classify_rule_chunk("Index", "Index domain feeding page references", 5, 0.95, "direct") == (
+        "index",
+        ["navigational", "very_short"],
+    )
+    assert classify_rule_chunk("Character Sheet", "Name clan predator ambition desire health willpower", 7, 0.95, "direct") == (
+        "sheet",
+        ["navigational", "very_short"],
+    )
+    assert classify_rule_chunk("Page 4", "12 13 -- ..", 3, 0.4, "ocr") == (
+        "art",
+        ["art_heavy", "suspect_ocr", "very_short"],
+    )
 
 
 def test_rules_ingest_uses_ocr_fallback_for_image_only_pdf(
@@ -410,3 +620,23 @@ def _create_image_only_pdf(path: Path, text: str) -> Path:
 
 def _rule_page(title: str, body: str) -> str:
     return f"{title}\n{body}"
+
+
+class _StubRuleEmbeddingBackend:
+    name = "stub"
+    model_name = "stub-rules-v1"
+
+    def encode_many(self, texts: list[str]) -> EmbeddingResult:
+        return EmbeddingResult(
+            backend_name=self.name,
+            model_name=self.model_name,
+            vectors=[self._encode(text) for text in texts],
+        )
+
+    def _encode(self, text: str) -> list[float]:
+        lowered = text.casefold()
+        if "neighborhood control" in lowered or "chasse" in lowered or "portillon" in lowered or "lien" in lowered:
+            return [1.0, 0.0]
+        if "blood doll" in lowered or "blood dolls" in lowered:
+            return [0.0, 1.0]
+        return [0.0, 0.0]
