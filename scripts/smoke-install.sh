@@ -40,7 +40,33 @@ RULES_PDF_PATH="${TMP_ROOT}/core-rulebook.pdf"
 
 mkdir -p "$VAULT_DIR"
 
-"$BACKET_BIN" --json --version | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["data"]["version"]'
+INSTALLED_VERSION="$("$BACKET_BIN" --json --version | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["data"]["version"]; print(payload["data"]["version"])')"
+"$PYTHON_BIN" - "$BACKET_CONFIG_HOME" "$INSTALLED_VERSION" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+config_dir = Path(sys.argv[1])
+version = sys.argv[2]
+config_dir.mkdir(parents=True, exist_ok=True)
+(config_dir / "update-check.json").write_text(
+    json.dumps(
+        {
+            "schema_version": 1,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "latest_version": version,
+            "update_available": False,
+            "repository": "jsvitkin/backet",
+            "release_url": f"https://github.com/jsvitkin/backet/releases/tag/v{version}",
+            "wheel_url": f"https://github.com/jsvitkin/backet/releases/download/v{version}/backet-{version}-py3-none-any.whl",
+        },
+        indent=2,
+        sort_keys=True,
+    ),
+    encoding="utf-8",
+)
+PY
 "$BACKET_BIN" --json update check | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and "update_available" in payload["data"]'
 "$BACKET_BIN" --json init "$VAULT_DIR" | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok"'
 
