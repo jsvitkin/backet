@@ -9,7 +9,7 @@ Requirements:
 - Python 3.11 or newer
 - `pipx` for release installs
 
-The supported v1 install path is a GitHub-hosted wheel installed with `pipx`.
+The supported release install path is a GitHub-hosted wheel installed with `pipx`.
 
 On macOS or Linux, the installer can bootstrap `pipx` if needed:
 
