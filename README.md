@@ -17,6 +17,8 @@ On macOS or Linux, the installer can bootstrap `pipx` if needed:
 curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash
 ```
 
+Run the installer from any terminal location. It does not need to run inside an Obsidian vault, and it does not create vault folders. It only installs or upgrades the `backet` CLI in a user-level `pipx` environment.
+
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
@@ -61,6 +63,8 @@ backet init C:\path\to\vault
 ```
 
 `backet init` expects the vault directory to already exist.
+
+`backet init` is the step that creates Backet's per-vault files and folders inside the target vault.
 
 Check vault health:
 
