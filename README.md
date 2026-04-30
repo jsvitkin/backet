@@ -22,7 +22,7 @@ Run the installer from any terminal location. It does not need to run inside an 
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.5/backet-0.1.5-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.6/backet-0.1.6-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
@@ -30,7 +30,7 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.5/backet-0.1.5-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.6/backet-0.1.6-py3-none-any.whl
 ```
 
 After the first install, update the CLI through Backet itself:
@@ -143,19 +143,23 @@ Ingest and query local rulebook PDFs:
 
 ```bash
 backet rules ingest /path/to/vault /path/to/core-rulebook.pdf --book-id core-v5 --title "Core Rulebook" --tier core
-backet rules ingest /path/to/vault /path/to/camarilla.pdf --book-id camarilla --title "Camarilla" --tier supplement --scope-tag camarilla
+backet rules ingest /path/to/vault /path/to/camarilla.pdf --book-id camarilla --title "Camarilla" --tier supplement
 backet rules index /path/to/vault
 backet --json rules query /path/to/vault "feeding rights blood doll" --scope-tag camarilla
+backet rules scope audit /path/to/vault --book-id camarilla
+backet --json rules scope export /path/to/vault --book-id camarilla
 backet rules audit /path/to/vault
 ```
 
-Human `rules ingest` runs show progress by default while the PDF is inspected, extracted, OCR-processed, stored, indexed, semantically indexed when a local embedding backend is available, and summarized. Interactive terminals use live progress; redirected non-JSON runs print plain phase lines. Use `--json` when a script or agent needs deterministic machine-readable output.
+Human `rules ingest` runs show progress by default while the PDF is inspected, extracted, OCR-processed, stored, scoped, indexed, semantically indexed when a local embedding backend is available, and summarized. Interactive terminals use live progress; redirected non-JSON runs print plain phase lines. Use `--json` when a script or agent needs deterministic machine-readable output.
 
-`backet rules query` uses hybrid local retrieval when rule embeddings are available: exact FTS/BM25 matches plus semantic vector matches, with source metadata, supplement precedence, and extraction-quality penalties preserved. JSON output reports the retrieval mode, embedding backend/model, candidate counts, and match reasons. If semantic retrieval is missing or unavailable, rules queries fall back to exact search and report that mode.
+Ingest automatically generates local rule scope assertions from PDF structure, headings, known Vampire: The Masquerade aliases, and mechanics/lore markers. High-confidence assertions are applied to chunks; uncertain assertions stay reviewable through `backet rules scope audit`, `export`, and `apply`. Scope manifests are exported on demand; SQLite under `.backet/rules/` remains the canonical rules state. Source PDFs stay outside the vault.
+
+`backet rules query` uses hybrid local retrieval when rule embeddings are available: exact FTS/BM25 matches plus semantic vector matches, with source metadata, generated scope assertions, supplement precedence, and extraction-quality penalties preserved. JSON output reports the retrieval mode, embedding backend/model, candidate counts, and match reasons. If semantic retrieval is missing or unavailable, rules queries fall back to exact search and report that mode.
 
 Run `backet rules index /path/to/vault` after installing or changing the optional embedding backend, after restoring an older rules store, or when `backet rules audit` reports stale semantic coverage. Use `--book-id <id>` to refresh one book or `--full` to rebuild all rule embeddings and derived retrieval-quality metadata for the selected scope.
 
-Source PDFs stay outside the vault. `backet` stores the ingested rules corpus under `.backet/rules/` so it can travel with the vault backup.
+`backet` stores the ingested rules corpus under `.backet/rules/` so it can travel with the vault backup.
 
 OCR fallback needs Tesseract on the local machine. On macOS:
 
@@ -218,13 +222,13 @@ python -m build --wheel
 Run the install smoke test against a built wheel on macOS, Linux, WSL, or Git Bash:
 
 ```bash
-scripts/smoke-install.sh dist/backet-0.1.5-py3-none-any.whl "$PWD"
+scripts/smoke-install.sh dist/backet-0.1.6-py3-none-any.whl "$PWD"
 ```
 
 On native Windows PowerShell, validate the built wheel with `pipx`:
 
 ```powershell
-py -3 -m pipx install --force .\dist\backet-0.1.5-py3-none-any.whl
+py -3 -m pipx install --force .\dist\backet-0.1.6-py3-none-any.whl
 backet --version
 py -3 -m pipx uninstall backet
 ```

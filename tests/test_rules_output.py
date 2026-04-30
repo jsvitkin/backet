@@ -83,6 +83,52 @@ def test_rules_ingest_report_omits_empty_optional_diagnostics(monkeypatch: pytes
     assert "[]" not in output
 
 
+def test_rules_ingest_report_summarizes_generated_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
+    buffer = StringIO()
+    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None))
+
+    emit_rules_ingest_report(
+        CommandResult(
+            message="Ingested rulebook PDF",
+            data={
+                "vault": "/tmp/vault",
+                "rules_db": "/tmp/vault/.backet/rules/rules.sqlite3",
+                "book_id": "camarilla-v5",
+                "book_title": "Camarilla",
+                "tier": "supplement",
+                "scope_tags": [],
+                "scope_assertions": {
+                    "source_scope": ["sect:camarilla"],
+                    "applied": 12,
+                    "suggested": 1,
+                    "review_needed": 1,
+                    "notable": [
+                        {
+                            "pages": "159-168",
+                            "tag": "clan:banu-haqim",
+                            "role": "mechanical-authority",
+                            "status": "applied",
+                        }
+                    ],
+                },
+                "pdf_path": "/tmp/camarilla.pdf",
+                "pages_processed": 203,
+                "ocr_used_on_pages": [],
+                "suspect_pages": [],
+                "chunk_count": 400,
+            },
+        )
+    )
+
+    output = buffer.getvalue()
+    assert "Source scope: sect:camarilla" in output
+    assert "Scopes:  12 applied" in output
+    assert "Suggest: 1 scope assertions need review" in output
+    assert "Scope preview:" in output
+    assert "159-168: clan:banu-haqim" in output
+    assert "backet rules scope audit /tmp/vault --book-id camarilla-v5" in output
+
+
 def test_progress_reporter_uses_plain_lines_for_non_interactive_output() -> None:
     buffer = StringIO()
     reporter = RulesIngestProgressReporter(console=Console(file=buffer, force_terminal=False, color_system=None))

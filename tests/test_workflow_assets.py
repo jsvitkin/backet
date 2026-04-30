@@ -78,8 +78,8 @@ def test_fixture_workflow_validation_combines_vault_context_and_ambiguous_rules(
             )
         ],
     )
-    _ingest_book(runner, retrieval_vault, first_pdf, "camarilla-a", "Camarilla A", "supplement", ["camarilla"])
-    _ingest_book(runner, retrieval_vault, second_pdf, "camarilla-b", "Camarilla B", "supplement", ["camarilla"])
+    _ingest_book(runner, retrieval_vault, first_pdf, "camarilla-a", "Camarilla A", "supplement")
+    _ingest_book(runner, retrieval_vault, second_pdf, "camarilla-b", "Camarilla B", "supplement")
 
     ambiguous_result = runner.invoke(
         app,
@@ -120,8 +120,6 @@ def _ingest_book(
         "--tier",
         tier,
     ]
-    for tag in scope_tags or []:
-        args.extend(["--scope-tag", tag])
     result = runner.invoke(app, args)
     assert result.exit_code == 0, result.stdout
 

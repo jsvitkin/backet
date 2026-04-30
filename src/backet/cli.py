@@ -29,7 +29,16 @@ from backet.indexing import index_vault
 from backet.memory import build_memory_capsules
 from backet.output import CLIState, emit_error, emit_success, emit_version, ensure_state
 from backet.retrieval import build_context_bundle
-from backet.rules import audit_rules, index_rules, ingest_rulebook, query_rules, repair_rules
+from backet.rules import (
+    apply_rule_scope_manifest,
+    audit_rule_scopes,
+    audit_rules,
+    export_rule_scopes,
+    index_rules,
+    ingest_rulebook,
+    query_rules,
+    repair_rules,
+)
 from backet.rules_output import RulesIngestProgressReporter, emit_rules_ingest_report
 from backet.skills import install_skills, skills_status, update_skills
 from backet.vault import diagnose_vault, initialize_vault
@@ -38,6 +47,7 @@ app = typer.Typer(no_args_is_help=True, help="backet CLI")
 skills_app = typer.Typer(help="Manage the backet Codex skill pack.")
 memory_app = typer.Typer(help="Manage derived vault memory capsules.")
 rules_app = typer.Typer(help="Manage ingested rulebook PDFs and raw rules retrieval.")
+rules_scope_app = typer.Typer(help="Inspect and revise generated rule scope assertions.")
 blueprint_app = typer.Typer(help="Manage workflow blueprint scaffolding and status.")
 update_app = typer.Typer(help="Manage the installed backet CLI package.")
 app.add_typer(skills_app, name="skills")
@@ -45,6 +55,7 @@ app.add_typer(memory_app, name="memory")
 app.add_typer(rules_app, name="rules")
 app.add_typer(blueprint_app, name="blueprint")
 app.add_typer(update_app, name="update")
+rules_app.add_typer(rules_scope_app, name="scope")
 
 @app.callback(invoke_without_command=True)
 def main(
@@ -355,10 +366,6 @@ def rules_ingest_command(
     book_id: Annotated[str, typer.Option("--book-id", help="Stable identifier for the ingested book.")] = "",
     title: Annotated[str | None, typer.Option("--title", help="Display title for the ingested book.")] = None,
     tier: Annotated[str, typer.Option("--tier", help="Precedence tier: core or supplement.")] = "core",
-    scope_tags: Annotated[
-        list[str] | None,
-        typer.Option("--scope-tag", help="Repeatable scope tag used for supplement precedence."),
-    ] = None,
     force_ocr: Annotated[bool, typer.Option("--force-ocr", help="Force OCR instead of direct text extraction.")] = False,
     pages: Annotated[str | None, typer.Option("--pages", help="Optional page range, for example `3-5,9`.")] = None,
 ) -> None:
@@ -378,7 +385,6 @@ def rules_ingest_command(
                 book_id=book_id,
                 title=title,
                 tier=tier,
-                scope_tags=scope_tags or [],
                 force_ocr=force_ocr,
                 pages_spec=pages,
             )
@@ -392,7 +398,6 @@ def rules_ingest_command(
                 book_id=book_id,
                 title=title,
                 tier=tier,
-                scope_tags=scope_tags or [],
                 force_ocr=force_ocr,
                 pages_spec=pages,
                 progress=progress,
@@ -452,6 +457,55 @@ def rules_audit_command(
     state = ensure_state(ctx)
     try:
         result = audit_rules(vault.resolve(), book_id=book_id)
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_scope_app.command("audit")
+def rules_scope_audit_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    book_id: Annotated[str | None, typer.Option("--book-id", help="Optional book identifier to audit scopes for.")] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = audit_rule_scopes(vault.resolve(), book_id=book_id)
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_scope_app.command("export")
+def rules_scope_export_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    book_id: Annotated[str, typer.Option("--book-id", help="Book identifier to export scopes for.")] = "",
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        if not book_id.strip():
+            raise AppError(
+                code="rules_book_id_missing",
+                message="A stable `--book-id` is required for rule scope export.",
+                hint="Re-run the command with `--book-id some-book-id`.",
+                exit_code=2,
+            )
+        result = export_rule_scopes(vault.resolve(), book_id=book_id)
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_scope_app.command("apply")
+def rules_scope_apply_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    manifest: Annotated[Path, typer.Argument(help="Path to a reviewed rule scope manifest.", file_okay=True, dir_okay=False)] = Path("."),
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = apply_rule_scope_manifest(vault.resolve(), manifest.resolve())
         emit_success(state, result)
     except AppError as error:
         _handle_error(ctx, error)

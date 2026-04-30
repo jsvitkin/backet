@@ -13,13 +13,35 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable
 
+import yaml
+
 from backet.embeddings import EmbeddingBackend, cosine_similarity, resolve_embedding_backend
 from backet.errors import AppError
 from backet.models import CommandResult
 from backet.paths import rules_db_path
+from backet.rules_scope import (
+    AUTHORITATIVE_SCOPE_ROLES,
+    AUTO_APPLY_CONFIDENCE,
+    SCOPE_GENERATOR,
+    SCOPE_ROLE_SOURCE,
+    SCOPE_STATUS_APPLIED,
+    SCOPE_STATUS_REJECTED,
+    SCOPE_STATUS_SUGGESTED,
+    SCOPE_STATUSES,
+    SUGGESTION_CONFIDENCE,
+    RulePdfOutlineEntry,
+    ScopeAssertionDraft,
+    canonicalize_scope_tag,
+    generate_scope_assertions,
+    is_known_scope_tag,
+    manifest_pages_label,
+    normalize_scope_tags as normalize_scope_tags_from_taxonomy,
+    parse_manifest_pages,
+    status_for_confidence,
+)
 from backet.vault import ensure_bootstrapped_vault
 
-RULES_SCHEMA_VERSION = 2
+RULES_SCHEMA_VERSION = 3
 DEFAULT_PAGE_MIN_CHARS = 80
 DEFAULT_CHUNK_WORDS = 220
 SUPPORTED_TIERS = {"core", "supplement"}
@@ -110,6 +132,9 @@ class RuleSearchCandidate:
     book_title: str
     tier: str
     book_scope_tags: list[str]
+    scope_tags: list[str]
+    scope_assertions: list[dict[str, Any]]
+    scope_fallback_used: bool
     page_start: int
     page_end: int
     section_label: str
@@ -236,6 +261,33 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS rule_scope_assertions (
+            id INTEGER PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+            tag TEXT NOT NULL,
+            role TEXT NOT NULL,
+            status TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            page_start INTEGER,
+            page_end INTEGER,
+            evidence_json TEXT NOT NULL,
+            generator TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rule_scope_assertions_book
+        ON rule_scope_assertions(book_id, status, tag);
+
+        CREATE INDEX IF NOT EXISTS idx_rule_scope_assertions_span
+        ON rule_scope_assertions(book_id, page_start, page_end);
+
+        CREATE TABLE IF NOT EXISTS rule_chunk_scope_assertions (
+            chunk_id INTEGER NOT NULL REFERENCES rule_chunks(id) ON DELETE CASCADE,
+            assertion_id INTEGER NOT NULL REFERENCES rule_scope_assertions(id) ON DELETE CASCADE,
+            PRIMARY KEY (chunk_id, assertion_id)
+        );
+
         CREATE TABLE IF NOT EXISTS rules_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -250,6 +302,7 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
         """,
         (str(RULES_SCHEMA_VERSION),),
     )
+    _backfill_source_scope_assertions(connection)
     connection.commit()
 
 
@@ -259,7 +312,7 @@ def ingest_rulebook(
     book_id: str,
     title: str | None,
     tier: str,
-    scope_tags: list[str],
+    scope_tags: list[str] | None = None,
     force_ocr: bool = False,
     pages_spec: str | None = None,
     progress: RulesIngestProgressCallback | None = None,
@@ -274,15 +327,7 @@ def ingest_rulebook(
             details={"tier": tier},
             exit_code=2,
         )
-    normalized_tags = normalize_scope_tags(scope_tags)
-    if normalized_tier == "supplement" and not normalized_tags:
-        raise AppError(
-            code="rules_scope_tags_missing",
-            message="Supplement rulebooks need at least one scope tag for precedence handling.",
-            hint="Re-run the command with one or more `--scope-tag` values.",
-            details={"book_id": book_id},
-            exit_code=2,
-        )
+    normalized_tags = normalize_scope_tags(scope_tags or [])
     if not pdf_path.exists() or not pdf_path.is_file():
         raise AppError(
             code="rules_pdf_missing",
@@ -314,6 +359,7 @@ def ingest_rulebook(
     document = fitz.open(str(pdf_path))
     try:
         page_count = document.page_count
+        outline = _extract_pdf_outline(document)
         page_numbers = parse_pages_spec(pages_spec, document.page_count)
         _emit_progress(
             progress,
@@ -367,6 +413,15 @@ def ingest_rulebook(
     with closing(open_rules_connection(vault_root)) as connection:
         _upsert_book(connection, entry)
         _replace_pages(connection, entry, extracted_pages, pages_spec=pages_spec, progress=progress)
+        _emit_progress(progress, phase="scope", message="Generating rule scopes", current=0, total=1)
+        scope_summary = _generate_and_apply_scope_assertions(
+            connection,
+            entry=entry,
+            pages=extracted_pages,
+            outline=outline,
+        )
+        _emit_progress(progress, phase="scope", message="Generated rule scopes", current=1, total=1)
+        _rebuild_rule_chunks_fts(connection, book_id, progress=progress)
         semantic_index = _try_index_rule_chunks(connection, book_id=book_id, full=False, progress=progress)
         _emit_progress(progress, phase="audit", message="Summarizing ingest quality", current=0, total=1)
         audit_summary = _audit_summary(connection, book_id)
@@ -383,6 +438,7 @@ def ingest_rulebook(
             "book_title": resolved_title,
             "tier": normalized_tier,
             "scope_tags": normalized_tags,
+            "scope_assertions": scope_summary,
             "pdf_path": str(pdf_path.resolve()),
             "pages_processed": len(extracted_pages),
             "pages_spec": pages_spec,
@@ -583,6 +639,100 @@ def audit_rules(vault_root: Path, book_id: str | None = None) -> CommandResult:
             "books": suspects,
             "semantic_index": semantic_index,
         },
+    )
+
+
+def audit_rule_scopes(vault_root: Path, book_id: str | None = None) -> CommandResult:
+    ensure_bootstrapped_vault(vault_root)
+    with closing(open_rules_connection(vault_root)) as connection:
+        books = _fetch_books(connection, book_id=book_id)
+        if not books:
+            raise AppError(
+                code="rules_book_missing",
+                message="No ingested rulebooks matched the requested scope audit.",
+                hint="Ingest a rulebook first or choose a different `--book-id`.",
+                details={"book_id": book_id},
+                exit_code=2,
+            )
+        summaries = []
+        for book in books:
+            summary = _scope_summary(connection, book_id=book["book_id"])
+            summaries.append(
+                {
+                    "book_id": book["book_id"],
+                    "book_title": book["book_title"],
+                    "tier": book["tier"],
+                    **summary,
+                }
+            )
+    return CommandResult(
+        message="Audited rule scope assertions",
+        data={"vault": str(vault_root), "book_id": book_id, "books": summaries},
+    )
+
+
+def export_rule_scopes(vault_root: Path, book_id: str) -> CommandResult:
+    ensure_bootstrapped_vault(vault_root)
+    with closing(open_rules_connection(vault_root)) as connection:
+        book = _require_book(connection, book_id)
+        manifest = _scope_manifest(connection, book)
+    return CommandResult(
+        message="Exported rule scope assertions",
+        data={"vault": str(vault_root), "book_id": book_id, "manifest": manifest},
+    )
+
+
+def apply_rule_scope_manifest(vault_root: Path, manifest_path: Path) -> CommandResult:
+    ensure_bootstrapped_vault(vault_root)
+    if not manifest_path.exists() or not manifest_path.is_file():
+        raise AppError(
+            code="rules_scope_manifest_missing",
+            message=f"Rule scope manifest not found: {manifest_path}",
+            hint="Provide a readable YAML or JSON manifest path.",
+            details={"manifest_path": str(manifest_path)},
+            exit_code=2,
+        )
+    try:
+        payload = yaml.safe_load(manifest_path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise AppError(
+            code="rules_scope_manifest_invalid",
+            message="Rule scope manifest could not be parsed.",
+            hint="Provide valid YAML or JSON.",
+            details={"manifest_path": str(manifest_path), "error": str(exc)},
+            exit_code=2,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AppError(
+            code="rules_scope_manifest_invalid",
+            message="Rule scope manifest must be a mapping.",
+            hint="Export an existing manifest first, then edit and re-apply it.",
+            details={"manifest_path": str(manifest_path)},
+            exit_code=2,
+        )
+    book_id = str(payload.get("book_id") or "")
+    if not book_id:
+        raise AppError(
+            code="rules_scope_manifest_invalid",
+            message="Rule scope manifest is missing `book_id`.",
+            hint="Export an existing manifest first, then edit and re-apply it.",
+            details={"manifest_path": str(manifest_path)},
+            exit_code=2,
+        )
+
+    with closing(open_rules_connection(vault_root)) as connection:
+        _require_book(connection, book_id)
+        assertions = _manifest_to_assertions(payload)
+        connection.execute("DELETE FROM rule_scope_assertions WHERE book_id = ?", (book_id,))
+        assertion_ids = [_insert_scope_assertion(connection, book_id, assertion) for assertion in assertions]
+        _apply_scope_assertions_to_chunks(connection, book_id=book_id, assertion_ids=assertion_ids)
+        _refresh_chunk_scope_tags(connection, book_id)
+        _rebuild_rule_chunks_fts(connection, book_id)
+        summary = _scope_summary(connection, book_id=book_id)
+        connection.commit()
+    return CommandResult(
+        message="Applied rule scope manifest",
+        data={"vault": str(vault_root), "book_id": book_id, "manifest_path": str(manifest_path), "scope_assertions": summary},
     )
 
 
@@ -811,6 +961,15 @@ def _replace_pages(
     placeholders = ", ".join("?" for _ in page_numbers)
     if page_numbers:
         connection.execute(
+            f"""
+            DELETE FROM rule_scope_assertions
+            WHERE book_id = ?
+              AND page_start IS NOT NULL
+              AND page_start IN ({placeholders})
+            """,
+            [entry.book_id, *page_numbers],
+        )
+        connection.execute(
             f"DELETE FROM page_audit WHERE book_id = ? AND page_number IN ({placeholders})",
             [entry.book_id, *page_numbers],
         )
@@ -820,7 +979,6 @@ def _replace_pages(
         )
     connection.execute("DELETE FROM rule_chunks_fts WHERE book_id = ?", (entry.book_id,))
 
-    # FTS gets rebuilt for the whole book after inserts to keep it consistent.
     total_pages = len(pages)
     chunk_count = 0
     _emit_progress(
@@ -902,6 +1060,13 @@ def _replace_pages(
             counters={"chunks": chunk_count},
             details={"page_number": page.page_number},
         )
+
+def _rebuild_rule_chunks_fts(
+    connection: sqlite3.Connection,
+    book_id: str,
+    progress: RulesIngestProgressCallback | None = None,
+) -> None:
+    connection.execute("DELETE FROM rule_chunks_fts WHERE book_id = ?", (book_id,))
     chunk_rows = connection.execute(
         """
         SELECT rc.id, rc.book_id, b.book_title, b.tier, rc.scope_tags_json, rc.section_label, rc.content
@@ -910,7 +1075,7 @@ def _replace_pages(
         WHERE rc.book_id = ?
         ORDER BY rc.page_start, rc.chunk_index
         """,
-        (entry.book_id,),
+        (book_id,),
     ).fetchall()
     _emit_progress(
         progress,
@@ -952,6 +1117,424 @@ def _fetch_books(connection: sqlite3.Connection, book_id: str | None = None) -> 
     return rows
 
 
+def _extract_pdf_outline(document) -> list[RulePdfOutlineEntry]:
+    try:
+        toc = document.get_toc()
+    except Exception:
+        return []
+    outline: list[RulePdfOutlineEntry] = []
+    for item in toc:
+        if len(item) < 3:
+            continue
+        level, title, page = item[:3]
+        try:
+            page_number = int(page)
+        except (TypeError, ValueError):
+            continue
+        clean_title = " ".join(str(title).split())
+        if clean_title:
+            outline.append(RulePdfOutlineEntry(level=int(level), title=clean_title, page=page_number))
+    return outline
+
+
+def _generate_and_apply_scope_assertions(
+    connection: sqlite3.Connection,
+    *,
+    entry: BookRegistryEntry,
+    pages: list[ExtractedPage],
+    outline: list[RulePdfOutlineEntry],
+) -> dict[str, Any]:
+    generated = generate_scope_assertions(
+        book_id=entry.book_id,
+        title=entry.title,
+        tier=entry.tier,
+        pdf_path=entry.pdf_path,
+        pages=pages,
+        outline=outline,
+    )
+    page_numbers = [page.page_number for page in pages]
+    _delete_scope_assertions_for_pages(connection, book_id=entry.book_id, page_numbers=page_numbers)
+    assertion_ids: list[int] = []
+    for assertion in generated.assertions:
+        assertion_ids.append(_insert_scope_assertion(connection, entry.book_id, assertion))
+    _apply_scope_assertions_to_chunks(connection, book_id=entry.book_id, assertion_ids=assertion_ids)
+    _refresh_chunk_scope_tags(connection, entry.book_id)
+    return _scope_summary(connection, book_id=entry.book_id)
+
+
+def _delete_scope_assertions_for_pages(connection: sqlite3.Connection, *, book_id: str, page_numbers: list[int]) -> None:
+    if page_numbers:
+        placeholders = ", ".join("?" for _ in page_numbers)
+        connection.execute(
+            f"""
+            DELETE FROM rule_scope_assertions
+            WHERE book_id = ?
+              AND page_start IS NOT NULL
+              AND page_start IN ({placeholders})
+            """,
+            [book_id, *page_numbers],
+        )
+    connection.execute(
+        """
+        DELETE FROM rule_scope_assertions
+        WHERE book_id = ?
+          AND page_start IS NULL
+          AND generator = ?
+        """,
+        (book_id, SCOPE_GENERATOR),
+    )
+
+
+def _insert_scope_assertion(connection: sqlite3.Connection, book_id: str, assertion: ScopeAssertionDraft) -> int:
+    now = timestamp_now()
+    cursor = connection.execute(
+        """
+        INSERT INTO rule_scope_assertions (
+            book_id, tag, role, status, confidence, page_start, page_end,
+            evidence_json, generator, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            book_id,
+            assertion.tag,
+            assertion.role,
+            assertion.status,
+            round(assertion.confidence, 4),
+            assertion.page_start,
+            assertion.page_end,
+            json.dumps(assertion.evidence, sort_keys=True),
+            SCOPE_GENERATOR,
+            now,
+            now,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _apply_scope_assertions_to_chunks(
+    connection: sqlite3.Connection,
+    *,
+    book_id: str,
+    assertion_ids: list[int] | None = None,
+) -> None:
+    parameters: list[Any] = [book_id, SCOPE_STATUS_APPLIED]
+    id_clause = ""
+    if assertion_ids is not None:
+        if not assertion_ids:
+            return
+        placeholders = ", ".join("?" for _ in assertion_ids)
+        id_clause = f"AND id IN ({placeholders})"
+        parameters.extend(assertion_ids)
+    assertions = connection.execute(
+        f"""
+        SELECT *
+        FROM rule_scope_assertions
+        WHERE book_id = ?
+          AND status = ?
+          {id_clause}
+        ORDER BY page_start, page_end, id
+        """,
+        parameters,
+    ).fetchall()
+    for assertion in assertions:
+        if assertion["page_start"] is None or assertion["page_end"] is None:
+            chunk_rows = connection.execute(
+                "SELECT id FROM rule_chunks WHERE book_id = ? ORDER BY page_start, chunk_index",
+                (book_id,),
+            ).fetchall()
+        else:
+            chunk_rows = connection.execute(
+                """
+                SELECT id FROM rule_chunks
+                WHERE book_id = ?
+                  AND page_start BETWEEN ? AND ?
+                ORDER BY page_start, chunk_index
+                """,
+                (book_id, assertion["page_start"], assertion["page_end"]),
+            ).fetchall()
+        for row in chunk_rows:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO rule_chunk_scope_assertions (chunk_id, assertion_id)
+                VALUES (?, ?)
+                """,
+                (row["id"], assertion["id"]),
+            )
+
+
+def _refresh_chunk_scope_tags(connection: sqlite3.Connection, book_id: str) -> None:
+    book = connection.execute("SELECT scope_tags_json FROM books WHERE book_id = ?", (book_id,)).fetchone()
+    fallback_tags = json.loads(book["scope_tags_json"]) if book is not None else []
+    chunk_rows = connection.execute("SELECT id FROM rule_chunks WHERE book_id = ?", (book_id,)).fetchall()
+    for row in chunk_rows:
+        tag_rows = connection.execute(
+            """
+            SELECT DISTINCT rsa.tag
+            FROM rule_chunk_scope_assertions csa
+            JOIN rule_scope_assertions rsa ON rsa.id = csa.assertion_id
+            WHERE csa.chunk_id = ?
+              AND rsa.status = ?
+            ORDER BY rsa.tag
+            """,
+            (row["id"], SCOPE_STATUS_APPLIED),
+        ).fetchall()
+        tags = [tag_row["tag"] for tag_row in tag_rows]
+        if not tags:
+            tags = fallback_tags
+        connection.execute(
+            "UPDATE rule_chunks SET scope_tags_json = ? WHERE id = ?",
+            (json.dumps(tags), row["id"]),
+        )
+
+
+def _scope_summary(connection: sqlite3.Connection, book_id: str) -> dict[str, Any]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM rule_scope_assertions
+        WHERE book_id = ?
+        ORDER BY
+            CASE WHEN page_start IS NULL THEN -1 ELSE page_start END,
+            page_end,
+            role,
+            tag
+        """,
+        (book_id,),
+    ).fetchall()
+    by_status: dict[str, int] = {}
+    by_role: dict[str, int] = {}
+    for row in rows:
+        by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+        by_role[row["role"]] = by_role.get(row["role"], 0) + 1
+    source_scope = sorted({row["tag"] for row in rows if row["role"] == SCOPE_ROLE_SOURCE and row["status"] == SCOPE_STATUS_APPLIED})
+    notable = [
+        _scope_assertion_to_dict(row, include_evidence=False)
+        for row in rows
+        if row["status"] in {SCOPE_STATUS_APPLIED, SCOPE_STATUS_SUGGESTED}
+    ][:8]
+    return {
+        "generated": len(rows),
+        "applied": by_status.get(SCOPE_STATUS_APPLIED, 0),
+        "suggested": by_status.get(SCOPE_STATUS_SUGGESTED, 0),
+        "review_needed": by_status.get(SCOPE_STATUS_SUGGESTED, 0),
+        "rejected": by_status.get(SCOPE_STATUS_REJECTED, 0),
+        "source_scope": source_scope,
+        "by_status": by_status,
+        "by_role": by_role,
+        "confidence_thresholds": {
+            "auto_apply": AUTO_APPLY_CONFIDENCE,
+            "suggest": SUGGESTION_CONFIDENCE,
+        },
+        "notable": notable,
+    }
+
+
+def _scope_manifest(connection: sqlite3.Connection, book: sqlite3.Row) -> dict[str, Any]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM rule_scope_assertions
+        WHERE book_id = ?
+        ORDER BY
+            CASE WHEN page_start IS NULL THEN -1 ELSE page_start END,
+            page_end,
+            role,
+            tag
+        """,
+        (book["book_id"],),
+    ).fetchall()
+    source_scope = sorted(
+        {
+            row["tag"]
+            for row in rows
+            if row["role"] == SCOPE_ROLE_SOURCE and row["status"] == SCOPE_STATUS_APPLIED
+        }
+    )
+    scopes = []
+    for row in rows:
+        if row["role"] == SCOPE_ROLE_SOURCE and row["page_start"] is None:
+            continue
+        scopes.append(_scope_assertion_to_dict(row, include_evidence=True))
+    return {
+        "book_id": book["book_id"],
+        "book_title": book["book_title"],
+        "tier": book["tier"],
+        "source_scope": source_scope,
+        "scopes": scopes,
+    }
+
+
+def _scope_assertion_to_dict(row: sqlite3.Row, *, include_evidence: bool = True) -> dict[str, Any]:
+    data = {
+        "id": row["id"],
+        "tag": row["tag"],
+        "role": row["role"],
+        "status": row["status"],
+        "confidence": row["confidence"],
+        "pages": manifest_pages_label(row["page_start"], row["page_end"]),
+    }
+    if include_evidence:
+        try:
+            data["evidence"] = json.loads(row["evidence_json"])
+        except json.JSONDecodeError:
+            data["evidence"] = {}
+    return data
+
+
+def _require_book(connection: sqlite3.Connection, book_id: str) -> sqlite3.Row:
+    book = connection.execute("SELECT * FROM books WHERE book_id = ?", (book_id,)).fetchone()
+    if book is None:
+        raise AppError(
+            code="rules_book_missing",
+            message="No ingested rulebook matches the requested scope operation.",
+            hint="Ingest the rulebook first or choose a different `--book-id`.",
+            details={"book_id": book_id},
+            exit_code=2,
+        )
+    return book
+
+
+def _manifest_to_assertions(payload: dict[str, Any]) -> list[ScopeAssertionDraft]:
+    assertions: list[ScopeAssertionDraft] = []
+    for tag_value in _manifest_list(payload.get("source_scope")):
+        tag = canonicalize_scope_tag(tag_value)
+        assertions.append(
+            ScopeAssertionDraft(
+                tag=tag,
+                role=SCOPE_ROLE_SOURCE,
+                status=SCOPE_STATUS_APPLIED,
+                confidence=1.0,
+                evidence={"source": "reviewed_manifest", "generator": SCOPE_GENERATOR},
+            )
+        )
+    for item in _manifest_list(payload.get("scopes")):
+        if not isinstance(item, dict):
+            raise AppError(
+                code="rules_scope_manifest_invalid",
+                message="Each scope manifest entry must be a mapping.",
+                hint="Use entries with pages, tags, role, status, and confidence.",
+                details={"entry": item},
+                exit_code=2,
+            )
+        try:
+            page_start, page_end = parse_manifest_pages(item.get("pages"))
+        except (TypeError, ValueError) as exc:
+            raise AppError(
+                code="rules_scope_manifest_invalid",
+                message="Scope manifest entry has an invalid page span.",
+                hint="Use a page number, a range like `159-168`, or `book`.",
+                details={"entry": item},
+                exit_code=2,
+            ) from exc
+        role = str(item.get("role") or SCOPE_ROLE_SOURCE)
+        status = str(item.get("status") or SCOPE_STATUS_APPLIED)
+        if role not in {
+            "source",
+            "mechanical-authority",
+            "setting-authority",
+            "perspective",
+            "mention",
+        }:
+            raise AppError(
+                code="rules_scope_manifest_invalid",
+                message="Scope manifest entry has an invalid role.",
+                hint="Use source, mechanical-authority, setting-authority, perspective, or mention.",
+                details={"role": role},
+                exit_code=2,
+            )
+        if status not in SCOPE_STATUSES:
+            raise AppError(
+                code="rules_scope_manifest_invalid",
+                message="Scope manifest entry has an invalid status.",
+                hint="Use applied, suggested, rejected, or superseded.",
+                details={"status": status},
+                exit_code=2,
+            )
+        confidence = float(item.get("confidence") if item.get("confidence") is not None else 1.0)
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        tags = _manifest_list(item.get("tags") or item.get("tag"))
+        if not tags:
+            raise AppError(
+                code="rules_scope_manifest_invalid",
+                message="Scope manifest entry is missing tags.",
+                hint="Use `tags: [sect:camarilla]` or `tag: sect:camarilla`.",
+                details={"entry": item},
+                exit_code=2,
+            )
+        for tag_value in tags:
+            tag = canonicalize_scope_tag(str(tag_value))
+            effective_status = status
+            if not is_known_scope_tag(tag) and status == SCOPE_STATUS_APPLIED:
+                effective_status = status_for_confidence(min(confidence, SUGGESTION_CONFIDENCE), tag)
+            assertions.append(
+                ScopeAssertionDraft(
+                    tag=tag,
+                    role=role,
+                    status=effective_status,
+                    confidence=confidence,
+                    page_start=page_start,
+                    page_end=page_end,
+                    evidence={**evidence, "source": "reviewed_manifest", "generator": SCOPE_GENERATOR},
+                )
+            )
+    return assertions
+
+
+def _manifest_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _backfill_source_scope_assertions(connection: sqlite3.Connection) -> None:
+    books = connection.execute("SELECT book_id, scope_tags_json FROM books").fetchall()
+    now = timestamp_now()
+    changed_books: set[str] = set()
+    for book in books:
+        try:
+            tags = normalize_scope_tags(json.loads(book["scope_tags_json"]))
+        except (TypeError, json.JSONDecodeError):
+            tags = []
+        for tag in tags:
+            existing = connection.execute(
+                """
+                SELECT id FROM rule_scope_assertions
+                WHERE book_id = ? AND tag = ? AND role = ? AND page_start IS NULL
+                """,
+                (book["book_id"], tag, SCOPE_ROLE_SOURCE),
+            ).fetchone()
+            if existing is not None:
+                continue
+            connection.execute(
+                """
+                INSERT INTO rule_scope_assertions (
+                    book_id, tag, role, status, confidence, page_start, page_end,
+                    evidence_json, generator, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
+                """,
+                (
+                    book["book_id"],
+                    tag,
+                    SCOPE_ROLE_SOURCE,
+                    SCOPE_STATUS_APPLIED,
+                    1.0,
+                    json.dumps({"source": "migrated_book_scope_tags", "generator": SCOPE_GENERATOR}, sort_keys=True),
+                    "migration",
+                    now,
+                    now,
+                ),
+            )
+            changed_books.add(book["book_id"])
+    for current_book_id in changed_books:
+        _apply_scope_assertions_to_chunks(connection, book_id=current_book_id, assertion_ids=None)
+        _refresh_chunk_scope_tags(connection, current_book_id)
+        _rebuild_rule_chunks_fts(connection, current_book_id)
+
+
 def _search_rule_chunks(
     connection: sqlite3.Connection,
     fts_query: str,
@@ -967,6 +1550,7 @@ def _search_rule_chunks(
             b.book_title,
             b.tier,
             b.scope_tags_json AS book_scope_tags_json,
+            rc.scope_tags_json AS chunk_scope_tags_json,
             rc.page_start,
             rc.page_end,
             rc.section_label,
@@ -979,6 +1563,19 @@ def _search_rule_chunks(
             m.section_kind,
             m.retrieval_flags_json,
             m.content_hash AS metadata_content_hash,
+            COALESCE((
+                SELECT json_group_array(json_object(
+                    'id', rsa.id,
+                    'tag', rsa.tag,
+                    'role', rsa.role,
+                    'status', rsa.status,
+                    'confidence', rsa.confidence
+                ))
+                FROM rule_chunk_scope_assertions csa
+                JOIN rule_scope_assertions rsa ON rsa.id = csa.assertion_id
+                WHERE csa.chunk_id = rc.id
+                  AND rsa.status = 'applied'
+            ), '[]') AS scope_assertions_json,
             bm25(rule_chunks_fts) AS rank
         FROM rule_chunks_fts
         JOIN rule_chunks rc ON rc.id = rule_chunks_fts.chunk_id
@@ -994,11 +1591,22 @@ def _search_rule_chunks(
     for row in rows:
         if book_id and row["book_id"] != book_id:
             continue
-        row_tags = json.loads(row["book_scope_tags_json"])
-        if row["tier"] == "supplement" and scope_tags and not set(scope_tags).issubset(set(row_tags)):
+        if row["tier"] == "supplement" and scope_tags and not _row_matches_scope(row, scope_tags):
             continue
         filtered.append(row)
     return filtered
+
+
+def _row_matches_scope(row: sqlite3.Row, scope_tags: list[str]) -> bool:
+    requested = set(scope_tags)
+    chunk_tags = set(_json_list(_row_optional(row, "chunk_scope_tags_json")))
+    if requested.issubset(chunk_tags):
+        return True
+    assertions = _json_assertions(_row_optional(row, "scope_assertions_json"))
+    if assertions and requested.issubset({assertion["tag"] for assertion in assertions}):
+        return True
+    book_tags = set(_json_list(_row_optional(row, "book_scope_tags_json")))
+    return not assertions and requested.issubset(book_tags)
 
 
 def _apply_precedence(
@@ -1009,19 +1617,27 @@ def _apply_precedence(
     rows = sorted(rows, key=_candidate_sort_key)
     supplements = [row for row in rows if row.tier == "supplement"]
     cores = [row for row in rows if row.tier == "core"]
+    authority_supplements = [
+        row for row in supplements if _candidate_has_precedence_scope(row, scope_tags)
+    ]
+    contextual_supplements = [row for row in supplements if row not in authority_supplements]
     if explicit_book_id:
         return rows, [], None
-    if not supplements:
+    if not authority_supplements:
+        if cores:
+            return cores, contextual_supplements, None
+        if contextual_supplements:
+            return contextual_supplements, [], None
         return cores, [], None
 
     by_book: dict[str, list[RuleSearchCandidate]] = {}
-    for row in supplements:
+    for row in authority_supplements:
         by_book.setdefault(row.book_id, []).append(row)
 
     book_scores = []
     for current_book_id, current_rows in by_book.items():
         score = max(row.score for row in current_rows)
-        row_tags = current_rows[0].book_scope_tags
+        row_tags = current_rows[0].scope_tags
         overlap = len(set(row_tags) & set(scope_tags)) if scope_tags else len(row_tags)
         book_scores.append((current_book_id, score, overlap, current_rows))
 
@@ -1032,7 +1648,7 @@ def _apply_precedence(
             "book_id": book_id,
             "book_title": rows_for_book[0].book_title,
             "score": round(score, 6),
-            "scope_tags": rows_for_book[0].book_scope_tags,
+            "scope_tags": rows_for_book[0].scope_tags,
         }
         for book_id, score, _, rows_for_book in book_scores[1:]
         if abs(score - primary_score) <= 0.05
@@ -1046,14 +1662,14 @@ def _apply_precedence(
                     "book_id": primary_book_id,
                     "book_title": primary_rows[0].book_title,
                     "score": round(primary_score, 6),
-                    "scope_tags": primary_rows[0].book_scope_tags,
+                    "scope_tags": primary_rows[0].scope_tags,
                 },
                 *competing,
             ],
         }
 
-    primary = [row for row in supplements if row.book_id == primary_book_id]
-    fallback = cores
+    primary = [row for row in authority_supplements if row.book_id == primary_book_id]
+    fallback = cores + contextual_supplements
     return primary, fallback, None
 
 
@@ -1062,7 +1678,10 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
         "book_id": row.book_id,
         "book_title": row.book_title,
         "tier": row.tier,
-        "scope_tags": row.book_scope_tags,
+        "scope_tags": row.scope_tags,
+        "book_scope_tags": row.book_scope_tags,
+        "scope_assertions": row.scope_assertions,
+        "scope_fallback_used": row.scope_fallback_used,
         "page_start": row.page_start,
         "page_end": row.page_end,
         "section_label": row.section_label,
@@ -1078,6 +1697,20 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
         "section_kind": row.section_kind,
         "retrieval_flags": row.retrieval_flags,
     }
+
+
+def _candidate_has_precedence_scope(candidate: RuleSearchCandidate, scope_tags: list[str]) -> bool:
+    if not scope_tags:
+        return True
+    requested = set(scope_tags)
+    authoritative_tags = {
+        assertion["tag"]
+        for assertion in candidate.scope_assertions
+        if assertion.get("role") in AUTHORITATIVE_SCOPE_ROLES
+    }
+    if requested.issubset(authoritative_tags):
+        return True
+    return candidate.scope_fallback_used and requested.issubset(set(candidate.scope_tags))
 
 
 def _search_semantic_rule_chunks(
@@ -1117,6 +1750,7 @@ def _search_semantic_rule_chunks(
             b.book_title,
             b.tier,
             b.scope_tags_json AS book_scope_tags_json,
+            rc.scope_tags_json AS chunk_scope_tags_json,
             rc.page_start,
             rc.page_end,
             rc.section_label,
@@ -1129,7 +1763,20 @@ def _search_semantic_rule_chunks(
             e.embedding_json,
             m.section_kind,
             m.retrieval_flags_json,
-            m.content_hash AS metadata_content_hash
+            m.content_hash AS metadata_content_hash,
+            COALESCE((
+                SELECT json_group_array(json_object(
+                    'id', rsa.id,
+                    'tag', rsa.tag,
+                    'role', rsa.role,
+                    'status', rsa.status,
+                    'confidence', rsa.confidence
+                ))
+                FROM rule_chunk_scope_assertions csa
+                JOIN rule_scope_assertions rsa ON rsa.id = csa.assertion_id
+                WHERE csa.chunk_id = rc.id
+                  AND rsa.status = 'applied'
+            ), '[]') AS scope_assertions_json
         FROM rule_chunks rc
         JOIN books b ON b.book_id = rc.book_id
         JOIN rule_chunk_embeddings e ON e.chunk_id = rc.id
@@ -1144,8 +1791,7 @@ def _search_semantic_rule_chunks(
     for row in rows:
         if book_id and row["book_id"] != book_id:
             continue
-        row_tags = json.loads(row["book_scope_tags_json"])
-        if row["tier"] == "supplement" and scope_tags and not set(scope_tags).issubset(set(row_tags)):
+        if row["tier"] == "supplement" and scope_tags and not _row_matches_scope(row, scope_tags):
             continue
         filtered.append(row)
 
@@ -1202,6 +1848,12 @@ def _merge_rule_candidates(
 def _candidate_from_row(row: sqlite3.Row) -> RuleSearchCandidate:
     section_kind = _row_optional(row, "section_kind")
     retrieval_flags = _json_list(_row_optional(row, "retrieval_flags_json"))
+    scope_assertions = _json_assertions(_row_optional(row, "scope_assertions_json"))
+    book_scope_tags = _json_list(_row_optional(row, "book_scope_tags_json"))
+    scope_tags = _json_list(_row_optional(row, "chunk_scope_tags_json"))
+    if not scope_tags:
+        scope_tags = book_scope_tags
+    scope_fallback_used = not scope_assertions and bool(scope_tags and scope_tags == book_scope_tags)
     if not section_kind or _row_optional(row, "metadata_content_hash") != row["content_hash"]:
         section_kind, retrieval_flags = classify_rule_chunk(
             section_label=row["section_label"],
@@ -1215,7 +1867,10 @@ def _candidate_from_row(row: sqlite3.Row) -> RuleSearchCandidate:
         book_id=str(row["book_id"]),
         book_title=str(row["book_title"]),
         tier=str(row["tier"]),
-        book_scope_tags=json.loads(row["book_scope_tags_json"]),
+        book_scope_tags=book_scope_tags,
+        scope_tags=scope_tags,
+        scope_assertions=scope_assertions,
+        scope_fallback_used=scope_fallback_used,
         page_start=int(row["page_start"]),
         page_end=int(row["page_end"]),
         section_label=str(row["section_label"]),
@@ -1238,11 +1893,28 @@ def _score_rule_candidate(candidate: RuleSearchCandidate, scope_tags: list[str])
         reasons.add("retrieval-metadata")
 
     if candidate.tier == "supplement":
-        reasons.add("supplement-precedence")
-        overlap = len(set(candidate.book_scope_tags) & set(scope_tags)) if scope_tags else 0
-        if overlap:
-            score += SUPPLEMENT_SCOPE_BOOST + (0.03 * overlap)
-            reasons.add("scope-tag")
+        if not scope_tags:
+            reasons.add("supplement-precedence")
+        authoritative_overlap = _scope_assertion_overlap(candidate, scope_tags, authoritative=True)
+        contextual_overlap = _scope_assertion_overlap(candidate, scope_tags, authoritative=False)
+        fallback_overlap = len(set(candidate.scope_tags) & set(scope_tags)) if candidate.scope_fallback_used else 0
+        if authoritative_overlap:
+            reasons.add("supplement-precedence")
+            reasons.add("scope-assertion")
+            score += SUPPLEMENT_SCOPE_BOOST + (0.04 * authoritative_overlap)
+        elif contextual_overlap:
+            reasons.add("scope-assertion")
+            reasons.add("scope-context")
+            score += 0.04 * contextual_overlap
+        elif fallback_overlap:
+            reasons.add("supplement-precedence")
+            reasons.add("source-scope-fallback")
+            score += SUPPLEMENT_SCOPE_BOOST + (0.03 * fallback_overlap)
+        elif scope_tags:
+            reasons.add("scope-mismatch")
+        elif candidate.scope_tags:
+            score += SUPPLEMENT_SCOPE_BOOST + (0.03 * len(candidate.scope_tags))
+            reasons.add("scope-assertion" if candidate.scope_assertions else "source-scope-fallback")
     elif scope_tags:
         reasons.add("core-fallback")
 
@@ -1252,6 +1924,19 @@ def _score_rule_candidate(candidate: RuleSearchCandidate, scope_tags: list[str])
     candidate.quality_penalty = penalty
     candidate.score = max(score - penalty, 0.0)
     candidate.match_reasons = sorted(reasons)
+
+
+def _scope_assertion_overlap(candidate: RuleSearchCandidate, scope_tags: list[str], *, authoritative: bool) -> int:
+    if not scope_tags:
+        return 0
+    requested = set(scope_tags)
+    roles = AUTHORITATIVE_SCOPE_ROLES if authoritative else set()
+    tags = {
+        assertion["tag"]
+        for assertion in candidate.scope_assertions
+        if (assertion.get("role") in roles if authoritative else assertion.get("role") not in AUTHORITATIVE_SCOPE_ROLES)
+    }
+    return len(requested & tags)
 
 
 def _rule_quality_penalty(candidate: RuleSearchCandidate) -> float:
@@ -1622,6 +2307,34 @@ def _json_list(payload: Any) -> list[str]:
     return [str(item) for item in value]
 
 
+def _json_assertions(payload: Any) -> list[dict[str, Any]]:
+    if not payload:
+        return []
+    try:
+        value = json.loads(str(payload))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(value, list):
+        return []
+    assertions: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag") or "")
+        if not tag:
+            continue
+        assertions.append(
+            {
+                "id": item.get("id"),
+                "tag": tag,
+                "role": str(item.get("role") or ""),
+                "status": str(item.get("status") or ""),
+                "confidence": float(item.get("confidence") or 0.0),
+            }
+        )
+    return assertions
+
+
 def _semantic_error(error: AppError) -> dict[str, Any]:
     return {"code": error.code, "message": error.message, "hint": error.hint, "details": error.details}
 
@@ -1688,14 +2401,7 @@ def infer_section_label(text: str, page_number: int) -> str:
 
 
 def normalize_scope_tags(scope_tags: list[str]) -> list[str]:
-    normalized = []
-    for tag in scope_tags:
-        current = tag.strip().lower()
-        if not current:
-            continue
-        if current not in normalized:
-            normalized.append(current)
-    return normalized
+    return normalize_scope_tags_from_taxonomy(scope_tags)
 
 
 def parse_pages_spec(pages_spec: str | None, page_count: int) -> list[int]:

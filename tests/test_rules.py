@@ -22,7 +22,7 @@ from backet.rules import (
 
 def test_parse_pages_spec_and_scope_tag_normalization() -> None:
     assert parse_pages_spec("1-3,5", 7) == [1, 2, 3, 5]
-    assert normalize_scope_tags([" Camarilla ", "camarilla", " Discipline "]) == ["camarilla", "discipline"]
+    assert normalize_scope_tags([" Camarilla ", "camarilla", " Discipline "]) == ["sect:camarilla", "discipline"]
     with pytest.raises(AppError, match="whole page numbers"):
         parse_pages_spec("1-a", 7)
 
@@ -321,8 +321,6 @@ def test_rules_ingest_uses_ocr_fallback_for_image_only_pdf(
             "Camarilla Guide",
             "--tier",
             "supplement",
-            "--scope-tag",
-            "camarilla",
         ],
     )
 
@@ -459,7 +457,7 @@ def test_rules_query_applies_supplement_precedence_and_core_fallback(runner, tmp
         ],
     )
     _ingest_book(runner, vault, core_pdf, "core-v5", "Core Rulebook", "core")
-    _ingest_book(runner, vault, supplement_pdf, "camarilla", "Camarilla", "supplement", ["camarilla"])
+    _ingest_book(runner, vault, supplement_pdf, "camarilla", "Camarilla", "supplement")
 
     result = runner.invoke(
         app,
@@ -478,6 +476,161 @@ def test_rules_query_applies_supplement_precedence_and_core_fallback(runner, tmp
     payload = json.loads(result.stdout)
     assert payload["data"]["primary_results"][0]["book_id"] == "camarilla"
     assert payload["data"]["fallback_results"][0]["book_id"] == "core-v5"
+
+
+def test_rules_ingest_generates_scope_assertions_and_review_commands(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "camarilla-scopes.pdf",
+        [
+            _rule_page(
+                "Banu Haqim",
+                "Disciplines include Blood Sorcery. Bane, Clan Compulsion, and Rituals define the mechanical play surface for the clan.",
+            ),
+            _rule_page(
+                "Institutional Conflict",
+                "Institutional Conflict pools, Institutional Scale, and Institutional Damage resolve boardroom struggles between mortal institutions.",
+            ),
+        ],
+    )
+
+    ingest_result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "ingest",
+            str(vault),
+            str(pdf_path),
+            "--book-id",
+            "camarilla-v5",
+            "--title",
+            "Camarilla",
+            "--tier",
+            "supplement",
+        ],
+    )
+    assert ingest_result.exit_code == 0
+    ingest_payload = json.loads(ingest_result.stdout)
+    scopes = ingest_payload["data"]["scope_assertions"]
+    assert "sect:camarilla" in scopes["source_scope"]
+    assert scopes["applied"] >= 4
+
+    audit_result = runner.invoke(app, ["--json", "rules", "scope", "audit", str(vault), "--book-id", "camarilla-v5"])
+    assert audit_result.exit_code == 0
+    audit_payload = json.loads(audit_result.stdout)
+    assert audit_payload["data"]["books"][0]["source_scope"] == ["sect:camarilla"]
+
+    export_result = runner.invoke(app, ["--json", "rules", "scope", "export", str(vault), "--book-id", "camarilla-v5"])
+    assert export_result.exit_code == 0
+    export_payload = json.loads(export_result.stdout)
+    manifest = export_payload["data"]["manifest"]
+    exported_tags = {tag for scope in manifest["scopes"] for tag in [scope["tag"]]}
+    assert "clan:banu-haqim" in exported_tags
+    assert "mechanic:institutional-conflict" in exported_tags
+
+    query_result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "query",
+            str(vault),
+            "blood sorcery rituals",
+            "--scope-tag",
+            "banu-haqim",
+        ],
+    )
+    assert query_result.exit_code == 0
+    query_payload = json.loads(query_result.stdout)
+    first = query_payload["data"]["primary_results"][0]
+    assert first["book_id"] == "camarilla-v5"
+    assert "clan:banu-haqim" in first["scope_tags"]
+    assert "scope-assertion" in first["match_reasons"]
+    assert any(assertion["tag"] == "clan:banu-haqim" for assertion in first["scope_assertions"])
+
+
+def test_rules_scope_apply_validates_and_refreshes_query_scopes(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "custom-scope.pdf",
+        [
+            _rule_page(
+                "Strange Bloodline",
+                "This page describes a custom ritual mystery that should be reviewable through an applied manifest.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "custom-book", "Custom Book", "supplement")
+    manifest_path = tmp_path / "custom-scopes.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "book_id": "custom-book",
+                "source_scope": ["sect:camarilla"],
+                "scopes": [
+                    {
+                        "pages": "1",
+                        "tags": ["mechanic:ritual"],
+                        "role": "mechanical-authority",
+                        "status": "applied",
+                        "confidence": 1.0,
+                    }
+                ],
+            }
+        )
+    )
+
+    apply_result = runner.invoke(app, ["--json", "rules", "scope", "apply", str(vault), str(manifest_path)])
+    assert apply_result.exit_code == 0
+
+    query_result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "custom ritual mystery", "--scope-tag", "ritual"],
+    )
+    assert query_result.exit_code == 0
+    query_payload = json.loads(query_result.stdout)
+    assert query_payload["data"]["primary_results"][0]["book_id"] == "custom-book"
+    assert "mechanic:ritual" in query_payload["data"]["primary_results"][0]["scope_tags"]
+
+    invalid_manifest = tmp_path / "invalid-scopes.json"
+    invalid_manifest.write_text(json.dumps({"book_id": "custom-book", "scopes": [{"pages": "1", "tags": ["ritual"], "role": "bad"}]}))
+    invalid_result = runner.invoke(app, ["--json", "rules", "scope", "apply", str(vault), str(invalid_manifest)])
+    assert invalid_result.exit_code == 2
+    invalid_payload = json.loads(invalid_result.stdout)
+    assert invalid_payload["error"]["code"] == "rules_scope_manifest_invalid"
+
+
+def test_perspective_scope_does_not_override_authoritative_core(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    core_pdf = _create_text_pdf(
+        tmp_path / "sabbat-core.pdf",
+        [
+            _rule_page(
+                "Sabbat Mechanics",
+                "Sabbat vaulderie mechanics define a system test and dice pool for sect rituals.",
+            )
+        ],
+    )
+    perspective_pdf = _create_text_pdf(
+        tmp_path / "camarilla-perspective.pdf",
+        [
+            _rule_page(
+                "The Sabbat",
+                "The Camarilla regards the Sabbat as a dangerous enemy and warns neonates away from their ideology.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, core_pdf, "core-v5", "Core Rulebook", "core")
+    _ingest_book(runner, vault, perspective_pdf, "camarilla-v5", "Camarilla", "supplement")
+
+    result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "sabbat vaulderie mechanics", "--scope-tag", "sabbat"],
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["primary_results"][0]["book_id"] == "core-v5"
 
 
 def test_rules_query_surfaces_ambiguous_specific_sources(runner, tmp_path: Path) -> None:
@@ -500,8 +653,8 @@ def test_rules_query_surfaces_ambiguous_specific_sources(runner, tmp_path: Path)
             )
         ],
     )
-    _ingest_book(runner, vault, first_pdf, "camarilla-a", "Camarilla A", "supplement", ["camarilla"])
-    _ingest_book(runner, vault, second_pdf, "camarilla-b", "Camarilla B", "supplement", ["camarilla"])
+    _ingest_book(runner, vault, first_pdf, "camarilla-a", "Camarilla A", "supplement")
+    _ingest_book(runner, vault, second_pdf, "camarilla-b", "Camarilla B", "supplement")
 
     result = runner.invoke(
         app,
@@ -529,7 +682,7 @@ def test_rules_audit_and_targeted_repair(runner, tmp_path: Path, monkeypatch: py
         "The first scan is unreadable without proper OCR repair.",
     )
     monkeypatch.setattr("backet.rules._ocr_page", lambda page, pdf_path, page_number: "bad")
-    _ingest_book(runner, vault, pdf_path, "ocr-book", "OCR Book", "supplement", ["ritual"])
+    _ingest_book(runner, vault, pdf_path, "ocr-book", "OCR Book", "supplement")
 
     audit_result = runner.invoke(app, ["--json", "rules", "audit", str(vault), "--book-id", "ocr-book"])
     assert audit_result.exit_code == 0
@@ -582,8 +735,6 @@ def _ingest_book(
         "--tier",
         tier,
     ]
-    for tag in scope_tags or []:
-        args.extend(["--scope-tag", tag])
     result = runner.invoke(app, args)
     assert result.exit_code == 0, result.stdout
 

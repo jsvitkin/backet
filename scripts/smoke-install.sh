@@ -118,3 +118,5 @@ PY
   | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["primary_results"]'
 "$BACKET_BIN" --json rules audit "$VAULT_DIR" --book-id core-v5 \
   | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["books"]'
+"$BACKET_BIN" --json rules scope audit "$VAULT_DIR" --book-id core-v5 \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["books"][0]["confidence_thresholds"]'

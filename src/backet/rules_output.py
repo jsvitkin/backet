@@ -16,6 +16,7 @@ PHASE_LABELS = {
     "ocr": "OCR fallback",
     "fingerprint": "Fingerprinting PDF",
     "store": "Storing chunks",
+    "scope": "Generating scopes",
     "index": "Building search index",
     "semantic-index": "Building semantic index",
     "audit": "Summarizing quality",
@@ -132,6 +133,7 @@ def emit_rules_ingest_report(result: CommandResult) -> None:
     pages_processed = int(data.get("pages_processed") or 0)
     chunk_count = int(data.get("chunk_count") or 0)
     scope_tags = _list_values(data.get("scope_tags"))
+    scope_assertions = data.get("scope_assertions")
     ocr_pages = _int_values(data.get("ocr_used_on_pages"))
     suspect_pages = _int_values(data.get("suspect_pages"))
 
@@ -140,8 +142,21 @@ def emit_rules_ingest_report(result: CommandResult) -> None:
     output.console.print(f"Book:    {book_id} ({tier})")
     if scope_tags:
         output.console.print(f"Scope:   {', '.join(scope_tags)}")
+    if isinstance(scope_assertions, dict):
+        source_scope = _list_values(scope_assertions.get("source_scope"))
+        if source_scope:
+            output.console.print(f"Source scope: {', '.join(source_scope)}")
     output.console.print(f"Pages:   {pages_processed:,} processed")
     output.console.print(f"Chunks:  {chunk_count:,} stored")
+    if isinstance(scope_assertions, dict):
+        applied = int(scope_assertions.get("applied") or 0)
+        suggested = int(scope_assertions.get("suggested") or 0)
+        review_needed = int(scope_assertions.get("review_needed") or 0)
+        output.console.print(f"Scopes:  {applied:,} applied")
+        if suggested:
+            output.console.print(f"Suggest: {suggested:,} scope assertions need review")
+        if review_needed:
+            output.console.print(f"Review:  {review_needed:,} scope assertions need review")
     semantic_index = data.get("semantic_index")
     if isinstance(semantic_index, dict):
         mode = semantic_index.get("retrieval_mode") or "exact_only"
@@ -162,6 +177,19 @@ def emit_rules_ingest_report(result: CommandResult) -> None:
         output.console.print("Created:")
         for item in result.created:
             output.console.print(f"  - {item}")
+    if isinstance(scope_assertions, dict):
+        notable = scope_assertions.get("notable")
+        if isinstance(notable, list) and notable:
+            output.console.print("")
+            output.console.print("Scope preview:")
+            for item in notable[:5]:
+                if not isinstance(item, dict):
+                    continue
+                output.console.print(
+                    f"  - {item.get('pages')}: {item.get('tag')} ({item.get('role')}, {item.get('status')})"
+                )
+        if int(scope_assertions.get("review_needed") or 0):
+            output.console.print(f"Run: {scope_audit_command(data)}")
 
     if ocr_pages:
         output.console.print("")
@@ -190,6 +218,12 @@ def rules_index_command(data: dict[str, Any]) -> str:
     return f"backet rules index {vault} --book-id {book_id}"
 
 
+def scope_audit_command(data: dict[str, Any]) -> str:
+    vault = shlex.quote(str(data.get("vault") or "."))
+    book_id = shlex.quote(str(data.get("book_id") or ""))
+    return f"backet rules scope audit {vault} --book-id {book_id}"
+
+
 def _event_label(event: RulesIngestProgressEvent) -> str:
     if event.phase == "ocr":
         return event.message
@@ -211,6 +245,7 @@ def _format_counters(counters: dict[str, int]) -> str:
         "ocr_pages": "OCR",
         "review_pages": "review",
         "chunks": "chunks",
+        "assertions": "assertions",
         "embeddings": "embeddings",
     }
     parts = [f"{labels.get(key, key)}: {value:,}" for key, value in counters.items() if value]

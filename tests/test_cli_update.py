@@ -49,7 +49,7 @@ def fake_latest_response(version: str, *, prerelease: bool = False) -> dict[str,
     }
 
 
-def available_status(installed: str = "0.1.4", latest: str = "0.1.5") -> UpdateStatus:
+def available_status(installed: str = "0.1.4", latest: str = "0.1.6") -> UpdateStatus:
     return UpdateStatus(
         installed_version=installed,
         latest_version=latest,
@@ -112,12 +112,12 @@ def test_discover_latest_release_ignores_prerelease(monkeypatch: pytest.MonkeyPa
 def test_check_cli_update_ignores_legacy_cached_prerelease(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime(2026, 4, 30, 12, 0, tzinfo=timezone.utc)
     write_legacy_update_cache(latest="0.2.0", update_available=False)
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.5")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.6")))
 
     status = check_cli_update("0.1.2", now=now)
 
     assert status.source == "network"
-    assert status.latest_version == "0.1.5"
+    assert status.latest_version == "0.1.6"
     assert status.update_available is True
 
 
@@ -137,14 +137,14 @@ def test_update_check_always_uses_network_when_legacy_cache_exists(monkeypatch: 
 
     def fake_urlopen(*_args: object, **_kwargs: object) -> FakeResponse:
         calls.append("network")
-        return FakeResponse(fake_latest_response("0.1.5"))
+        return FakeResponse(fake_latest_response("0.1.6"))
 
     monkeypatch.setattr(cli_update, "urlopen", fake_urlopen)
     status = check_cli_update("0.1.2", now=now)
 
     assert calls == ["network"]
     assert status.source == "network"
-    assert status.latest_version == "0.1.5"
+    assert status.latest_version == "0.1.6"
 
 
 def test_update_check_ignores_cached_update_on_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,12 +182,12 @@ def test_declined_update_snooze_only_applies_to_that_version() -> None:
 def test_declined_update_snooze_writes_snooze_only_state() -> None:
     legacy_cache_path = write_legacy_update_cache(latest="0.1.3")
 
-    snooze_update(available_status(latest="0.1.5"))
+    snooze_update(available_status(latest="0.1.6"))
 
     assert legacy_cache_path.exists()
     state = read_update_state()
     assert state is not None
-    assert state["snoozed_version"] == "0.1.5"
+    assert state["snoozed_version"] == "0.1.6"
     assert "latest_version" not in state
     assert "wheel_url" not in state
 
@@ -197,7 +197,7 @@ def test_update_check_command_supports_json_and_human_output(runner, monkeypatch
 
     def fake_urlopen(*_args: object, **_kwargs: object) -> FakeResponse:
         calls.append("network")
-        return FakeResponse(fake_latest_response("0.1.6"))
+        return FakeResponse(fake_latest_response("0.1.7"))
 
     monkeypatch.setattr(cli_update, "urlopen", fake_urlopen)
 
@@ -208,7 +208,7 @@ def test_update_check_command_supports_json_and_human_output(runner, monkeypatch
     assert json_result.exit_code == 0
     payload = json.loads(json_result.stdout)
     assert payload["data"]["update_available"] is True
-    assert payload["data"]["latest_version"] == "0.1.6"
+    assert payload["data"]["latest_version"] == "0.1.7"
     assert human_result.exit_code == 0
     assert "A Backet update is available" in human_result.output
 
@@ -218,7 +218,7 @@ def test_update_apply_yes_runs_pipx_install_with_resolved_wheel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[list[str]] = []
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.6")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.7")))
     monkeypatch.setenv("BACKET_PIPX", "/tmp/pipx")
 
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -237,7 +237,7 @@ def test_update_apply_yes_runs_pipx_install_with_resolved_wheel(
             "/tmp/pipx",
             "install",
             "--force",
-            "https://github.com/jsvitkin/backet/releases/download/v0.1.6/backet-0.1.6-py3-none-any.whl",
+            "https://github.com/jsvitkin/backet/releases/download/v0.1.7/backet-0.1.7-py3-none-any.whl",
         ]
     ]
 
@@ -246,7 +246,7 @@ def test_update_apply_reports_already_current_without_reinstalling(
     runner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.5")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.6")))
     monkeypatch.setattr(cli_update.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("pipx should not run"))
 
     result = runner.invoke(app, ["--json", "update", "apply", "--yes"])
@@ -258,7 +258,7 @@ def test_update_apply_reports_already_current_without_reinstalling(
 
 
 def test_update_apply_reports_unsupported_updater(runner, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.6")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.7")))
     monkeypatch.delenv("BACKET_PIPX", raising=False)
     monkeypatch.setattr(cli_update.shutil, "which", lambda _name: None)
 
@@ -330,7 +330,7 @@ def test_interactive_preflight_accepts_update_and_reexecs(
     result = runner.invoke(app, ["init", str(tmp_path)], input="y\n")
 
     assert result.exit_code == 0
-    assert applied and applied[0].latest_version == "0.1.5"
+    assert applied and applied[0].latest_version == "0.1.6"
     assert reexeced
 
 
@@ -369,7 +369,7 @@ def test_interactive_preflight_decline_snoozes_and_continues(
     result = runner.invoke(app, ["init", str(tmp_path)], input="n\n")
 
     assert result.exit_code == 0
-    assert snoozed and snoozed[0].latest_version == "0.1.5"
+    assert snoozed and snoozed[0].latest_version == "0.1.6"
     assert (tmp_path / ".backet").exists()
 
 
@@ -388,7 +388,7 @@ def test_agent_preflight_emits_update_required_before_command_work(
     assert payload["error"]["code"] == "update_required"
     assert payload["error"]["details"]["update_command"] == "backet update apply --yes"
     assert payload["error"]["details"]["retry_after_update"] is True
-    assert payload["error"]["details"]["latest_version"] == "0.1.5"
+    assert payload["error"]["details"]["latest_version"] == "0.1.6"
 
 
 def test_offline_preflight_without_cached_update_continues_normal_command(
@@ -412,7 +412,7 @@ def test_cli_update_does_not_write_vault_state_or_skill_metadata(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.5")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.6")))
     monkeypatch.setenv("BACKET_PIPX", "/tmp/pipx")
     monkeypatch.setattr(
         cli_update.subprocess,
