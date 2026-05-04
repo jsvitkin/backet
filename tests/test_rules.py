@@ -829,11 +829,21 @@ def test_rules_audit_guided_review_walks_all_books_without_book_id_commands(runn
     vault = _make_bootstrapped_vault(runner, tmp_path)
     first_pdf = _create_text_pdf(
         tmp_path / "first-review.pdf",
-        [_rule_page("First Page", "First reviewable feeding rule text needs a human audit decision.")],
+        [
+            _rule_page(
+                "First Page",
+                "First reviewable feeding rule text needs a human audit decision, and this direct text is long enough to avoid OCR fallback during ingestion.",
+            )
+        ],
     )
     second_pdf = _create_text_pdf(
         tmp_path / "second-review.pdf",
-        [_rule_page("Second Page", "Second reviewable court rule text needs a human audit decision.")],
+        [
+            _rule_page(
+                "Second Page",
+                "Second reviewable court rule text needs a human audit decision, and this direct text is long enough to avoid OCR fallback during ingestion.",
+            )
+        ],
     )
     _ingest_book(runner, vault, first_pdf, "first-review", "First Review", "core")
     _ingest_book(runner, vault, second_pdf, "second-review", "Second Review", "supplement")
