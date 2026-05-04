@@ -7,14 +7,19 @@ from rich.console import Console
 
 import backet.output
 from backet.models import CommandResult
-from backet.rules_output import RulesIngestProgressReporter, emit_rules_ingest_report
+from backet.rules_output import (
+    RulesIngestProgressReporter,
+    emit_rules_audit_report,
+    emit_rules_ingest_report,
+    emit_rules_scope_audit_report,
+)
 
 
 def test_rules_ingest_report_summarizes_long_page_lists_and_labels_human_terms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     buffer = StringIO()
-    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None))
+    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None, width=200))
 
     emit_rules_ingest_report(
         CommandResult(
@@ -53,7 +58,7 @@ def test_rules_ingest_report_summarizes_long_page_lists_and_labels_human_terms(
 
 def test_rules_ingest_report_omits_empty_optional_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
     buffer = StringIO()
-    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None))
+    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None, width=200))
 
     emit_rules_ingest_report(
         CommandResult(
@@ -85,7 +90,7 @@ def test_rules_ingest_report_omits_empty_optional_diagnostics(monkeypatch: pytes
 
 def test_rules_ingest_report_summarizes_generated_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
     buffer = StringIO()
-    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None))
+    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None, width=200))
 
     emit_rules_ingest_report(
         CommandResult(
@@ -127,6 +132,113 @@ def test_rules_ingest_report_summarizes_generated_scopes(monkeypatch: pytest.Mon
     assert "Scope preview:" in output
     assert "159-168: clan:banu-haqim" in output
     assert "backet rules scope audit /tmp/vault --book-id camarilla-v5" in output
+
+
+def test_rules_audit_report_groups_human_work_without_raw_diagnostic_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    buffer = StringIO()
+    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None, width=200))
+
+    emit_rules_audit_report(
+        CommandResult(
+            message="Audited ingested rulebooks",
+            data={
+                "vault": "/tmp/vault",
+                "maintenance": [
+                    {
+                        "category": "maintenance",
+                        "missing": 2,
+                        "stale": 1,
+                        "repair_hint": "Run `backet rules index <vault>`.",
+                    }
+                ],
+                "books": [
+                    {
+                        "book_id": "cults",
+                        "book_title": "Cults",
+                        "tier": "supplement",
+                        "page_count": 281,
+                        "chunk_count": 952,
+                        "ocr_fallback_pages": [1, 2],
+                        "source_status": {
+                            "status": "available",
+                            "message": "The original source PDF is available for targeted repair.",
+                        },
+                        "review_summary": {
+                            "pending_pages": 1,
+                            "blocked": 0,
+                            "notices": 1,
+                            "excluded_chunks": 0,
+                        },
+                        "review_cards": [
+                            {
+                                "page_start": 37,
+                                "category": "review",
+                                "reasons": ["Extraction has very little readable text."],
+                                "excerpt": "garbled OCR preview",
+                            }
+                        ],
+                        "notices": [
+                            {"page_start": 1, "reason": "Likely art material; review only if this page should answer rules queries."}
+                        ],
+                    }
+                ],
+            },
+        )
+    )
+
+    rendered = buffer.getvalue()
+    assert "Rules audit" in rendered
+    assert "Maintenance" in rendered
+    assert "Cults (cults, supplement)" in rendered
+    assert "Review queue" in rendered
+    assert "Page 37" in rendered
+    assert "Actions:" in rendered
+    assert "vault:   /tmp/vault" in rendered
+    assert "book-id: cults" in rendered
+    assert "backet rules review <vault> --book-id <book-id> --page 37 --decision accepted" in rendered
+    assert "backet rules replace <vault> --book-id <book-id> --page 37 --text-file corrected-page.txt" in rendered
+    assert "backet rules repair <vault> <book-id> --pages 37 --force-ocr" in rendered
+    assert "suspect_pages" not in rendered
+    assert "quality_flags_json" not in rendered
+    assert "review_cards" not in rendered
+
+
+def test_rules_scope_audit_report_summarizes_reviewable_scope_assertions(monkeypatch: pytest.MonkeyPatch) -> None:
+    buffer = StringIO()
+    monkeypatch.setattr(backet.output, "console", Console(file=buffer, force_terminal=False, color_system=None, width=200))
+
+    emit_rules_scope_audit_report(
+        CommandResult(
+            message="Audited rule scope assertions",
+            data={
+                "vault": "/tmp/vault",
+                "books": [
+                    {
+                        "book_id": "camarilla-v5",
+                        "book_title": "Camarilla",
+                        "applied": 10,
+                        "suggested": 2,
+                        "rejected": 1,
+                        "source_scope": ["sect:camarilla"],
+                        "notable": [
+                            {
+                                "pages": "159-168",
+                                "tag": "clan:banu-haqim",
+                                "role": "mechanical-authority",
+                                "status": "suggested",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+    )
+
+    rendered = buffer.getvalue()
+    assert "Rules scope audit" in rendered
+    assert "Applied:   10" in rendered
+    assert "Suggested: 2" in rendered
+    assert "159-168: clan:banu-haqim" in rendered
 
 
 def test_progress_reporter_uses_plain_lines_for_non_interactive_output() -> None:

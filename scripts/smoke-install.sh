@@ -37,6 +37,8 @@ BACKET_PYTHON="${PIPX_HOME}/venvs/backet/bin/python"
 VAULT_DIR="${TMP_ROOT}/vault"
 ARCHIVE_PATH="${TMP_ROOT}/skills-repo.zip"
 RULES_PDF_PATH="${TMP_ROOT}/core-rulebook.pdf"
+RULES_RELINK_PDF_PATH="${TMP_ROOT}/core-rulebook-copy.pdf"
+RULES_REPLACEMENT_TEXT="${TMP_ROOT}/corrected-page.txt"
 
 mkdir -p "$VAULT_DIR"
 
@@ -117,6 +119,22 @@ PY
 "$BACKET_BIN" --json rules query "$VAULT_DIR" "blood dolls vitae consent" --book-id core-v5 \
   | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["primary_results"]'
 "$BACKET_BIN" --json rules audit "$VAULT_DIR" --book-id core-v5 \
-  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["books"]'
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["books"][0]["source_status"]["status"] == "available"'
 "$BACKET_BIN" --json rules scope audit "$VAULT_DIR" --book-id core-v5 \
   | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["books"][0]["confidence_thresholds"]'
+
+"$BACKET_BIN" --json rules review "$VAULT_DIR" --book-id core-v5 --page 1 --decision accepted \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["decision"] == "accepted"'
+
+cp "$RULES_PDF_PATH" "$RULES_RELINK_PDF_PATH"
+"$BACKET_BIN" --json rules relink-source "$VAULT_DIR" "$RULES_RELINK_PDF_PATH" --book-id core-v5 \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["source_status"]["status"] == "available"'
+
+cat > "$RULES_REPLACEMENT_TEXT" <<'TXT'
+Corrected Feeding Rights
+Corrected manual page text says a feeding license needs a court ledger, a named officer, and a vitae witness before repeated blood doll access continues.
+TXT
+"$BACKET_BIN" --json rules replace "$VAULT_DIR" --book-id core-v5 --page 1 --text-file "$RULES_REPLACEMENT_TEXT" \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and payload["data"]["char_count"] > 80'
+"$BACKET_BIN" --json rules query "$VAULT_DIR" "corrected feeding license ledger witness" --book-id core-v5 \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and "Corrected manual page text" in payload["data"]["primary_results"][0]["content"]'

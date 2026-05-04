@@ -41,11 +41,21 @@ from backet.rules_scope import (
 )
 from backet.vault import ensure_bootstrapped_vault
 
-RULES_SCHEMA_VERSION = 3
+RULES_SCHEMA_VERSION = 4
 DEFAULT_PAGE_MIN_CHARS = 80
 DEFAULT_CHUNK_WORDS = 220
 SUPPORTED_TIERS = {"core", "supplement"}
 SUSPECT_CONFIDENCE_THRESHOLD = 0.7
+AUDIT_REVIEW_DECISIONS = {"accepted", "ignored", "excluded", "skipped"}
+AUDIT_RESOLVING_DECISIONS = {"accepted", "ignored", "excluded", "replaced"}
+AUDIT_FINDING_LOW_CONFIDENCE_PAGE = "low_confidence_page"
+AUDIT_FINDING_LOW_CONFIDENCE_CHUNK = "low_confidence_chunk"
+AUDIT_FINDING_MAINTENANCE = "rules_index_maintenance"
+AUDIT_FINDING_SOURCE = "source_pdf"
+AUDIT_FINDING_SCOPE = "scope_assertion"
+AUDIT_FINDING_CATEGORIES = {"maintenance", "review", "notice", "blocked", "scope"}
+MANUAL_REPLACEMENT_MIN_CHARS = 20
+REPAIR_SCORE_IMPROVEMENT_THRESHOLD = 0.15
 FTS_TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
 SEMANTIC_WEIGHT = 0.75
 SUPPLEMENT_SCOPE_BOOST = 0.15
@@ -88,6 +98,76 @@ class RulesIngestProgressEvent:
 
 
 RulesIngestProgressCallback = Callable[[RulesIngestProgressEvent], None]
+
+
+@dataclass(slots=True)
+class RuleSourceStatus:
+    status: str
+    pdf_path: str
+    stored_fingerprint: str
+    current_fingerprint: str | None
+    available: bool
+    repair_eligible: bool
+    message: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "pdf_path": self.pdf_path,
+            "stored_fingerprint": self.stored_fingerprint,
+            "current_fingerprint": self.current_fingerprint,
+            "available": self.available,
+            "repair_eligible": self.repair_eligible,
+            "message": self.message,
+        }
+
+
+@dataclass(slots=True)
+class RuleAuditFinding:
+    book_id: str
+    target_type: str
+    page_start: int | None
+    page_end: int | None
+    chunk_index: int | None
+    finding_kind: str
+    category: str
+    severity: str
+    content_hash: str
+    review_state: str
+    resolved: bool
+    reason: str
+    excerpt: str
+    quality_flags: list[str] = field(default_factory=list)
+    extraction_method: str | None = None
+    confidence: float | None = None
+    section_label: str | None = None
+    allowed_decisions: list[str] = field(default_factory=list)
+    source_status: RuleSourceStatus | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "book_id": self.book_id,
+            "target_type": self.target_type,
+            "page_start": self.page_start,
+            "page_end": self.page_end,
+            "chunk_index": self.chunk_index,
+            "finding_kind": self.finding_kind,
+            "category": self.category,
+            "severity": self.severity,
+            "content_hash": self.content_hash,
+            "review_state": self.review_state,
+            "resolved": self.resolved,
+            "reason": self.reason,
+            "excerpt": self.excerpt,
+            "quality_flags": self.quality_flags,
+            "extraction_method": self.extraction_method,
+            "confidence": self.confidence,
+            "section_label": self.section_label,
+            "allowed_decisions": self.allowed_decisions,
+        }
+        if self.source_status is not None:
+            data["source_status"] = self.source_status.to_dict()
+        return data
 
 
 def _emit_progress(
@@ -242,6 +322,84 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
             force_ocr INTEGER NOT NULL,
             repaired_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS rule_audit_reviews (
+            id INTEGER PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+            target_type TEXT NOT NULL,
+            page_start INTEGER,
+            page_end INTEGER,
+            chunk_index INTEGER,
+            finding_kind TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            decided_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rule_audit_reviews_lookup
+        ON rule_audit_reviews(book_id, target_type, page_start, chunk_index, finding_kind, content_hash);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_audit_reviews_unique
+        ON rule_audit_reviews(
+            book_id,
+            target_type,
+            COALESCE(page_start, -1),
+            COALESCE(page_end, -1),
+            COALESCE(chunk_index, -1),
+            finding_kind,
+            content_hash
+        );
+
+        CREATE TABLE IF NOT EXISTS rule_retrieval_exclusions (
+            id INTEGER PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+            chunk_id INTEGER REFERENCES rule_chunks(id) ON DELETE CASCADE,
+            page_start INTEGER NOT NULL,
+            page_end INTEGER NOT NULL,
+            chunk_index INTEGER,
+            content_hash TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE (book_id, chunk_id, content_hash)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rule_retrieval_exclusions_chunk
+        ON rule_retrieval_exclusions(chunk_id, content_hash);
+
+        CREATE INDEX IF NOT EXISTS idx_rule_retrieval_exclusions_book
+        ON rule_retrieval_exclusions(book_id, page_start, chunk_index);
+
+        CREATE TABLE IF NOT EXISTS rule_page_text_overrides (
+            id INTEGER PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+            page_number INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            char_count INTEGER NOT NULL,
+            alpha_ratio REAL NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            replaced_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rule_page_text_overrides_book
+        ON rule_page_text_overrides(book_id, page_number, replaced_at);
+
+        CREATE TABLE IF NOT EXISTS rule_source_relinks (
+            id INTEGER PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+            old_pdf_path TEXT NOT NULL,
+            new_pdf_path TEXT NOT NULL,
+            old_fingerprint TEXT NOT NULL,
+            new_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            forced INTEGER NOT NULL,
+            relinked_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rule_source_relinks_book
+        ON rule_source_relinks(book_id, relinked_at);
 
         CREATE TABLE IF NOT EXISTS rule_chunk_embeddings (
             chunk_id INTEGER PRIMARY KEY REFERENCES rule_chunks(id) ON DELETE CASCADE,
@@ -478,6 +636,7 @@ def query_rules(
 
     normalized_tags = normalize_scope_tags(scope_tags or [])
     with closing(open_rules_connection(vault_root)) as connection:
+        excluded_chunks = _active_excluded_chunk_count(connection, book_id)
         exact_rows = _search_rule_chunks(
             connection,
             fts_query,
@@ -504,6 +663,7 @@ def query_rules(
                     "scope_tags": normalized_tags,
                     "retrieval_mode": semantic.retrieval_mode,
                     "semantic_error": semantic.error,
+                    "reviewed_exclusions": {"excluded_chunks": excluded_chunks},
                 },
                 exit_code=2,
             )
@@ -534,7 +694,9 @@ def query_rules(
                 "semantic": len(semantic.candidates),
                 "merged": len(rows),
                 "semantic_indexed_chunks": semantic.indexed_chunks,
+                "review_excluded": excluded_chunks,
             },
+            "reviewed_exclusions": {"excluded_chunks": excluded_chunks},
             "semantic_error": semantic.error,
             "primary_results": primary,
             "fallback_results": fallback,
@@ -585,50 +747,7 @@ def audit_rules(vault_root: Path, book_id: str | None = None) -> CommandResult:
 
         suspects: list[dict[str, Any]] = []
         for book in books:
-            pages = connection.execute(
-                """
-                SELECT * FROM page_audit
-                WHERE book_id = ? AND suspect = 1
-                ORDER BY page_number
-                """,
-                (book["book_id"],),
-            ).fetchall()
-            suspect_chunks = connection.execute(
-                """
-                SELECT * FROM rule_chunks
-                WHERE book_id = ? AND confidence < ?
-                ORDER BY page_start, chunk_index
-                """,
-                (book["book_id"], SUSPECT_CONFIDENCE_THRESHOLD),
-            ).fetchall()
-            suspects.append(
-                {
-                    "book_id": book["book_id"],
-                    "book_title": book["book_title"],
-                    "tier": book["tier"],
-                    "scope_tags": json.loads(book["scope_tags_json"]),
-                    "suspect_pages": [
-                        {
-                            "page_number": page["page_number"],
-                            "extraction_method": page["extraction_method"],
-                            "confidence": page["confidence"],
-                            "quality_flags": json.loads(page["quality_flags_json"]),
-                            "excerpt": page["text_excerpt"],
-                        }
-                        for page in pages
-                    ],
-                    "suspect_chunks": [
-                        {
-                            "page_start": row["page_start"],
-                            "chunk_index": row["chunk_index"],
-                            "confidence": row["confidence"],
-                            "section_label": row["section_label"],
-                            "excerpt": row["excerpt"],
-                        }
-                        for row in suspect_chunks
-                    ],
-                }
-            )
+            suspects.append(_rules_audit_book_report(connection, book))
         semantic_index = _inspect_rule_semantic_index_for_current_backend(connection, book_id=book_id)
 
     return CommandResult(
@@ -638,6 +757,7 @@ def audit_rules(vault_root: Path, book_id: str | None = None) -> CommandResult:
             "book_id": book_id,
             "books": suspects,
             "semantic_index": semantic_index,
+            "maintenance": _rules_audit_maintenance_findings(semantic_index),
         },
     )
 
@@ -669,6 +789,482 @@ def audit_rule_scopes(vault_root: Path, book_id: str | None = None) -> CommandRe
         message="Audited rule scope assertions",
         data={"vault": str(vault_root), "book_id": book_id, "books": summaries},
     )
+
+
+def _rules_audit_book_report(connection: sqlite3.Connection, book: sqlite3.Row) -> dict[str, Any]:
+    current_book_id = str(book["book_id"])
+    source_status = _inspect_rule_source_status(book)
+    pages = connection.execute(
+        """
+        SELECT * FROM page_audit
+        WHERE book_id = ? AND suspect = 1
+        ORDER BY page_number
+        """,
+        (current_book_id,),
+    ).fetchall()
+    ocr_pages = connection.execute(
+        """
+        SELECT page_number FROM page_audit
+        WHERE book_id = ? AND extraction_method = 'ocr'
+        ORDER BY page_number
+        """,
+        (current_book_id,),
+    ).fetchall()
+    suspect_chunks = connection.execute(
+        """
+        SELECT
+            rc.*,
+            m.section_kind,
+            m.retrieval_flags_json,
+            m.content_hash AS metadata_content_hash
+        FROM rule_chunks rc
+        LEFT JOIN rule_chunk_retrieval_metadata m ON m.chunk_id = rc.id
+        WHERE rc.book_id = ? AND rc.confidence < ?
+        ORDER BY rc.page_start, rc.chunk_index
+        """,
+        (current_book_id, SUSPECT_CONFIDENCE_THRESHOLD),
+    ).fetchall()
+    chunk_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM rule_chunks WHERE book_id = ?",
+        (current_book_id,),
+    ).fetchone()["count"]
+
+    findings: list[RuleAuditFinding] = []
+    for page in pages:
+        findings.append(_audit_finding_from_page(connection, book, page, source_status))
+    page_finding_keys = {(finding.page_start, finding.finding_kind) for finding in findings}
+    for chunk in suspect_chunks:
+        key = (int(chunk["page_start"]), AUDIT_FINDING_LOW_CONFIDENCE_PAGE)
+        if key in page_finding_keys:
+            continue
+        findings.append(_audit_finding_from_chunk(connection, book, chunk, source_status))
+
+    notices = _audit_notices_for_pages(connection, book, ocr_pages, findings)
+    review_cards = _build_review_cards(findings)
+    category_counts = _audit_category_counts(findings + notices)
+    resolved_count = sum(1 for finding in findings if finding.resolved)
+    reviewable_pages = sorted({card["page_start"] for card in review_cards})
+    excluded_chunks = _active_excluded_chunk_count(connection, current_book_id)
+
+    return {
+        "book_id": current_book_id,
+        "book_title": book["book_title"],
+        "tier": book["tier"],
+        "scope_tags": json.loads(book["scope_tags_json"]),
+        "page_count": int(book["page_count"]),
+        "chunk_count": int(chunk_count),
+        "ocr_fallback_pages": [int(row["page_number"]) for row in ocr_pages],
+        "source_status": source_status.to_dict(),
+        "repair_eligible": source_status.repair_eligible,
+        "review_summary": {
+            "pending_pages": len(reviewable_pages),
+            "pending_findings": sum(1 for finding in findings if not finding.resolved and finding.category in {"review", "blocked"}),
+            "resolved_findings": resolved_count,
+            "notices": category_counts.get("notice", 0),
+            "blocked": category_counts.get("blocked", 0),
+            "excluded_chunks": excluded_chunks,
+            "by_category": category_counts,
+        },
+        "review_cards": review_cards,
+        "findings": [finding.to_dict() for finding in findings],
+        "notices": [notice.to_dict() for notice in notices],
+        "suspect_pages": [
+            {
+                "page_number": page["page_number"],
+                "extraction_method": page["extraction_method"],
+                "confidence": page["confidence"],
+                "quality_flags": json.loads(page["quality_flags_json"]),
+                "content_hash": page["content_hash"],
+                "review_state": _audit_review_state(
+                    connection,
+                    book_id=current_book_id,
+                    target_type="page",
+                    page_start=int(page["page_number"]),
+                    page_end=int(page["page_number"]),
+                    chunk_index=None,
+                    finding_kind=AUDIT_FINDING_LOW_CONFIDENCE_PAGE,
+                    content_hash=page["content_hash"],
+                )[0],
+                "excerpt": page["text_excerpt"],
+            }
+            for page in pages
+        ],
+        "suspect_chunks": [
+            {
+                "page_start": row["page_start"],
+                "chunk_index": row["chunk_index"],
+                "confidence": row["confidence"],
+                "section_label": row["section_label"],
+                "content_hash": row["content_hash"],
+                "review_state": _audit_review_state(
+                    connection,
+                    book_id=current_book_id,
+                    target_type="chunk",
+                    page_start=int(row["page_start"]),
+                    page_end=int(row["page_end"]),
+                    chunk_index=int(row["chunk_index"]),
+                    finding_kind=AUDIT_FINDING_LOW_CONFIDENCE_CHUNK,
+                    content_hash=row["content_hash"],
+                )[0],
+                "excerpt": row["excerpt"],
+            }
+            for row in suspect_chunks
+        ],
+    }
+
+
+def _inspect_rule_source_status(book: sqlite3.Row) -> RuleSourceStatus:
+    pdf_path = str(book["pdf_path"] or "")
+    stored_fingerprint = str(book["pdf_fingerprint"] or "")
+    if not pdf_path:
+        return RuleSourceStatus(
+            status="missing",
+            pdf_path="",
+            stored_fingerprint=stored_fingerprint,
+            current_fingerprint=None,
+            available=False,
+            repair_eligible=False,
+            message="No source PDF path is stored for this book.",
+        )
+    path = Path(pdf_path)
+    if not path.exists() or not path.is_file():
+        return RuleSourceStatus(
+            status="missing",
+            pdf_path=pdf_path,
+            stored_fingerprint=stored_fingerprint,
+            current_fingerprint=None,
+            available=False,
+            repair_eligible=False,
+            message="The stored source PDF path does not exist.",
+        )
+    if path.suffix.casefold() != ".pdf":
+        return RuleSourceStatus(
+            status="unverified",
+            pdf_path=pdf_path,
+            stored_fingerprint=stored_fingerprint,
+            current_fingerprint=None,
+            available=False,
+            repair_eligible=False,
+            message="The stored source path is not a PDF file.",
+        )
+    try:
+        current_fingerprint = fingerprint_bytes(path.read_bytes())
+    except OSError:
+        return RuleSourceStatus(
+            status="unverified",
+            pdf_path=pdf_path,
+            stored_fingerprint=stored_fingerprint,
+            current_fingerprint=None,
+            available=False,
+            repair_eligible=False,
+            message="The stored source PDF could not be read.",
+        )
+    if current_fingerprint != stored_fingerprint:
+        return RuleSourceStatus(
+            status="mismatched",
+            pdf_path=pdf_path,
+            stored_fingerprint=stored_fingerprint,
+            current_fingerprint=current_fingerprint,
+            available=True,
+            repair_eligible=False,
+            message="The stored source PDF fingerprint does not match the ingested source.",
+        )
+    return RuleSourceStatus(
+        status="available",
+        pdf_path=pdf_path,
+        stored_fingerprint=stored_fingerprint,
+        current_fingerprint=current_fingerprint,
+        available=True,
+        repair_eligible=True,
+        message="The original source PDF is available for targeted repair.",
+    )
+
+
+def _audit_finding_from_page(
+    connection: sqlite3.Connection,
+    book: sqlite3.Row,
+    page: sqlite3.Row,
+    source_status: RuleSourceStatus,
+) -> RuleAuditFinding:
+    book_id = str(book["book_id"])
+    page_number = int(page["page_number"])
+    flags = _json_list(page["quality_flags_json"])
+    section_kind, _ = classify_rule_chunk(
+        section_label=page["section_label"],
+        content=page["text_excerpt"],
+        word_count=len(str(page["text_excerpt"]).split()),
+        confidence=float(page["confidence"]),
+        extraction_method=str(page["extraction_method"]),
+    )
+    category = _audit_category_for_low_confidence(section_kind, source_status=source_status)
+    review_state, resolved = _audit_review_state(
+        connection,
+        book_id=book_id,
+        target_type="page",
+        page_start=page_number,
+        page_end=page_number,
+        chunk_index=None,
+        finding_kind=AUDIT_FINDING_LOW_CONFIDENCE_PAGE,
+        content_hash=page["content_hash"],
+    )
+    return RuleAuditFinding(
+        book_id=book_id,
+        target_type="page",
+        page_start=page_number,
+        page_end=page_number,
+        chunk_index=None,
+        finding_kind=AUDIT_FINDING_LOW_CONFIDENCE_PAGE,
+        category=category,
+        severity="action" if category == "review" else category,
+        content_hash=str(page["content_hash"]),
+        review_state=review_state,
+        resolved=resolved,
+        reason=_audit_page_reason(flags, section_kind, source_status),
+        excerpt=str(page["text_excerpt"]),
+        quality_flags=flags,
+        extraction_method=str(page["extraction_method"]),
+        confidence=float(page["confidence"]),
+        section_label=str(page["section_label"]),
+        allowed_decisions=sorted(AUDIT_REVIEW_DECISIONS),
+        source_status=source_status,
+    )
+
+
+def _audit_finding_from_chunk(
+    connection: sqlite3.Connection,
+    book: sqlite3.Row,
+    chunk: sqlite3.Row,
+    source_status: RuleSourceStatus,
+) -> RuleAuditFinding:
+    book_id = str(book["book_id"])
+    section_kind = _row_optional(chunk, "section_kind")
+    flags = _json_list(_row_optional(chunk, "retrieval_flags_json"))
+    if not section_kind or _row_optional(chunk, "metadata_content_hash") != chunk["content_hash"]:
+        section_kind, flags = classify_rule_chunk(
+            section_label=chunk["section_label"],
+            content=chunk["content"],
+            word_count=int(chunk["word_count"]),
+            confidence=float(chunk["confidence"]),
+            extraction_method=str(chunk["extraction_method"]),
+        )
+    category = _audit_category_for_low_confidence(str(section_kind), source_status=source_status)
+    review_state, resolved = _audit_review_state(
+        connection,
+        book_id=book_id,
+        target_type="chunk",
+        page_start=int(chunk["page_start"]),
+        page_end=int(chunk["page_end"]),
+        chunk_index=int(chunk["chunk_index"]),
+        finding_kind=AUDIT_FINDING_LOW_CONFIDENCE_CHUNK,
+        content_hash=chunk["content_hash"],
+    )
+    return RuleAuditFinding(
+        book_id=book_id,
+        target_type="chunk",
+        page_start=int(chunk["page_start"]),
+        page_end=int(chunk["page_end"]),
+        chunk_index=int(chunk["chunk_index"]),
+        finding_kind=AUDIT_FINDING_LOW_CONFIDENCE_CHUNK,
+        category=category,
+        severity="action" if category == "review" else category,
+        content_hash=str(chunk["content_hash"]),
+        review_state=review_state,
+        resolved=resolved,
+        reason=f"Chunk confidence is {float(chunk['confidence']):.2f}.",
+        excerpt=str(chunk["excerpt"]),
+        quality_flags=flags,
+        extraction_method=str(chunk["extraction_method"]),
+        confidence=float(chunk["confidence"]),
+        section_label=str(chunk["section_label"]),
+        allowed_decisions=sorted(AUDIT_REVIEW_DECISIONS),
+        source_status=source_status,
+    )
+
+
+def _audit_notices_for_pages(
+    connection: sqlite3.Connection,
+    book: sqlite3.Row,
+    ocr_pages: list[sqlite3.Row],
+    findings: list[RuleAuditFinding],
+) -> list[RuleAuditFinding]:
+    book_id = str(book["book_id"])
+    pages_with_findings = {finding.page_start for finding in findings}
+    notices: list[RuleAuditFinding] = []
+    for row in ocr_pages:
+        page_number = int(row["page_number"])
+        if page_number in pages_with_findings:
+            continue
+        page = connection.execute(
+            """
+            SELECT * FROM page_audit
+            WHERE book_id = ? AND page_number = ?
+            """,
+            (book_id, page_number),
+        ).fetchone()
+        if page is None:
+            continue
+        notices.append(
+            RuleAuditFinding(
+                book_id=book_id,
+                target_type="page",
+                page_start=page_number,
+                page_end=page_number,
+                chunk_index=None,
+                finding_kind="ocr_fallback_notice",
+                category="notice",
+                severity="notice",
+                content_hash=str(page["content_hash"]),
+                review_state="notice",
+                resolved=True,
+                reason="OCR fallback was used, but the extracted text is not currently suspicious.",
+                excerpt=str(page["text_excerpt"]),
+                quality_flags=_json_list(page["quality_flags_json"]),
+                extraction_method=str(page["extraction_method"]),
+                confidence=float(page["confidence"]),
+                section_label=str(page["section_label"]),
+                allowed_decisions=[],
+            )
+        )
+    return notices
+
+
+def _audit_category_for_low_confidence(section_kind: str, *, source_status: RuleSourceStatus) -> str:
+    if section_kind in {"art", "toc", "index", "sheet"}:
+        return "notice"
+    if not source_status.repair_eligible:
+        return "blocked"
+    return "review"
+
+
+def _audit_page_reason(flags: list[str], section_kind: str, source_status: RuleSourceStatus) -> str:
+    if section_kind in {"art", "toc", "index", "sheet"}:
+        return f"Likely {section_kind} material; review only if this page should answer rules queries."
+    if not source_status.repair_eligible:
+        return f"Extraction looks weak and automatic repair is blocked: {source_status.message}"
+    if "low_text_density" in flags and "low_alpha_ratio" in flags:
+        return "Extraction has little readable text and a low letter ratio."
+    if "low_text_density" in flags:
+        return "Extraction has very little readable text."
+    if "low_alpha_ratio" in flags:
+        return "Extraction has an unusually low letter ratio."
+    return "Extraction confidence is low."
+
+
+def _audit_review_state(
+    connection: sqlite3.Connection,
+    *,
+    book_id: str,
+    target_type: str,
+    page_start: int,
+    page_end: int | None,
+    chunk_index: int | None,
+    finding_kind: str,
+    content_hash: str,
+) -> tuple[str, bool]:
+    row = connection.execute(
+        """
+        SELECT decision
+        FROM rule_audit_reviews
+        WHERE book_id = ?
+          AND target_type = ?
+          AND COALESCE(page_start, -1) = ?
+          AND COALESCE(page_end, -1) = ?
+          AND COALESCE(chunk_index, -1) = ?
+          AND finding_kind = ?
+          AND content_hash = ?
+        ORDER BY decided_at DESC, id DESC
+        LIMIT 1
+        """,
+        (
+            book_id,
+            target_type,
+            page_start,
+            page_end if page_end is not None else -1,
+            chunk_index if chunk_index is not None else -1,
+            finding_kind,
+            content_hash,
+        ),
+    ).fetchone()
+    if row is None:
+        return "pending", False
+    decision = str(row["decision"])
+    return decision, decision in AUDIT_RESOLVING_DECISIONS
+
+
+def _build_review_cards(findings: list[RuleAuditFinding]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, int], list[RuleAuditFinding]] = {}
+    for finding in findings:
+        if finding.resolved or finding.category not in {"review", "blocked"} or finding.page_start is None:
+            continue
+        grouped.setdefault((finding.book_id, finding.page_start), []).append(finding)
+
+    cards: list[dict[str, Any]] = []
+    for (book_id, page_start), page_findings in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        first = page_findings[0]
+        reasons = sorted({finding.reason for finding in page_findings})
+        cards.append(
+            {
+                "book_id": book_id,
+                "page_start": page_start,
+                "page_end": max(finding.page_end or page_start for finding in page_findings),
+                "category": "blocked" if any(finding.category == "blocked" for finding in page_findings) else "review",
+                "review_state": "pending",
+                "finding_kinds": sorted({finding.finding_kind for finding in page_findings}),
+                "reasons": reasons,
+                "source_status": first.source_status.to_dict() if first.source_status else None,
+                "extraction_method": first.extraction_method,
+                "confidence": first.confidence,
+                "quality_flags": sorted({flag for finding in page_findings for flag in finding.quality_flags}),
+                "section_label": first.section_label,
+                "excerpt": first.excerpt,
+                "allowed_decisions": sorted(AUDIT_REVIEW_DECISIONS),
+            }
+        )
+    return cards
+
+
+def _audit_category_counts(findings: list[RuleAuditFinding]) -> dict[str, int]:
+    counts = {category: 0 for category in sorted(AUDIT_FINDING_CATEGORIES)}
+    for finding in findings:
+        counts[finding.category] = counts.get(finding.category, 0) + 1
+    return counts
+
+
+def _rules_audit_maintenance_findings(semantic_index: dict[str, Any]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    if not semantic_index.get("available", False) or semantic_index.get("repair_hint"):
+        missing = int(semantic_index.get("missing_embeddings") or 0) + int(semantic_index.get("missing_metadata") or 0)
+        stale = int(semantic_index.get("stale_embeddings") or 0) + int(semantic_index.get("stale_metadata") or 0)
+        if missing or stale or not semantic_index.get("available", False):
+            findings.append(
+                {
+                    "finding_kind": AUDIT_FINDING_MAINTENANCE,
+                    "category": "maintenance",
+                    "reason": "Rules retrieval index coverage needs attention.",
+                    "missing": missing,
+                    "stale": stale,
+                    "repair_hint": semantic_index.get("repair_hint"),
+                }
+            )
+    return findings
+
+
+def _active_excluded_chunk_count(connection: sqlite3.Connection, book_id: str | None = None) -> int:
+    parameters: list[Any] = []
+    where_clause = "WHERE rc.id IS NOT NULL AND rex.content_hash = rc.content_hash"
+    if book_id:
+        where_clause += " AND rex.book_id = ?"
+        parameters.append(book_id)
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS count
+        FROM rule_retrieval_exclusions rex
+        JOIN rule_chunks rc ON rc.id = rex.chunk_id
+        {where_clause}
+        """,
+        parameters,
+    ).fetchone()
+    return int(row["count"] if row is not None else 0)
 
 
 def export_rule_scopes(vault_root: Path, book_id: str) -> CommandResult:
@@ -736,6 +1332,248 @@ def apply_rule_scope_manifest(vault_root: Path, manifest_path: Path) -> CommandR
     )
 
 
+def review_rule_audit(
+    vault_root: Path,
+    book_id: str,
+    page: int,
+    decision: str,
+    *,
+    chunk_index: int | None = None,
+    reason: str = "",
+    notes: str = "",
+) -> CommandResult:
+    ensure_bootstrapped_vault(vault_root)
+    normalized_decision = decision.strip().lower()
+    if normalized_decision not in AUDIT_REVIEW_DECISIONS:
+        raise AppError(
+            code="rules_review_decision_invalid",
+            message=f"Unsupported rules audit review decision: {decision}",
+            hint="Use accepted, ignored, excluded, or skipped.",
+            details={"decision": decision},
+            exit_code=2,
+        )
+    if page < 1:
+        raise AppError(
+            code="rules_review_page_invalid",
+            message="Rules audit review pages must be positive page numbers.",
+            hint="Use a page number reported by `backet rules audit`.",
+            details={"page": page},
+            exit_code=2,
+        )
+
+    with closing(open_rules_connection(vault_root)) as connection:
+        _require_book(connection, book_id)
+        target = _review_target_row(connection, book_id=book_id, page=page, chunk_index=chunk_index)
+        target_type = "chunk" if chunk_index is not None else "page"
+        finding_kind = AUDIT_FINDING_LOW_CONFIDENCE_CHUNK if chunk_index is not None else AUDIT_FINDING_LOW_CONFIDENCE_PAGE
+        page_end = int(target["page_end"]) if target_type == "chunk" else page
+        content_hash = str(target["content_hash"])
+        _insert_audit_review(
+            connection,
+            book_id=book_id,
+            target_type=target_type,
+            page_start=page,
+            page_end=page_end,
+            chunk_index=chunk_index,
+            finding_kind=finding_kind,
+            decision=normalized_decision,
+            content_hash=content_hash,
+            reason=reason,
+            notes=notes,
+        )
+        excluded_chunks = 0
+        if normalized_decision == "excluded":
+            excluded_chunks = _store_retrieval_exclusion_for_target(
+                connection,
+                book_id=book_id,
+                target_type=target_type,
+                page_start=page,
+                page_end=page_end,
+                chunk_index=chunk_index,
+                reason=reason,
+            )
+        connection.commit()
+
+    return CommandResult(
+        message="Recorded rules audit review decision",
+        data={
+            "vault": str(vault_root),
+            "book_id": book_id,
+            "page_start": page,
+            "page_end": page_end,
+            "chunk_index": chunk_index,
+            "decision": normalized_decision,
+            "content_hash": content_hash,
+            "resolved": normalized_decision in AUDIT_RESOLVING_DECISIONS,
+            "retrieval_excluded_chunks": excluded_chunks,
+        },
+    )
+
+
+def replace_rule_page_text(
+    vault_root: Path,
+    book_id: str,
+    page: int,
+    text: str,
+    *,
+    reason: str = "",
+    notes: str = "",
+) -> CommandResult:
+    ensure_bootstrapped_vault(vault_root)
+    normalized_text = normalize_text(text)
+    if not _manual_replacement_is_usable(normalized_text):
+        raise AppError(
+            code="rules_manual_replacement_unusable",
+            message="Manual replacement text is empty or too noisy to store as rule text.",
+            hint="Provide corrected page text, or review the finding as ignored/excluded instead.",
+            details={"book_id": book_id, "page": page, "char_count": len(normalized_text)},
+            exit_code=2,
+        )
+    with closing(open_rules_connection(vault_root)) as connection:
+        book = _require_book(connection, book_id)
+        if page < 1 or page > int(book["page_count"]):
+            raise AppError(
+                code="rules_manual_replacement_page_invalid",
+                message="Manual replacement page is outside the ingested book page range.",
+                hint="Use a page number reported by `backet rules audit`.",
+                details={"book_id": book_id, "page": page, "page_count": int(book["page_count"])},
+                exit_code=2,
+            )
+        entry = _book_entry_from_row(book)
+        page_result = _build_page_result(page, normalized_text, extraction_method="manual")
+        _replace_pages(connection, entry, [page_result], pages_spec=str(page))
+        scope_summary = _generate_and_apply_scope_assertions(connection, entry=entry, pages=[page_result], outline=[])
+        _rebuild_rule_chunks_fts(connection, book_id)
+        semantic_index = _try_index_rule_chunks(connection, book_id=book_id, full=False, progress=None)
+        content_hash = fingerprint_text(normalized_text)
+        _insert_page_text_override(
+            connection,
+            book_id=book_id,
+            page=page,
+            page_result=page_result,
+            content_hash=content_hash,
+            reason=reason,
+            notes=notes,
+        )
+        _insert_audit_review(
+            connection,
+            book_id=book_id,
+            target_type="page",
+            page_start=page,
+            page_end=page,
+            chunk_index=None,
+            finding_kind=AUDIT_FINDING_LOW_CONFIDENCE_PAGE,
+            decision="replaced",
+            content_hash=content_hash,
+            reason=reason,
+            notes=notes,
+        )
+        audit_summary = _audit_summary(connection, book_id)
+        connection.commit()
+
+    return CommandResult(
+        message="Replaced ingested rulebook page text",
+        data={
+            "vault": str(vault_root),
+            "book_id": book_id,
+            "page": page,
+            "content_hash": content_hash,
+            "char_count": page_result.char_count,
+            "alpha_ratio": page_result.alpha_ratio,
+            "scope_assertions": scope_summary,
+            "suspect_pages": audit_summary["suspect_pages"],
+            "chunk_count": audit_summary["chunk_count"],
+            "semantic_index": semantic_index,
+        },
+    )
+
+
+def relink_rule_source(vault_root: Path, book_id: str, pdf_path: Path, *, force: bool = False) -> CommandResult:
+    ensure_bootstrapped_vault(vault_root)
+    if not pdf_path.exists() or not pdf_path.is_file():
+        raise AppError(
+            code="rules_source_relink_missing",
+            message=f"Replacement source PDF not found: {pdf_path}",
+            hint="Provide a readable local PDF path.",
+            details={"pdf_path": str(pdf_path)},
+            exit_code=2,
+        )
+    if pdf_path.suffix.casefold() != ".pdf":
+        raise AppError(
+            code="rules_source_relink_not_pdf",
+            message="Replacement source path must point to a PDF file.",
+            hint="Use the original PDF or rerun with another PDF path.",
+            details={"pdf_path": str(pdf_path)},
+            exit_code=2,
+        )
+    try:
+        new_fingerprint = fingerprint_bytes(pdf_path.read_bytes())
+        new_page_count = document_page_count(pdf_path)
+    except (OSError, RuntimeError) as exc:
+        raise AppError(
+            code="rules_source_relink_unreadable",
+            message="Replacement source PDF could not be read.",
+            hint="Check file permissions and make sure the path is a valid PDF.",
+            details={"pdf_path": str(pdf_path), "error": str(exc)},
+            exit_code=2,
+        ) from exc
+
+    with closing(open_rules_connection(vault_root)) as connection:
+        book = _require_book(connection, book_id)
+        old_path = str(book["pdf_path"])
+        old_fingerprint = str(book["pdf_fingerprint"])
+        if new_fingerprint != old_fingerprint and not force:
+            raise AppError(
+                code="rules_source_fingerprint_mismatch",
+                message="Replacement source PDF does not match the ingested source fingerprint.",
+                hint="Use the original PDF, or rerun with `--force` if this replacement should become the trusted repair source.",
+                details={
+                    "book_id": book_id,
+                    "old_pdf_path": old_path,
+                    "new_pdf_path": str(pdf_path),
+                    "stored_fingerprint": old_fingerprint,
+                    "new_fingerprint": new_fingerprint,
+                },
+                exit_code=2,
+            )
+        status = "matched" if new_fingerprint == old_fingerprint else "forced_mismatch"
+        stored_fingerprint = old_fingerprint if status == "matched" else new_fingerprint
+        page_count = int(book["page_count"]) if status == "matched" else new_page_count
+        now = timestamp_now()
+        connection.execute(
+            """
+            UPDATE books
+            SET pdf_path = ?, pdf_fingerprint = ?, page_count = ?, updated_at = ?
+            WHERE book_id = ?
+            """,
+            (str(pdf_path.resolve()), stored_fingerprint, page_count, now, book_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO rule_source_relinks (
+                book_id, old_pdf_path, new_pdf_path, old_fingerprint, new_fingerprint,
+                status, forced, relinked_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (book_id, old_path, str(pdf_path.resolve()), old_fingerprint, new_fingerprint, status, int(force), now),
+        )
+        source_status = _inspect_rule_source_status(_require_book(connection, book_id))
+        connection.commit()
+
+    return CommandResult(
+        message="Relinked rulebook source PDF",
+        data={
+            "vault": str(vault_root),
+            "book_id": book_id,
+            "pdf_path": str(pdf_path.resolve()),
+            "status": status,
+            "forced": force,
+            "source_status": source_status.to_dict(),
+        },
+    )
+
+
 def repair_rules(
     vault_root: Path,
     book_id: str,
@@ -758,6 +1596,15 @@ def repair_rules(
         tier = book["tier"]
         scope_tags = json.loads(book["scope_tags_json"])
         pdf_path = Path(book["pdf_path"])
+        source_status = _inspect_rule_source_status(book)
+        if not source_status.repair_eligible:
+            raise AppError(
+                code="rules_repair_source_unavailable",
+                message="Targeted rules repair cannot run because the source PDF is not a verified match.",
+                hint="Relink the original PDF with `backet rules relink-source`, or provide corrected text with `backet rules replace`.",
+                details={"book_id": book_id, "source_status": source_status.to_dict()},
+                exit_code=2,
+            )
 
     result = ingest_rulebook(
         vault_root=vault_root,
@@ -824,12 +1671,17 @@ def _extract_pages(
                 counters={"ocr_pages": ocr_pages, "review_pages": review_pages},
                 details={"page_number": page_number},
             )
-            ocr_text = _ocr_page(page, pdf_path=pdf_path, page_number=page_number)
-            ocr_result = _build_page_result(page_number, ocr_text, extraction_method="ocr")
-            ocr_pages += 1
-            if ocr_result.suspect:
+            ocr_results = [
+                _build_page_result(page_number, text, extraction_method="ocr")
+                for text in _ocr_text_candidates(page, pdf_path, page_number)
+            ]
+            candidate_results = ocr_results if force_ocr else [direct_result, *ocr_results]
+            selected_result = _select_best_extraction_candidate(candidate_results)
+            if selected_result.extraction_method == "ocr":
+                ocr_pages += 1
+            if selected_result.suspect:
                 review_pages += 1
-            extracted.append(ocr_result)
+            extracted.append(selected_result)
             _emit_progress(
                 progress,
                 phase="extract",
@@ -860,7 +1712,16 @@ def _build_page_result(page_number: int, text: str, extraction_method: str) -> E
     alpha_chars = sum(1 for char in text if char.isalpha())
     alpha_ratio = alpha_chars / char_count if char_count else 0.0
     suspect = char_count < DEFAULT_PAGE_MIN_CHARS or alpha_ratio < 0.45
-    confidence = 0.95 if extraction_method == "direct" and not suspect else 0.65 if extraction_method == "ocr" else 0.4
+    if extraction_method == "manual" and not suspect:
+        confidence = 0.98
+    elif extraction_method == "direct" and not suspect:
+        confidence = 0.95
+    elif extraction_method == "ocr" and not suspect:
+        confidence = 0.85
+    elif extraction_method == "ocr":
+        confidence = 0.65
+    else:
+        confidence = 0.4
     flags: list[str] = []
     if char_count < DEFAULT_PAGE_MIN_CHARS:
         flags.append("low_text_density")
@@ -882,6 +1743,78 @@ def _build_page_result(page_number: int, text: str, extraction_method: str) -> E
     )
 
 
+def _select_best_extraction_candidate(candidates: list[ExtractedPage]) -> ExtractedPage:
+    if not candidates:
+        raise AppError(
+            code="rules_no_extraction_candidates",
+            message="No extraction candidates were produced for the requested rulebook page.",
+            hint="Check the PDF and OCR installation, then rerun the command.",
+            exit_code=2,
+        )
+    best = max(candidates, key=_extraction_candidate_sort_key)
+    direct = next((candidate for candidate in candidates if candidate.extraction_method == "direct"), None)
+    if direct is not None and best.extraction_method != "direct":
+        direct_score = _score_extracted_page(direct)
+        best_score = _score_extracted_page(best)
+        if best_score < direct_score + REPAIR_SCORE_IMPROVEMENT_THRESHOLD:
+            return direct
+    return best
+
+
+def _extraction_candidate_sort_key(page: ExtractedPage) -> tuple[float, int]:
+    return (_score_extracted_page(page), -page.page_number)
+
+
+def _score_extracted_page(page: ExtractedPage) -> float:
+    text = page.text
+    word_count = len(text.split())
+    strange_ratio = _strange_symbol_ratio(text)
+    section_kind, flags = classify_rule_chunk(
+        section_label=page.section_label,
+        content=text,
+        word_count=word_count,
+        confidence=page.confidence,
+        extraction_method=page.extraction_method,
+    )
+    score = min(page.char_count / 1200, 1.0)
+    score += min(word_count / 180, 1.0)
+    score += page.alpha_ratio
+    score -= strange_ratio
+    if _looks_rules_substantive(text.casefold()):
+        score += 0.35
+    if section_kind in {"rules", "lore"}:
+        score += 0.2
+    if page.extraction_method == "manual":
+        score += 0.2
+    if page.extraction_method == "ocr":
+        score += 0.05
+    if page.suspect:
+        score -= 0.5
+    score -= 0.08 * len(flags)
+    return round(score, 6)
+
+
+def _strange_symbol_ratio(text: str) -> float:
+    compact = "".join(text.split())
+    if not compact:
+        return 1.0
+    strange = sum(1 for char in compact if not (char.isalnum() or char in ".,:;!?'-()/%+"))
+    return strange / len(compact)
+
+
+def _ocr_text_candidates(page, pdf_path: Path, page_number: int) -> list[str]:
+    candidates = [_ocr_page(page, pdf_path=pdf_path, page_number=page_number)]
+    if has_tesseract():
+        for dpi, psm in ((300, "6"), (300, "3")):
+            try:
+                candidate = _ocr_page_with_options(page, page_number=page_number, dpi=dpi, psm=psm)
+            except AppError:
+                continue
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
 def _ocr_page(page, pdf_path: Path, page_number: int) -> str:
     if not has_tesseract():
         raise AppError(
@@ -891,12 +1824,16 @@ def _ocr_page(page, pdf_path: Path, page_number: int) -> str:
             details={"pdf_path": str(pdf_path), "page_number": page_number},
             exit_code=2,
         )
+    return _ocr_page_with_options(page, page_number=page_number, dpi=200, psm="6")
+
+
+def _ocr_page_with_options(page, *, page_number: int, dpi: int, psm: str) -> str:
     with TemporaryDirectory(prefix="backet-rules-ocr-") as temp_dir:
-        image_path = Path(temp_dir) / f"page-{page_number}.png"
-        pixmap = page.get_pixmap(dpi=200, alpha=False)
+        image_path = Path(temp_dir) / f"page-{page_number}-{dpi}-{psm}.png"
+        pixmap = page.get_pixmap(dpi=dpi, alpha=False)
         pixmap.save(str(image_path))
         process = subprocess.run(
-            ["tesseract", str(image_path), "stdout", "--psm", "6"],
+            ["tesseract", str(image_path), "stdout", "--psm", psm],
             check=False,
             capture_output=True,
             text=True,
@@ -906,7 +1843,7 @@ def _ocr_page(page, pdf_path: Path, page_number: int) -> str:
                 code="rules_ocr_failed",
                 message="Tesseract failed while OCR-processing the requested rulebook page.",
                 hint=tesseract_install_hint(),
-                details={"stderr": process.stderr.strip(), "page_number": page_number},
+                details={"stderr": process.stderr.strip(), "page_number": page_number, "dpi": dpi, "psm": psm},
                 exit_code=2,
             )
         return normalize_text(process.stdout)
@@ -1395,6 +2332,199 @@ def _require_book(connection: sqlite3.Connection, book_id: str) -> sqlite3.Row:
     return book
 
 
+def _book_entry_from_row(book: sqlite3.Row) -> BookRegistryEntry:
+    return BookRegistryEntry(
+        book_id=str(book["book_id"]),
+        title=str(book["book_title"]),
+        pdf_path=str(book["pdf_path"]),
+        tier=str(book["tier"]),
+        scope_tags=json.loads(book["scope_tags_json"]),
+        page_count=int(book["page_count"]),
+        pdf_fingerprint=str(book["pdf_fingerprint"]),
+    )
+
+
+def _review_target_row(
+    connection: sqlite3.Connection,
+    *,
+    book_id: str,
+    page: int,
+    chunk_index: int | None,
+) -> sqlite3.Row:
+    if chunk_index is not None:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM rule_chunks
+            WHERE book_id = ? AND page_start = ? AND chunk_index = ?
+            """,
+            (book_id, page, chunk_index),
+        ).fetchone()
+        if row is None:
+            raise AppError(
+                code="rules_review_target_missing",
+                message="No ingested rule chunk matches the requested review target.",
+                hint="Use a page and chunk reported by `backet rules audit --json`.",
+                details={"book_id": book_id, "page": page, "chunk_index": chunk_index},
+                exit_code=2,
+            )
+        return row
+    row = connection.execute(
+        """
+        SELECT page_number AS page_start, page_number AS page_end, content_hash
+        FROM page_audit
+        WHERE book_id = ? AND page_number = ?
+        """,
+        (book_id, page),
+    ).fetchone()
+    if row is None:
+        raise AppError(
+            code="rules_review_target_missing",
+            message="No ingested rulebook page matches the requested review target.",
+            hint="Use a page reported by `backet rules audit`.",
+            details={"book_id": book_id, "page": page},
+            exit_code=2,
+        )
+    return row
+
+
+def _insert_audit_review(
+    connection: sqlite3.Connection,
+    *,
+    book_id: str,
+    target_type: str,
+    page_start: int,
+    page_end: int | None,
+    chunk_index: int | None,
+    finding_kind: str,
+    decision: str,
+    content_hash: str,
+    reason: str,
+    notes: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO rule_audit_reviews (
+            book_id, target_type, page_start, page_end, chunk_index,
+            finding_kind, decision, content_hash, reason, notes, decided_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO UPDATE SET
+            decision = excluded.decision,
+            reason = excluded.reason,
+            notes = excluded.notes,
+            decided_at = excluded.decided_at
+        """,
+        (
+            book_id,
+            target_type,
+            page_start,
+            page_end,
+            chunk_index,
+            finding_kind,
+            decision,
+            content_hash,
+            reason,
+            notes,
+            timestamp_now(),
+        ),
+    )
+
+
+def _store_retrieval_exclusion_for_target(
+    connection: sqlite3.Connection,
+    *,
+    book_id: str,
+    target_type: str,
+    page_start: int,
+    page_end: int,
+    chunk_index: int | None,
+    reason: str,
+) -> int:
+    if target_type == "chunk":
+        rows = connection.execute(
+            """
+            SELECT id, page_start, page_end, chunk_index, content_hash
+            FROM rule_chunks
+            WHERE book_id = ? AND page_start = ? AND chunk_index = ?
+            ORDER BY page_start, chunk_index
+            """,
+            (book_id, page_start, chunk_index),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT id, page_start, page_end, chunk_index, content_hash
+            FROM rule_chunks
+            WHERE book_id = ? AND page_start BETWEEN ? AND ?
+            ORDER BY page_start, chunk_index
+            """,
+            (book_id, page_start, page_end),
+        ).fetchall()
+    now = timestamp_now()
+    for row in rows:
+        connection.execute(
+            """
+            INSERT INTO rule_retrieval_exclusions (
+                book_id, chunk_id, page_start, page_end, chunk_index, content_hash, reason, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(book_id, chunk_id, content_hash) DO UPDATE SET
+                reason = excluded.reason,
+                created_at = excluded.created_at
+            """,
+            (
+                book_id,
+                int(row["id"]),
+                int(row["page_start"]),
+                int(row["page_end"]),
+                int(row["chunk_index"]),
+                str(row["content_hash"]),
+                reason,
+                now,
+            ),
+        )
+    return len(rows)
+
+
+def _insert_page_text_override(
+    connection: sqlite3.Connection,
+    *,
+    book_id: str,
+    page: int,
+    page_result: ExtractedPage,
+    content_hash: str,
+    reason: str,
+    notes: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO rule_page_text_overrides (
+            book_id, page_number, content_hash, char_count, alpha_ratio, reason, notes, replaced_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            book_id,
+            page,
+            content_hash,
+            page_result.char_count,
+            page_result.alpha_ratio,
+            reason,
+            notes,
+            timestamp_now(),
+        ),
+    )
+
+
+def _manual_replacement_is_usable(text: str) -> bool:
+    if len(text) < MANUAL_REPLACEMENT_MIN_CHARS:
+        return False
+    alpha_chars = sum(1 for char in text if char.isalpha())
+    alpha_ratio = alpha_chars / len(text) if text else 0.0
+    return alpha_ratio >= 0.45
+
+
 def _manifest_to_assertions(payload: dict[str, Any]) -> list[ScopeAssertionDraft]:
     assertions: list[ScopeAssertionDraft] = []
     for tag_value in _manifest_list(payload.get("source_scope")):
@@ -1581,7 +2711,11 @@ def _search_rule_chunks(
         JOIN rule_chunks rc ON rc.id = rule_chunks_fts.chunk_id
         JOIN books b ON b.book_id = rc.book_id
         LEFT JOIN rule_chunk_retrieval_metadata m ON m.chunk_id = rc.id
+        LEFT JOIN rule_retrieval_exclusions rex
+          ON rex.chunk_id = rc.id
+         AND rex.content_hash = rc.content_hash
         WHERE rule_chunks_fts MATCH ?
+          AND rex.id IS NULL
         ORDER BY rank
         LIMIT ?
         """,
@@ -1781,7 +2915,11 @@ def _search_semantic_rule_chunks(
         JOIN books b ON b.book_id = rc.book_id
         JOIN rule_chunk_embeddings e ON e.chunk_id = rc.id
         LEFT JOIN rule_chunk_retrieval_metadata m ON m.chunk_id = rc.id
+        LEFT JOIN rule_retrieval_exclusions rex
+          ON rex.chunk_id = rc.id
+         AND rex.content_hash = rc.content_hash
         WHERE e.backend = ? AND e.model = ? AND e.content_hash = rc.content_hash
+          AND rex.id IS NULL
         ORDER BY rc.book_id, rc.page_start, rc.chunk_index
         """,
         (backend.name, backend.model_name),

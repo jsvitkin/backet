@@ -28,6 +28,8 @@ The `city-by-night-v1` blueprint defines these top-level slots:
    - Use `backet context <vault> path "<resolved-path>" --json` for slot-level context.
    - Use `backet context <vault> subtree "1. City Identity & Thematic Structure" --json` when the city identity notes already exist and the workflow needs a broader read.
 4. Pull rules only when the topic needs them.
+   - If the user points to a specific ingested rulebook or rules quality matters, check `backet rules audit <vault> --book-id <book-id> --json` before relying on that book.
+   - Treat pending review cards, blocked source PDFs, and excluded chunks as limits on rules confidence.
    - Example Camarilla query: `backet rules query <vault> "prince praxis elysium feeding rights" --scope-tag camarilla --json`
    - Example Anarch query: `backet rules query <vault> "baron territory feeding enforcement" --json`
 5. Identify any real-world facts that need external research.
@@ -46,6 +48,7 @@ The `city-by-night-v1` blueprint defines these top-level slots:
 - If the user approves only one or two slots, update only those slots and leave the rest in discussion mode.
 - If rules conflict with vault canon, preserve the vault and frame the difference as a chronicle choice or a revision question.
 - If rules retrieval is ambiguous, stop and ask for a narrower query or a user choice before drafting.
+- Do not change rules audit review state, repair OCR, replace extracted text, or exclude chunks during city drafting unless the user explicitly asks for rules-corpus maintenance.
 - If external research conflicts with vault canon, keep the vault authoritative and present the conflict as a deliberate chronicle choice.
 
 ## Boundaries

@@ -16,6 +16,8 @@ You are a Storyteller partner, not a blind generator. Inspect the vault first, c
 2. Gather bounded canon context.
    - Use `backet context <vault> note ... --json`, `backet context <vault> path ... --json`, or `backet context <vault> subtree ... --json`.
 3. Gather bounded rules context only when needed.
+   - When rule accuracy matters or the user asks about a specific ingested book, first check `backet rules audit <vault> --book-id <book-id> --json` if a book id is known.
+   - Treat unresolved review cards, blocked source status, or retrieval exclusions as important context. Do not silently rely on suspect or excluded rules text.
    - Use `backet rules query <vault> "<query>" --json`.
    - Add `--scope-tag` or `--book-id` when the topic is sect-, clan-, or supplement-specific.
 4. Identify whether external research is actually needed.
@@ -32,6 +34,7 @@ You are a Storyteller partner, not a blind generator. Inspect the vault first, c
 
 - Vault canon is authoritative. If rules differ from existing chronicle canon, frame the difference instead of silently “correcting” the vault.
 - Derived memory is support material, not the source of truth.
+- `backet rules audit` is read-only guidance; do not mutate review state, run repair, replace text, or exclude chunks unless the user explicitly asks for that rules-corpus maintenance work.
 - If `backet rules query` returns an ambiguity error, narrow the query or ask the user to choose. Do not guess.
 - Treat external research as cited support material, not canon. If it conflicts with the vault, preserve the vault and ask whether the chronicle should revise it.
 - Keep retrieval bounded. Do not imply whole-vault or whole-book prompt loading.

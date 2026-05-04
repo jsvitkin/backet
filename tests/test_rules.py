@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from contextlib import closing
 from pathlib import Path
 
@@ -703,6 +704,254 @@ def test_rules_audit_and_targeted_repair(runner, tmp_path: Path, monkeypatch: py
     assert query_result.exit_code == 0
     query_payload = json.loads(query_result.stdout)
     assert "Proper OCR repair" in query_payload["data"]["primary_results"][0]["content"]
+
+
+def test_rules_audit_review_decisions_hide_only_unchanged_findings_and_exclude_query_results(
+    runner,
+    tmp_path: Path,
+) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "review.pdf",
+        [
+            _rule_page(
+                "Feeding Permits",
+                "Blood doll feeding permits require a court record and a named officer before repeated access is allowed.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "review-book", "Review Book", "supplement")
+    with closing(open_rules_connection(vault)) as connection:
+        page_hash = connection.execute(
+            "SELECT content_hash FROM page_audit WHERE book_id = 'review-book' AND page_number = 1"
+        ).fetchone()["content_hash"]
+        connection.execute(
+            """
+            UPDATE page_audit
+            SET suspect = 1, confidence = 0.4, quality_flags_json = ?
+            WHERE book_id = 'review-book' AND page_number = 1
+            """,
+            (json.dumps(["low_text_density"]),),
+        )
+        connection.execute("UPDATE rule_chunks SET confidence = 0.4 WHERE book_id = 'review-book'")
+        connection.commit()
+
+    audit_result = runner.invoke(app, ["--json", "rules", "audit", str(vault), "--book-id", "review-book"])
+    assert audit_result.exit_code == 0
+    audit_payload = json.loads(audit_result.stdout)
+    assert audit_payload["data"]["books"][0]["review_cards"][0]["page_start"] == 1
+
+    ignored = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "review",
+            str(vault),
+            "--book-id",
+            "review-book",
+            "--page",
+            "1",
+            "--decision",
+            "ignored",
+            "--reason",
+            "art-heavy false positive",
+        ],
+    )
+    assert ignored.exit_code == 0, ignored.stdout
+    audit_result = runner.invoke(app, ["--json", "rules", "audit", str(vault), "--book-id", "review-book"])
+    audit_payload = json.loads(audit_result.stdout)
+    assert audit_payload["data"]["books"][0]["review_cards"] == []
+    assert audit_payload["data"]["books"][0]["suspect_pages"][0]["review_state"] == "ignored"
+
+    with closing(open_rules_connection(vault)) as connection:
+        connection.execute(
+            "UPDATE page_audit SET content_hash = 'changed-after-review' WHERE book_id = 'review-book' AND page_number = 1"
+        )
+        connection.commit()
+    audit_result = runner.invoke(app, ["--json", "rules", "audit", str(vault), "--book-id", "review-book"])
+    audit_payload = json.loads(audit_result.stdout)
+    assert audit_payload["data"]["books"][0]["review_cards"][0]["page_start"] == 1
+    assert audit_payload["data"]["books"][0]["suspect_pages"][0]["review_state"] == "pending"
+
+    excluded = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "review",
+            str(vault),
+            "--book-id",
+            "review-book",
+            "--page",
+            "1",
+            "--decision",
+            "excluded",
+        ],
+    )
+    assert excluded.exit_code == 0, excluded.stdout
+    query_result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "blood doll feeding permits", "--book-id", "review-book"],
+    )
+    assert query_result.exit_code == 2
+    query_payload = json.loads(query_result.stdout)
+    assert query_payload["error"]["details"]["reviewed_exclusions"]["excluded_chunks"] == 1
+
+    with closing(open_rules_connection(vault)) as connection:
+        connection.execute(
+            "UPDATE page_audit SET content_hash = ? WHERE book_id = 'review-book' AND page_number = 1",
+            (page_hash,),
+        )
+        connection.commit()
+    skipped = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "review",
+            str(vault),
+            "--book-id",
+            "review-book",
+            "--page",
+            "1",
+            "--chunk-index",
+            "1",
+            "--decision",
+            "skipped",
+        ],
+    )
+    assert skipped.exit_code == 0, skipped.stdout
+    assert json.loads(skipped.stdout)["data"]["resolved"] is False
+
+
+def test_rules_manual_replacement_refreshes_page_chunks_metadata_and_query_results(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "replace.pdf",
+        [_rule_page("Broken Page", "This older extraction is going to be replaced by human corrected text.")],
+    )
+    _ingest_book(runner, vault, pdf_path, "replace-book", "Replace Book", "core")
+
+    replacement = (
+        "Corrected ritual text says vitae witnesses must record the feeding license before the scene can continue. "
+        "The corrected passage includes enough words to be stored as useful rules text."
+    )
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "replace",
+            str(vault),
+            "--book-id",
+            "replace-book",
+            "--page",
+            "1",
+            "--text",
+            replacement,
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["data"]["chunk_count"] >= 1
+
+    with closing(open_rules_connection(vault)) as connection:
+        page = connection.execute("SELECT * FROM page_audit WHERE book_id = 'replace-book' AND page_number = 1").fetchone()
+        override_count = connection.execute("SELECT COUNT(*) AS count FROM rule_page_text_overrides").fetchone()["count"]
+        metadata_count = connection.execute("SELECT COUNT(*) AS count FROM rule_chunk_retrieval_metadata").fetchone()["count"]
+        fts_count = connection.execute("SELECT COUNT(*) AS count FROM rule_chunks_fts WHERE book_id = 'replace-book'").fetchone()["count"]
+    assert page["extraction_method"] == "manual"
+    assert page["suspect"] == 0
+    assert override_count == 1
+    assert metadata_count >= 1
+    assert fts_count >= 1
+
+    query_result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "corrected ritual witnesses license", "--book-id", "replace-book"],
+    )
+    assert query_result.exit_code == 0, query_result.stdout
+    query_payload = json.loads(query_result.stdout)
+    assert "Corrected ritual text" in query_payload["data"]["primary_results"][0]["content"]
+
+
+def test_rules_source_status_relink_and_missing_source_repair_block(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "source.pdf",
+        [_rule_page("Source Page", "Domain officers track blood doll permissions through a local court ledger.")],
+    )
+    _ingest_book(runner, vault, pdf_path, "source-book", "Source Book", "core")
+
+    matching_pdf = tmp_path / "source-copy.pdf"
+    shutil.copyfile(pdf_path, matching_pdf)
+    relink_result = runner.invoke(
+        app,
+        ["--json", "rules", "relink-source", str(vault), str(matching_pdf), "--book-id", "source-book"],
+    )
+    assert relink_result.exit_code == 0, relink_result.stdout
+    assert json.loads(relink_result.stdout)["data"]["source_status"]["status"] == "available"
+
+    different_pdf = _create_text_pdf(
+        tmp_path / "different.pdf",
+        [_rule_page("Different Source", "A different source PDF should require explicit force before repair trust changes.")],
+    )
+    mismatch_result = runner.invoke(
+        app,
+        ["--json", "rules", "relink-source", str(vault), str(different_pdf), "--book-id", "source-book"],
+    )
+    assert mismatch_result.exit_code == 2
+    assert json.loads(mismatch_result.stdout)["error"]["code"] == "rules_source_fingerprint_mismatch"
+
+    forced_result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "relink-source",
+            str(vault),
+            str(different_pdf),
+            "--book-id",
+            "source-book",
+            "--force",
+        ],
+    )
+    assert forced_result.exit_code == 0, forced_result.stdout
+    assert json.loads(forced_result.stdout)["data"]["status"] == "forced_mismatch"
+    with closing(open_rules_connection(vault)) as connection:
+        history_count = connection.execute("SELECT COUNT(*) AS count FROM rule_source_relinks").fetchone()["count"]
+    assert history_count == 2
+
+    different_pdf.unlink()
+    repair_result = runner.invoke(app, ["--json", "rules", "repair", str(vault), "source-book", "--pages", "1"])
+    assert repair_result.exit_code == 2
+    assert json.loads(repair_result.stdout)["error"]["code"] == "rules_repair_source_unavailable"
+
+
+def test_rules_automatic_ocr_candidate_scoring_selects_best_local_candidate(
+    runner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_image_only_pdf(tmp_path / "ocr-candidates.pdf", "Unreadable scan")
+    monkeypatch.setattr(
+        "backet.rules._ocr_text_candidates",
+        lambda page, pdf_path, page_number: [
+            "bad",
+            "Corrected OCR candidate explains blood sorcery rituals, dice tests, and vitae costs for the scene.",
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "candidate-book", "Candidate Book", "supplement")
+
+    query_result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "blood sorcery dice vitae", "--book-id", "candidate-book"],
+    )
+    assert query_result.exit_code == 0, query_result.stdout
+    query_payload = json.loads(query_result.stdout)
+    assert "Corrected OCR candidate" in query_payload["data"]["primary_results"][0]["content"]
 
 
 def _make_bootstrapped_vault(runner, tmp_path: Path) -> Path:

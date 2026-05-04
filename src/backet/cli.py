@@ -37,9 +37,17 @@ from backet.rules import (
     index_rules,
     ingest_rulebook,
     query_rules,
+    relink_rule_source,
+    replace_rule_page_text,
     repair_rules,
+    review_rule_audit,
 )
-from backet.rules_output import RulesIngestProgressReporter, emit_rules_ingest_report
+from backet.rules_output import (
+    RulesIngestProgressReporter,
+    emit_rules_audit_report,
+    emit_rules_ingest_report,
+    emit_rules_scope_audit_report,
+)
 from backet.skills import install_skills, skills_status, update_skills
 from backet.vault import diagnose_vault, initialize_vault
 
@@ -457,7 +465,10 @@ def rules_audit_command(
     state = ensure_state(ctx)
     try:
         result = audit_rules(vault.resolve(), book_id=book_id)
-        emit_success(state, result)
+        if state.json_output:
+            emit_success(state, result)
+            return
+        emit_rules_audit_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -471,6 +482,131 @@ def rules_scope_audit_command(
     state = ensure_state(ctx)
     try:
         result = audit_rule_scopes(vault.resolve(), book_id=book_id)
+        if state.json_output:
+            emit_success(state, result)
+            return
+        emit_rules_scope_audit_report(result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("review")
+def rules_review_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    book_id: Annotated[str, typer.Option("--book-id", help="Book identifier to review.")] = "",
+    page: Annotated[int, typer.Option("--page", help="Page number from the audit review queue.")] = 0,
+    decision: Annotated[
+        str,
+        typer.Option("--decision", help="Review decision: accepted, ignored, excluded, or skipped."),
+    ] = "",
+    chunk_index: Annotated[int | None, typer.Option("--chunk-index", help="Optional chunk index for chunk-level review.")] = None,
+    reason: Annotated[str, typer.Option("--reason", help="Short reason to store with the decision.")] = "",
+    notes: Annotated[str, typer.Option("--notes", help="Optional review notes.")] = "",
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        if not book_id.strip():
+            raise AppError(
+                code="rules_book_id_missing",
+                message="A stable `--book-id` is required for rules audit review.",
+                hint="Re-run with `--book-id some-book-id`.",
+                exit_code=2,
+            )
+        if page < 1:
+            raise AppError(
+                code="rules_review_page_missing",
+                message="A `--page` value is required for rules audit review.",
+                hint="Use a page number reported by `backet rules audit`.",
+                exit_code=2,
+            )
+        if not decision.strip():
+            raise AppError(
+                code="rules_review_decision_missing",
+                message="A `--decision` value is required for rules audit review.",
+                hint="Use accepted, ignored, excluded, or skipped.",
+                exit_code=2,
+            )
+        result = review_rule_audit(
+            vault.resolve(),
+            book_id=book_id,
+            page=page,
+            chunk_index=chunk_index,
+            decision=decision,
+            reason=reason,
+            notes=notes,
+        )
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("replace")
+def rules_replace_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    book_id: Annotated[str, typer.Option("--book-id", help="Book identifier to update.")] = "",
+    page: Annotated[int, typer.Option("--page", help="Page number whose extracted text should be replaced.")] = 0,
+    text: Annotated[str | None, typer.Option("--text", help="Inline replacement text.")] = None,
+    text_file: Annotated[
+        Path | None,
+        typer.Option("--text-file", help="Path to a UTF-8 text file containing replacement page text.", file_okay=True, dir_okay=False),
+    ] = None,
+    read_stdin: Annotated[bool, typer.Option("--stdin", help="Read replacement page text from stdin.")] = False,
+    reason: Annotated[str, typer.Option("--reason", help="Short reason to store with the replacement.")] = "",
+    notes: Annotated[str, typer.Option("--notes", help="Optional replacement notes.")] = "",
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        if not book_id.strip():
+            raise AppError(
+                code="rules_book_id_missing",
+                message="A stable `--book-id` is required for manual page replacement.",
+                hint="Re-run with `--book-id some-book-id`.",
+                exit_code=2,
+            )
+        if page < 1:
+            raise AppError(
+                code="rules_replace_page_missing",
+                message="A `--page` value is required for manual page replacement.",
+                hint="Use a page number reported by `backet rules audit`.",
+                exit_code=2,
+            )
+        replacement_text = _replacement_text_from_cli(text=text, text_file=text_file, read_stdin=read_stdin)
+        result = replace_rule_page_text(
+            vault.resolve(),
+            book_id=book_id,
+            page=page,
+            text=replacement_text,
+            reason=reason,
+            notes=notes,
+        )
+        emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("relink-source")
+def rules_relink_source_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    pdf: Annotated[Path, typer.Argument(help="Local path to the source PDF.", file_okay=True, dir_okay=False)] = Path("."),
+    book_id: Annotated[str, typer.Option("--book-id", help="Book identifier whose source should be relinked.")] = "",
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Trust this PDF as the new source even when its fingerprint differs."),
+    ] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        if not book_id.strip():
+            raise AppError(
+                code="rules_book_id_missing",
+                message="A stable `--book-id` is required for source relink.",
+                hint="Re-run with `--book-id some-book-id`.",
+                exit_code=2,
+            )
+        result = relink_rule_source(vault.resolve(), book_id=book_id, pdf_path=pdf.resolve(), force=force)
         emit_success(state, result)
     except AppError as error:
         _handle_error(ctx, error)
@@ -525,6 +661,49 @@ def rules_repair_command(
         emit_success(state, result)
     except AppError as error:
         _handle_error(ctx, error)
+
+
+def _replacement_text_from_cli(*, text: str | None, text_file: Path | None, read_stdin: bool) -> str:
+    selected = sum(1 for value in (text is not None, text_file is not None, read_stdin) if value)
+    if selected > 1:
+        raise AppError(
+            code="rules_replace_text_source_ambiguous",
+            message="Manual page replacement accepts one text source at a time.",
+            hint="Use only one of `--text`, `--text-file`, or `--stdin`.",
+            exit_code=2,
+        )
+    if text is not None:
+        return text
+    if text_file is not None:
+        if not text_file.exists() or not text_file.is_file():
+            raise AppError(
+                code="rules_replace_text_file_missing",
+                message=f"Replacement text file not found: {text_file}",
+                hint="Provide a readable UTF-8 text file.",
+                details={"text_file": str(text_file)},
+                exit_code=2,
+            )
+        try:
+            return text_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise AppError(
+                code="rules_replace_text_file_unreadable",
+                message="Replacement text file could not be read.",
+                hint="Check file permissions and try again.",
+                details={"text_file": str(text_file), "error": str(exc)},
+                exit_code=2,
+            ) from exc
+    if read_stdin:
+        return sys.stdin.read()
+    edited = click.edit("")
+    if edited is None:
+        raise AppError(
+            code="rules_replace_text_missing",
+            message="No replacement text was provided.",
+            hint="Use the editor, `--text`, `--text-file`, or `--stdin`.",
+            exit_code=2,
+        )
+    return edited
 
 
 def run() -> None:
