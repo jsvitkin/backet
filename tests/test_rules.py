@@ -825,6 +825,53 @@ def test_rules_audit_review_decisions_hide_only_unchanged_findings_and_exclude_q
     assert json.loads(skipped.stdout)["data"]["resolved"] is False
 
 
+def test_rules_audit_guided_review_walks_all_books_without_book_id_commands(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    first_pdf = _create_text_pdf(
+        tmp_path / "first-review.pdf",
+        [_rule_page("First Page", "First reviewable feeding rule text needs a human audit decision.")],
+    )
+    second_pdf = _create_text_pdf(
+        tmp_path / "second-review.pdf",
+        [_rule_page("Second Page", "Second reviewable court rule text needs a human audit decision.")],
+    )
+    _ingest_book(runner, vault, first_pdf, "first-review", "First Review", "core")
+    _ingest_book(runner, vault, second_pdf, "second-review", "Second Review", "supplement")
+    with closing(open_rules_connection(vault)) as connection:
+        for current_book_id in ("first-review", "second-review"):
+            connection.execute(
+                """
+                UPDATE page_audit
+                SET suspect = 1, confidence = 0.4, quality_flags_json = ?
+                WHERE book_id = ? AND page_number = 1
+                """,
+                (json.dumps(["low_text_density"]), current_book_id),
+            )
+        connection.commit()
+
+    result = runner.invoke(app, ["rules", "audit", str(vault), "--review"], input="a\na\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert "Guided review: 2 pending card(s)" in result.stdout
+    assert "Review 1/2" in result.stdout
+    assert "Review 2/2" in result.stdout
+    assert "backet rules review" not in result.stdout
+    assert "--book-id" not in result.stdout
+    with closing(open_rules_connection(vault)) as connection:
+        rows = connection.execute(
+            """
+            SELECT book_id, decision
+            FROM rule_audit_reviews
+            WHERE decision = 'accepted'
+            ORDER BY book_id
+            """
+        ).fetchall()
+    assert [(row["book_id"], row["decision"]) for row in rows] == [
+        ("first-review", "accepted"),
+        ("second-review", "accepted"),
+    ]
+
+
 def test_rules_manual_replacement_refreshes_page_chunks_metadata_and_query_results(runner, tmp_path: Path) -> None:
     vault = _make_bootstrapped_vault(runner, tmp_path)
     pdf_path = _create_text_pdf(

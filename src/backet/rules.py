@@ -1218,6 +1218,16 @@ def _build_review_cards(findings: list[RuleAuditFinding]) -> list[dict[str, Any]
                 "section_label": first.section_label,
                 "excerpt": first.excerpt,
                 "allowed_decisions": sorted(AUDIT_REVIEW_DECISIONS),
+                "targets": [
+                    {
+                        "target_type": finding.target_type,
+                        "page_start": finding.page_start,
+                        "page_end": finding.page_end,
+                        "chunk_index": finding.chunk_index,
+                        "finding_kind": finding.finding_kind,
+                    }
+                    for finding in page_findings
+                ],
             }
         )
     return cards

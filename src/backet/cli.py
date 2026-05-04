@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import click
 import typer
@@ -45,6 +45,7 @@ from backet.rules import (
 from backet.rules_output import (
     RulesIngestProgressReporter,
     emit_rules_audit_report,
+    emit_rules_audit_review_card,
     emit_rules_ingest_report,
     emit_rules_scope_audit_report,
 )
@@ -461,14 +462,24 @@ def rules_audit_command(
     ctx: typer.Context,
     vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
     book_id: Annotated[str | None, typer.Option("--book-id", help="Optional book identifier to audit.")] = None,
+    review: Annotated[
+        bool | None,
+        typer.Option(
+            "--review/--no-review",
+            help="Enter guided human review for pending cards. Defaults on in interactive terminals.",
+        ),
+    ] = None,
 ) -> None:
     state = ensure_state(ctx)
     try:
-        result = audit_rules(vault.resolve(), book_id=book_id)
+        resolved_vault = vault.resolve()
+        result = audit_rules(resolved_vault, book_id=book_id)
         if state.json_output:
             emit_success(state, result)
             return
         emit_rules_audit_report(result)
+        if _should_start_rules_audit_review(review=review):
+            _run_guided_rules_audit_review(resolved_vault, result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -661,6 +672,168 @@ def rules_repair_command(
         emit_success(state, result)
     except AppError as error:
         _handle_error(ctx, error)
+
+
+def _should_start_rules_audit_review(*, review: bool | None) -> bool:
+    if review is not None:
+        return review
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _run_guided_rules_audit_review(vault_root: Path, audit_result) -> None:
+    review_items = _audit_review_items(audit_result)
+    if not review_items:
+        click.echo("Review queue is clear.")
+        return
+
+    click.echo(f"Guided review: {len(review_items)} pending card(s)")
+    for index, (book, card) in enumerate(review_items, start=1):
+        emit_rules_audit_review_card(book, card, index=index, total=len(review_items))
+        choice = _prompt_rules_audit_review_choice()
+        if choice == "quit":
+            click.echo("Stopped review.")
+            return
+        if choice == "skip":
+            _apply_guided_review_decision(vault_root, book, card, "skipped")
+            click.echo("Skipped for now.")
+            continue
+        if choice in {"accepted", "ignored", "excluded"}:
+            _apply_guided_review_decision(vault_root, book, card, choice)
+            click.echo(f"Marked {choice}.")
+            continue
+        if choice == "retry":
+            _apply_guided_repair(vault_root, book, card)
+            continue
+        if choice == "replace":
+            _apply_guided_replacement(vault_root, book, card)
+            continue
+
+    click.echo("Review queue complete.")
+
+
+def _audit_review_items(audit_result) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    data = audit_result.data if isinstance(audit_result.data, dict) else {}
+    books = data.get("books") if isinstance(data.get("books"), list) else []
+    items: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for book in books:
+        if not isinstance(book, dict):
+            continue
+        cards = book.get("review_cards") if isinstance(book.get("review_cards"), list) else []
+        for card in cards:
+            if isinstance(card, dict):
+                items.append((book, card))
+    return items
+
+
+def _prompt_rules_audit_review_choice() -> str:
+    choices = {
+        "a": "accepted",
+        "accept": "accepted",
+        "accepted": "accepted",
+        "i": "ignored",
+        "ignore": "ignored",
+        "ignored": "ignored",
+        "e": "excluded",
+        "exclude": "excluded",
+        "excluded": "excluded",
+        "r": "retry",
+        "retry": "retry",
+        "repair": "retry",
+        "m": "replace",
+        "manual": "replace",
+        "replace": "replace",
+        "s": "skip",
+        "skip": "skip",
+        "skipped": "skip",
+        "q": "quit",
+        "quit": "quit",
+    }
+    while True:
+        value = click.prompt(
+            "Decision [a=accept, i=ignore, e=exclude, r=retry OCR, m=manual replace, s=skip, q=quit]",
+            default="s",
+            show_default=False,
+        )
+        normalized = choices.get(str(value).strip().lower())
+        if normalized is not None:
+            return normalized
+        click.echo("Choose a, i, e, r, m, s, or q.")
+
+
+def _apply_guided_review_decision(
+    vault_root: Path,
+    book: dict[str, Any],
+    card: dict[str, Any],
+    decision: str,
+) -> None:
+    book_id = str(book.get("book_id") or "")
+    targets = _guided_review_targets(card)
+    if not targets:
+        raise AppError(
+            code="rules_review_target_missing",
+            message="This audit review card does not include a review target.",
+            hint="Re-run `backet rules audit --json` and report the card payload.",
+            details={"book_id": book_id, "page": card.get("page_start")},
+            exit_code=2,
+        )
+    for target in targets:
+        review_rule_audit(
+            vault_root,
+            book_id=book_id,
+            page=int(target["page_start"]),
+            chunk_index=target.get("chunk_index"),
+            decision=decision,
+            reason="guided audit review",
+        )
+
+
+def _guided_review_targets(card: dict[str, Any]) -> list[dict[str, Any]]:
+    targets = card.get("targets") if isinstance(card.get("targets"), list) else []
+    normalized: list[dict[str, Any]] = []
+    for target in targets:
+        if not isinstance(target, dict) or target.get("page_start") is None:
+            continue
+        chunk_index = target.get("chunk_index")
+        normalized.append(
+            {
+                "page_start": int(target["page_start"]),
+                "chunk_index": int(chunk_index) if chunk_index is not None else None,
+            }
+        )
+    if normalized:
+        return normalized
+    page_start = card.get("page_start")
+    if page_start is None:
+        return []
+    return [{"page_start": int(page_start), "chunk_index": None}]
+
+
+def _apply_guided_repair(vault_root: Path, book: dict[str, Any], card: dict[str, Any]) -> None:
+    book_id = str(book.get("book_id") or "")
+    page = int(card["page_start"])
+    try:
+        repair_rules(vault_root, book_id=book_id, pages_spec=str(page), force_ocr=True)
+    except AppError as error:
+        click.echo(f"Automatic OCR retry did not run: {error.message}")
+        if error.hint:
+            click.echo(error.hint)
+        return
+    click.echo("Automatic OCR retry finished.")
+
+
+def _apply_guided_replacement(vault_root: Path, book: dict[str, Any], card: dict[str, Any]) -> None:
+    book_id = str(book.get("book_id") or "")
+    page = int(card["page_start"])
+    click.echo("Opening your editor for corrected page text.")
+    try:
+        text = _replacement_text_from_cli(text=None, text_file=None, read_stdin=False)
+        replace_rule_page_text(vault_root, book_id=book_id, page=page, text=text, reason="guided audit review")
+    except AppError as error:
+        click.echo(f"Manual replacement was not saved: {error.message}")
+        if error.hint:
+            click.echo(error.hint)
+        return
+    click.echo("Manual replacement saved.")
 
 
 def _replacement_text_from_cli(*, text: str | None, text_file: Path | None, read_stdin: bool) -> str:

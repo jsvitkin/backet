@@ -206,7 +206,7 @@ def emit_rules_ingest_report(result: CommandResult) -> None:
         output.console.print(f"Run: {rules_index_command(data)}")
 
 
-def emit_rules_audit_report(result: CommandResult) -> None:
+def emit_rules_audit_report(result: CommandResult, *, show_cards: bool = False) -> None:
     data = result.data
     books = data.get("books") if isinstance(data.get("books"), list) else []
     output.console.print("[bold green]Rules audit[/bold green]")
@@ -232,10 +232,11 @@ def emit_rules_audit_report(result: CommandResult) -> None:
         if not isinstance(book, dict):
             continue
         _emit_audit_book_summary(book)
-        output.console.print("")
-        _emit_audit_review_cards(data, book)
+        if show_cards:
+            output.console.print("")
+            _emit_audit_review_cards(book)
         notices = book.get("notices") if isinstance(book.get("notices"), list) else []
-        if notices:
+        if show_cards and notices:
             output.console.print("Notices:")
             for notice in notices[:5]:
                 if not isinstance(notice, dict):
@@ -245,6 +246,31 @@ def emit_rules_audit_report(result: CommandResult) -> None:
             if remaining > 0:
                 output.console.print(f"  - +{remaining} more notices")
             output.console.print("")
+        elif not show_cards:
+            output.console.print("")
+
+
+def emit_rules_audit_review_card(book: dict[str, Any], card: dict[str, Any], *, index: int, total: int) -> None:
+    title = str(book.get("book_title") or book.get("book_id") or "rulebook")
+    page = card.get("page_start")
+    category = card.get("category") or "review"
+    output.console.print("")
+    output.console.print(f"[bold yellow]Review {index:,}/{total:,}: {title}, page {page}[/bold yellow]")
+    output.console.print(f"Kind:   {category}")
+    reasons = card.get("reasons") if isinstance(card.get("reasons"), list) else []
+    if reasons:
+        output.console.print(f"Reason: {reasons[0]}")
+    source = card.get("source_status") if isinstance(card.get("source_status"), dict) else {}
+    if source:
+        output.console.print(f"Source: {source.get('status')} - {source.get('message')}")
+    flags = _list_values(card.get("quality_flags"))
+    if flags:
+        output.console.print(f"Flags:  {', '.join(flags)}")
+    excerpt = str(card.get("excerpt") or "")
+    if excerpt:
+        output.console.print("")
+        output.console.print(excerpt, markup=False, highlight=False)
+    output.console.print("")
 
 
 def emit_rules_scope_audit_report(result: CommandResult) -> None:
@@ -281,42 +307,7 @@ def emit_rules_scope_audit_report(result: CommandResult) -> None:
 
 def audit_command(data: dict[str, Any]) -> str:
     vault = shlex.quote(str(data.get("vault") or "."))
-    book_id = shlex.quote(str(data.get("book_id") or ""))
-    return f"backet rules audit {vault} --book-id {book_id}"
-
-
-def review_command(vault: str, book_id: str, page: object, decision: str = "accepted") -> str:
-    return (
-        f"backet rules review {shlex.quote(vault)} "
-        f"--book-id {shlex.quote(book_id)} --page {shlex.quote(str(page))} --decision {decision}"
-    )
-
-
-def review_template(page: object, decision: str = "accepted") -> str:
-    return f"backet rules review <vault> --book-id <book-id> --page {shlex.quote(str(page))} --decision {decision}"
-
-
-def replace_command(vault: str, book_id: str, page: object) -> str:
-    return (
-        f"backet rules replace {shlex.quote(vault)} "
-        f"--book-id {shlex.quote(book_id)} --page {shlex.quote(str(page))} --text-file corrected-page.txt"
-    )
-
-
-def replace_template(page: object) -> str:
-    return f"backet rules replace <vault> --book-id <book-id> --page {shlex.quote(str(page))} --text-file corrected-page.txt"
-
-
-def repair_command(vault: str, book_id: str, page: object) -> str:
-    return f"backet rules repair {shlex.quote(vault)} {shlex.quote(book_id)} --pages {shlex.quote(str(page))} --force-ocr"
-
-
-def repair_template(page: object) -> str:
-    return f"backet rules repair <vault> <book-id> --pages {shlex.quote(str(page))} --force-ocr"
-
-
-def relink_source_command(vault: str, book_id: str) -> str:
-    return f"backet rules relink-source {shlex.quote(vault)} --book-id {shlex.quote(book_id)} /path/to/source.pdf"
+    return f"backet rules audit {vault}"
 
 
 def rules_index_command(data: dict[str, Any]) -> str:
@@ -434,10 +425,8 @@ def _emit_audit_book_summary(book: dict[str, Any]) -> None:
     )
 
 
-def _emit_audit_review_cards(data: dict[str, Any], book: dict[str, Any]) -> None:
+def _emit_audit_review_cards(book: dict[str, Any]) -> None:
     cards = book.get("review_cards") if isinstance(book.get("review_cards"), list) else []
-    vault = str(data.get("vault") or ".")
-    book_id = str(book.get("book_id") or "")
     if not cards:
         output.console.print("Review queue: clear")
         return
@@ -458,13 +447,3 @@ def _emit_audit_review_cards(data: dict[str, Any], book: dict[str, Any]) -> None
     remaining = len(cards) - 5
     if remaining > 0:
         output.console.print(f"  +{remaining} more review cards")
-    first_page = cards[0].get("page_start") if isinstance(cards[0], dict) else "<page>"
-    output.console.print("Actions:")
-    output.console.print(f"  vault:   {vault}")
-    output.console.print(f"  book-id: {book_id}")
-    output.console.print(f"  Review decision: {review_template(first_page)}")
-    output.console.print(f"  Manual replacement: {replace_template(first_page)}")
-    output.console.print(f"  Automatic OCR retry: {repair_template(first_page)}")
-    source_status = book.get("source_status") if isinstance(book.get("source_status"), dict) else {}
-    if source_status.get("status") in {"missing", "mismatched", "unverified"}:
-        output.console.print(f"  Source: {relink_source_command(vault, book_id)}")

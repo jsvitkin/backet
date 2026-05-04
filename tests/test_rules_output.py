@@ -49,7 +49,8 @@ def test_rules_ingest_report_summarizes_long_page_lists_and_labels_human_terms(
     assert "Review:  13 pages need review" in output
     assert "Pages requiring OCR: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, +2 more" in output
     assert "Pages needing review: 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, +3 more" in output
-    assert "backet rules audit /tmp/vault --book-id core-v5" in output
+    assert "backet rules audit /tmp/vault" in output
+    assert "backet rules audit /tmp/vault --book-id" not in output
     assert "ocr_used_on_pages" not in output
     assert "suspect_pages" not in output
     assert "scope_tags" not in output
@@ -190,14 +191,13 @@ def test_rules_audit_report_groups_human_work_without_raw_diagnostic_keys(monkey
     assert "Rules audit" in rendered
     assert "Maintenance" in rendered
     assert "Cults (cults, supplement)" in rendered
-    assert "Review queue" in rendered
-    assert "Page 37" in rendered
-    assert "Actions:" in rendered
-    assert "vault:   /tmp/vault" in rendered
-    assert "book-id: cults" in rendered
-    assert "backet rules review <vault> --book-id <book-id> --page 37 --decision accepted" in rendered
-    assert "backet rules replace <vault> --book-id <book-id> --page 37 --text-file corrected-page.txt" in rendered
-    assert "backet rules repair <vault> <book-id> --pages 37 --force-ocr" in rendered
+    assert "Review: 1 pending pages" in rendered
+    assert "Review queue" not in rendered
+    assert "Page 37" not in rendered
+    assert "Actions:" not in rendered
+    assert "backet rules review" not in rendered
+    assert "backet rules replace" not in rendered
+    assert "backet rules repair" not in rendered
     assert "suspect_pages" not in rendered
     assert "quality_flags_json" not in rendered
     assert "review_cards" not in rendered

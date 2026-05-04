@@ -22,7 +22,7 @@ Run the installer from any terminal location. It does not need to run inside an 
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.7/backet-0.1.7-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.8/backet-0.1.8-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
@@ -30,7 +30,7 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.7/backet-0.1.7-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.8/backet-0.1.8-py3-none-any.whl
 ```
 
 After the first install, update the CLI through Backet itself:
@@ -148,47 +148,31 @@ backet rules index /path/to/vault
 backet --json rules query /path/to/vault "feeding rights blood doll" --scope-tag camarilla
 backet rules scope audit /path/to/vault --book-id camarilla
 backet --json rules scope export /path/to/vault --book-id camarilla
-backet rules audit /path/to/vault --book-id camarilla
+backet rules audit /path/to/vault
 ```
 
 Human `rules ingest` runs show progress by default while the PDF is inspected, extracted, OCR-processed, stored, scoped, indexed, semantically indexed when a local embedding backend is available, and summarized. Interactive terminals use live progress; redirected non-JSON runs print plain phase lines. Use `--json` when a script or agent needs deterministic machine-readable output.
 
 Ingest automatically generates local rule scope assertions from PDF structure, headings, known Vampire: The Masquerade aliases, and mechanics/lore markers. High-confidence assertions are applied to chunks; uncertain assertions stay reviewable through `backet rules scope audit`, `export`, and `apply`. Scope manifests are exported on demand; SQLite under `.backet/rules/` remains the canonical rules state. Source PDFs stay outside the vault.
 
-`backet rules audit` is the human-first entry point for extraction quality. It separates maintenance work, reviewable pages, and notices:
+`backet rules audit` is the human-first entry point for extraction quality across all ingested books. It prints a bounded per-book summary, then interactive terminals guide you through pending review cards one at a time. Use `--no-review` when you only want the summary, or `--json` when a script or agent needs the full deterministic payload.
+
+The audit separates maintenance work, reviewable pages, and notices:
 
 - Maintenance means generated search state needs refreshing, usually with `backet rules index`.
-- Review means extracted text may need a human decision.
+- Review means extracted text may need a human decision in the guided flow.
 - Notices are usually OCR fallback, title, art-heavy, blank, table-of-contents, or index pages that do not need action unless you want them to answer rules queries.
 - Scope audit is separate: `backet rules scope audit` reviews generated scope assertions, not OCR quality.
 
-For a review card, choose one of the durable decisions:
-
-```bash
-backet rules review /path/to/vault --book-id camarilla --page 37 --decision accepted
-backet rules review /path/to/vault --book-id camarilla --page 37 --decision ignored
-backet rules review /path/to/vault --book-id camarilla --page 37 --decision excluded
-backet rules review /path/to/vault --book-id camarilla --page 37 --decision skipped
-```
+For each review card, choose one of the durable decisions in the prompt:
 
 `accepted` and `ignored` hide the same unchanged finding from later urgent review. `ignored` does not affect retrieval. `excluded` also hides the finding and removes the current chunks for that page from `backet rules query` results. `skipped` records that you looked but leaves the finding unresolved.
 
-If automatic repair is appropriate, Backet uses the stored source PDF path and fingerprint:
+If automatic repair is appropriate, choose OCR retry in the guided prompt. Backet uses the stored source PDF path and fingerprint.
 
-```bash
-backet rules repair /path/to/vault camarilla --pages 37 --force-ocr
-backet rules relink-source /path/to/vault /path/to/camarilla.pdf --book-id camarilla
-```
+Repair only runs when the stored source PDF is available and fingerprint-verified. Relinking a matching PDF is normal. Relinking a mismatched PDF requires explicit force, which makes that PDF the new trusted repair source and records relink history.
 
-Repair only runs when the stored source PDF is available and fingerprint-verified. Relinking a matching PDF is normal. Relinking a mismatched PDF requires `--force`, which makes that PDF the new trusted repair source and records relink history.
-
-When automatic repair cannot recover good text, replace the page manually from inline text, a file, stdin, or the editor:
-
-```bash
-backet rules replace /path/to/vault --book-id camarilla --page 37 --text-file corrected-page-37.txt
-cat corrected-page-37.txt | backet rules replace /path/to/vault --book-id camarilla --page 37 --stdin
-backet rules replace /path/to/vault --book-id camarilla --page 37 --text "Corrected page text..."
-```
+When automatic repair cannot recover good text, choose manual replacement in the guided prompt. Backet opens your editor for corrected page text. The non-interactive `rules review`, `rules repair`, `rules replace`, and `rules relink-source` commands are still available for agents, tests, and scripts.
 
 Manual replacement refreshes the page audit row, chunks, exact search index, retrieval metadata, scope application, and semantic coverage for that page. Empty or unusable replacement text is rejected; use `ignored` or `excluded` when the right decision is not to store new rules text.
 
@@ -259,13 +243,13 @@ python -m build --wheel
 Run the install smoke test against a built wheel on macOS, Linux, WSL, or Git Bash:
 
 ```bash
-scripts/smoke-install.sh dist/backet-0.1.7-py3-none-any.whl "$PWD"
+scripts/smoke-install.sh dist/backet-0.1.8-py3-none-any.whl "$PWD"
 ```
 
 On native Windows PowerShell, validate the built wheel with `pipx`:
 
 ```powershell
-py -3 -m pipx install --force .\dist\backet-0.1.7-py3-none-any.whl
+py -3 -m pipx install --force .\dist\backet-0.1.8-py3-none-any.whl
 backet --version
 py -3 -m pipx uninstall backet
 ```
