@@ -39,8 +39,9 @@ ARCHIVE_PATH="${TMP_ROOT}/skills-repo.zip"
 RULES_PDF_PATH="${TMP_ROOT}/core-rulebook.pdf"
 RULES_RELINK_PDF_PATH="${TMP_ROOT}/core-rulebook-copy.pdf"
 RULES_REPLACEMENT_TEXT="${TMP_ROOT}/corrected-page.txt"
+DEPLOY_REPO_DIR="${TMP_ROOT}/deploy-repo"
 
-mkdir -p "$VAULT_DIR"
+mkdir -p "$VAULT_DIR" "$DEPLOY_REPO_DIR"
 
 INSTALLED_VERSION="$("$BACKET_BIN" --version)"
 "$BACKET_BIN" --json update apply --yes --version "$INSTALLED_VERSION" \
@@ -52,6 +53,11 @@ test ! -f "${BACKET_CONFIG_HOME}/update-state.json"
 rm -rf "${VAULT_DIR}/.backet/cache" "${VAULT_DIR}/.backet/temp" "${VAULT_DIR}/.backet/ocr-work"
 rm -f "${VAULT_DIR}/.backet/.gitignore"
 "$BACKET_BIN" --json doctor --fix "$VAULT_DIR" | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["data"]["safe_fix_applied"] is True'
+"$BACKET_BIN" --json bot setup files "$VAULT_DIR" --repo-root "$DEPLOY_REPO_DIR" \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); files=payload["data"]["repository_files"]; assert payload["status"] == "ok" and ".github/workflows/deploy-backet-bot.yml" in files["created"]'
+test -f "${DEPLOY_REPO_DIR}/.github/workflows/deploy-backet-bot.yml"
+test -f "${DEPLOY_REPO_DIR}/deploy/bot/docker-compose.yml"
+grep -F "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v${INSTALLED_VERSION}/backet-${INSTALLED_VERSION}-py3-none-any.whl" "${DEPLOY_REPO_DIR}/.github/workflows/deploy-backet-bot.yml" >/dev/null
 
 "$PYTHON_BIN" - "$REPO_ROOT" "$ARCHIVE_PATH" <<'PY'
 import json

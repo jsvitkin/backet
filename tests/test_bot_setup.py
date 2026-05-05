@@ -11,6 +11,7 @@ from backet.bot_setup import (
     DiscordSetupClient,
     Redactor,
     generate_discord_install_url,
+    install_deployment_repository_files,
     load_or_initialize_setup_state,
     run_deploy_setup,
     run_discord_setup,
@@ -231,6 +232,56 @@ def test_cli_setup_overview_and_focused_status_are_json_safe(runner, tmp_path: P
     assert status.exit_code == 0, status.stdout
     assert json.loads(overview.stdout)["data"]["phases"]["prerequisites"]["status"] in {"done", "needs_action"}
     assert json.loads(status.stdout)["data"]["setup_state_path"].endswith(".backet/state/bot-setup.yaml")
+
+
+def test_cli_setup_overview_uses_guided_human_output(runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    vault = _make_vault(tmp_path)
+    monkeypatch.chdir(vault)
+
+    result = runner.invoke(app, ["bot", "setup"])
+
+    assert result.exit_code == 0, result.output
+    assert "Backet bot setup" in result.output
+    assert "Progress" in result.output
+    assert "What To Do Next" in result.output
+    assert "backet bot setup files" in result.output
+    assert "phases:" not in result.output
+    assert "last_phase_result:" not in result.output
+    assert "{'prerequisites'" not in result.output
+
+
+def test_setup_files_installs_private_deploy_workflow_and_assets(runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    repo_root = tmp_path / "private-repo"
+
+    result = runner.invoke(app, ["bot", "setup", "files", str(vault), "--repo-root", str(repo_root)])
+
+    assert result.exit_code == 0, result.output
+    assert (repo_root / ".github/workflows/deploy-backet-bot.yml").exists()
+    assert (repo_root / "deploy/bot/docker-compose.yml").exists()
+    assert (repo_root / "deploy/bot/activate-release.sh").exists()
+    workflow = (repo_root / ".github/workflows/deploy-backet-bot.yml").read_text(encoding="utf-8")
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.13/backet-0.1.13-py3-none-any.whl" in workflow
+    state = load_or_initialize_setup_state(vault)
+    assert state["setup"]["phases"]["prerequisites"]["status"] == "done"
+    assert "Deployment Files" in result.output
+    assert "phases:" not in result.output
+
+
+def test_setup_files_refuses_to_overwrite_changed_files_without_force(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    repo_root = tmp_path / "private-repo"
+    install_deployment_repository_files(vault, repo_root=repo_root)
+    workflow = repo_root / ".github/workflows/deploy-backet-bot.yml"
+    workflow.write_text("custom workflow\n", encoding="utf-8")
+
+    result = install_deployment_repository_files(vault, repo_root=repo_root)
+    forced = install_deployment_repository_files(vault, repo_root=repo_root, force=True)
+
+    assert result.issues
+    assert ".github/workflows/deploy-backet-bot.yml" in result.data["repository_files"]["skipped"]
+    assert ".github/workflows/deploy-backet-bot.yml" in forced.fixed
+    assert "custom workflow" not in workflow.read_text(encoding="utf-8")
 
 
 class FakeDiscordTransport:

@@ -14,7 +14,7 @@ def test_oracle_vm_deploy_assets_are_present_and_private_by_default() -> None:
     bootstrap = _read("deploy/bot/bootstrap-llama-model.sh")
     workflow = _read(".github/workflows/deploy-backet-bot.yml")
 
-    assert "pip install '.[bot]'" in dockerfile
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/" in workflow
     assert "/srv/backet-bot/data" in compose
     assert "/srv/backet-bot/models" in compose
     assert "profiles: [\"llama\"]" in compose

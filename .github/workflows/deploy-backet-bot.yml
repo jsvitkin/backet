@@ -26,7 +26,12 @@ jobs:
           python-version: "3.13"
 
       - name: Install Backet with bot dependencies
-        run: python -m pip install '.[bot]'
+        env:
+          BACKET_INSTALL_SPEC: ${{ vars.BACKET_INSTALL_SPEC }}
+        run: |
+          set -euo pipefail
+          install_spec="${BACKET_INSTALL_SPEC:-backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.13/backet-0.1.13-py3-none-any.whl}"
+          python -m pip install "${install_spec}"
 
       - name: Export private bot bundle
         run: backet bot export "${{ inputs.vault_path }}" --output bot-data --force

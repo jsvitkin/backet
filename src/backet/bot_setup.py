@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import getpass
+import importlib.resources
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,7 +18,9 @@ from urllib.request import Request, urlopen
 
 import yaml
 
+from backet import __version__
 from backet.bot_access import BotCommandPolicy, load_bot_config, scan_bot_visibility, summarize_visibility
+from backet.distribution import load_distribution_metadata
 from backet.errors import AppError
 from backet.models import CommandResult, Issue
 from backet.paths import bot_config_path, bot_setup_path, rules_db_path, state_dir
@@ -47,6 +51,15 @@ DEFAULT_VARIABLE_NAMES = (
     "LLAMA_MODEL_URL",
 )
 REQUIRED_VARIABLE_NAMES = ("DISCORD_GUILD_ID", "ORACLE_VM_HOST", "ORACLE_VM_USER")
+DEPLOY_REPOSITORY_FILES = (
+    ".github/workflows/deploy-backet-bot.yml",
+    "deploy/bot/Dockerfile",
+    "deploy/bot/activate-release.sh",
+    "deploy/bot/bootstrap-llama-model.sh",
+    "deploy/bot/docker-compose.yml",
+    "deploy/bot/env.example",
+    "deploy/bot/smoke-test.sh",
+)
 SECRET_VALUE_KEYS = {
     "token",
     "discord_token",
@@ -373,6 +386,79 @@ def reset_setup_state(vault_root: Path, yes: bool = False) -> CommandResult:
             "removed_path": str(path.relative_to(vault_root)),
             "secrets_untouched": True,
         },
+    )
+
+
+def install_deployment_repository_files(
+    vault_root: Path,
+    repo_root: Path | None = None,
+    force: bool = False,
+) -> CommandResult:
+    ensure_bootstrapped_vault(vault_root)
+    resolved_repo_root = _resolve_deploy_repo_root(vault_root, repo_root)
+    created: list[str] = []
+    fixed: list[str] = []
+    unchanged: list[str] = []
+    skipped: list[str] = []
+    issues: list[Issue] = []
+
+    for relative in DEPLOY_REPOSITORY_FILES:
+        target = resolved_repo_root / relative
+        content = _render_deploy_repository_file(relative)
+        if target.exists():
+            if target.read_bytes() == content:
+                unchanged.append(relative)
+                continue
+            if not force:
+                skipped.append(relative)
+                issues.append(
+                    Issue(
+                        code="bot_setup_deploy_file_exists",
+                        severity="warning",
+                        message="Deployment file already exists and differs from the packaged template.",
+                        path=relative,
+                        hint="Review it, then rerun `backet bot setup files <vault> --force-files` if Backet should overwrite it.",
+                        safe_to_fix=False,
+                    )
+                )
+                continue
+            fixed.append(relative)
+        else:
+            created.append(relative)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        if relative.endswith(".sh"):
+            target.chmod(0o755)
+
+    state = load_or_initialize_setup_state(vault_root, save=True)
+    result = _prerequisites_phase(vault_root, state, repo_root=resolved_repo_root)
+    save_bot_setup_state(vault_root, state)
+
+    next_actions = [
+        "Review the created deployment files.",
+        "Commit and push `.github/workflows/deploy-backet-bot.yml` and `deploy/bot/*` to the private vault repository.",
+        f"Continue with `backet bot setup discord {shlex.quote(str(vault_root))}`.",
+    ]
+    if skipped:
+        next_actions.insert(0, "Resolve or overwrite skipped deployment files before deploying.")
+
+    status = _setup_status_payload(vault_root, state)
+    status["last_phase_result"] = result.to_dict()
+    status["repository_files"] = {
+        "repo_root": str(resolved_repo_root),
+        "created": created,
+        "updated": fixed,
+        "unchanged": unchanged,
+        "skipped": skipped,
+        "next_actions": next_actions,
+    }
+    return CommandResult(
+        message="Backet bot deployment files checked",
+        created=created,
+        fixed=fixed,
+        issues=issues,
+        data=status,
     )
 
 
@@ -944,12 +1030,16 @@ def _phase_command_result(vault_root: Path, state: dict[str, Any], result: Setup
     )
 
 
-def _prerequisites_phase(vault_root: Path, state: dict[str, Any]) -> SetupPhaseResult:
+def _prerequisites_phase(vault_root: Path, state: dict[str, Any], repo_root: Path | None = None) -> SetupPhaseResult:
     ensure_bootstrapped_vault(vault_root)
     warnings: list[str] = []
     next_actions: list[str] = []
-    if not Path(".github/workflows/deploy-backet-bot.yml").exists():
+    resolved_repo_root = repo_root or _git_root_for(vault_root) or vault_root.resolve()
+    missing_files = [relative for relative in DEPLOY_REPOSITORY_FILES if not (resolved_repo_root / relative).exists()]
+    if ".github/workflows/deploy-backet-bot.yml" in missing_files:
         warnings.append("The private bot deployment workflow is not present in this repository checkout.")
+    if missing_files:
+        next_actions.append("Run `backet bot setup files <vault>` from the private vault repository to install deploy files.")
     if shutil.which("gh") is None:
         next_actions.append("Install GitHub CLI so Backet can configure repository secrets and dispatch deployment.")
     if shutil.which("ssh") is None:
@@ -963,13 +1053,64 @@ def _prerequisites_phase(vault_root: Path, state: dict[str, Any]) -> SetupPhaseR
         warnings=warnings,
         data={
             "vault": str(vault_root),
+            "repo_root": str(resolved_repo_root),
             "gh_available": shutil.which("gh") is not None,
             "ssh_available": shutil.which("ssh") is not None,
-            "workflow_present": Path(".github/workflows/deploy-backet-bot.yml").exists(),
+            "workflow_present": (resolved_repo_root / ".github/workflows/deploy-backet-bot.yml").exists(),
+            "missing_deploy_files": missing_files,
         },
     )
     _record_phase(state, result)
     return result
+
+
+def _resolve_deploy_repo_root(vault_root: Path, repo_root: Path | None) -> Path:
+    if repo_root is not None:
+        resolved = repo_root.expanduser().resolve()
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    git_root = _git_root_for(vault_root) or _git_root_for(Path.cwd())
+    if git_root is not None:
+        return git_root
+    return vault_root.resolve()
+
+
+def _git_root_for(path: Path) -> Path | None:
+    completed = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    output = completed.stdout.strip()
+    return Path(output).resolve() if output else None
+
+
+def _render_deploy_repository_file(relative: str) -> bytes:
+    raw = _read_packaged_deploy_file(relative)
+    if relative == ".github/workflows/deploy-backet-bot.yml":
+        text = raw.decode("utf-8")
+        metadata = load_distribution_metadata()
+        install_spec = f"backet[bot] @ {metadata.release_artifact_url(__version__)}"
+        text = re.sub(
+            r"backet\[bot\] @ https://github\.com/jsvitkin/backet/releases/download/v[^/]+/backet-[^}\" ]+\.whl",
+            install_spec,
+            text,
+        )
+        return text.encode("utf-8")
+    return raw
+
+
+def _read_packaged_deploy_file(relative: str) -> bytes:
+    try:
+        resource = importlib.resources.files("backet.resources").joinpath("bot_deploy", *Path(relative).parts)
+        return resource.read_bytes()
+    except (FileNotFoundError, ModuleNotFoundError):
+        source_root = Path(__file__).resolve().parents[2]
+        return (source_root / relative).read_bytes()
 
 
 def _record_phase(state: dict[str, Any], result: SetupPhaseResult) -> None:

@@ -16,6 +16,7 @@ Use these phases in order:
 
 ```bash
 backet bot setup /path/to/vault
+backet bot setup files /path/to/vault
 backet bot setup discord /path/to/vault
 backet bot setup visibility /path/to/vault
 backet bot setup oracle /path/to/vault --host ORACLE_VM_HOST --user ubuntu
@@ -44,6 +45,20 @@ The bot runtime still reads:
 ```
 
 Secrets are never written to either file.
+
+If setup reports that the deployment workflow or deploy assets are missing, install them from the CLI:
+
+```bash
+backet bot setup files /path/to/vault
+```
+
+Run this from the private vault repository. If the vault is a subdirectory, pass the repository root explicitly:
+
+```bash
+backet bot setup files /path/to/vault --repo-root /path/to/private-repo
+```
+
+This writes `.github/workflows/deploy-backet-bot.yml` and `deploy/bot/*`. Existing changed files are not overwritten unless you rerun with `--force-files`.
 
 ## Discord Phase
 
@@ -159,6 +174,8 @@ Your private repository must contain:
 - explicit note visibility metadata
 - `deploy/bot/*`
 - `.github/workflows/deploy-backet-bot.yml`
+
+The installed workflow uses the public Backet release wheel plus bot dependencies, so your private vault repository does not need to contain the Backet source code.
 
 ## Oracle Phase
 

@@ -23,6 +23,7 @@ from backet.bot_discord import run_discord_bot_result
 from backet.bot_runtime import answer_bot_query_result, inspect_bot_bundle
 from backet.bot_setup import (
     capture_secret_from_stdin_or_prompt,
+    install_deployment_repository_files,
     reset_setup_state,
     resume_setup,
     run_deploy_setup,
@@ -34,6 +35,7 @@ from backet.bot_setup import (
     setup_doctor,
     setup_status,
 )
+from backet.bot_setup_output import emit_bot_setup_report
 from backet.cli_update import (
     SKIP_UPDATE_CHECK_ENV,
     already_current_result,
@@ -51,6 +53,7 @@ from backet.cli_update import (
 from backet.errors import AppError
 from backet.indexing import index_vault
 from backet.memory import build_memory_capsules
+from backet.models import CommandResult
 from backet.output import CLIState, emit_error, emit_success, emit_version, ensure_state
 from backet.retrieval import build_context_bundle
 from backet.rules import (
@@ -290,6 +293,14 @@ def bot_setup_command(
         bool,
         typer.Option("--allow-dirty", help="Dispatch even if local Git state appears dirty or unpushed."),
     ] = False,
+    repo_root: Annotated[
+        Path | None,
+        typer.Option("--repo-root", help="Repository root where setup deploy files should be installed."),
+    ] = None,
+    force_files: Annotated[
+        bool,
+        typer.Option("--force-files", help="Overwrite existing deploy files when running `backet bot setup files`."),
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", help="Confirm setup state reset.")] = False,
 ) -> None:
     state = ensure_state(ctx)
@@ -297,14 +308,20 @@ def bot_setup_command(
         phase, vault = _parse_bot_setup_args(ctx.args)
         resolved_vault = vault.resolve()
         if phase == "overview":
-            emit_success(state, run_setup_overview(resolved_vault))
+            _emit_bot_setup(state, run_setup_overview(resolved_vault), phase=phase)
         elif phase == "status":
-            emit_success(state, setup_status(resolved_vault))
+            _emit_bot_setup(state, setup_status(resolved_vault), phase=phase)
         elif phase == "resume":
-            emit_success(state, resume_setup(resolved_vault))
+            _emit_bot_setup(state, resume_setup(resolved_vault), phase=phase)
+        elif phase == "files":
+            _emit_bot_setup(
+                state,
+                install_deployment_repository_files(resolved_vault, repo_root=repo_root, force=force_files),
+                phase=phase,
+            )
         elif phase == "discord":
             token = capture_secret_from_stdin_or_prompt("Discord bot token", use_stdin=token_stdin, prompt=prompt_token)
-            emit_success(
+            _emit_bot_setup(
                 state,
                 run_discord_setup(
                     vault_root=resolved_vault,
@@ -314,9 +331,10 @@ def bot_setup_command(
                     storyteller_role_ids=storyteller_role_ids or [],
                     canon_channel_ids=canon_channel_ids or [],
                 ),
+                phase=phase,
             )
         elif phase == "visibility":
-            emit_success(state, run_visibility_setup(resolved_vault, allow_empty_player=allow_empty_player))
+            _emit_bot_setup(state, run_visibility_setup(resolved_vault, allow_empty_player=allow_empty_player), phase=phase)
         elif phase == "github":
             secret_values: dict[str, str] = {}
             if discord_token_stdin:
@@ -325,7 +343,7 @@ def bot_setup_command(
                 secret_values["ORACLE_VM_SSH_KEY"] = capture_secret_from_stdin_or_prompt("ORACLE_VM_SSH_KEY", use_stdin=True) or ""
             if model_token_stdin:
                 secret_values["MODEL_DOWNLOAD_TOKEN"] = capture_secret_from_stdin_or_prompt("MODEL_DOWNLOAD_TOKEN", use_stdin=True) or ""
-            emit_success(
+            _emit_bot_setup(
                 state,
                 run_github_setup(
                     vault_root=resolved_vault,
@@ -333,9 +351,10 @@ def bot_setup_command(
                     secret_values=secret_values,
                     allow_public=allow_public_repo,
                 ),
+                phase=phase,
             )
         elif phase == "oracle":
-            emit_success(
+            _emit_bot_setup(
                 state,
                 run_oracle_setup(
                     vault_root=resolved_vault,
@@ -345,9 +364,10 @@ def bot_setup_command(
                     ssh_key_path=ssh_key,
                     bootstrap=bootstrap,
                 ),
+                phase=phase,
             )
         elif phase == "deploy":
-            emit_success(
+            _emit_bot_setup(
                 state,
                 run_deploy_setup(
                     vault_root=resolved_vault,
@@ -356,11 +376,12 @@ def bot_setup_command(
                     watch=watch,
                     allow_dirty=allow_dirty,
                 ),
+                phase=phase,
             )
         elif phase == "doctor":
-            emit_success(state, setup_doctor(resolved_vault))
+            _emit_bot_setup(state, setup_doctor(resolved_vault), phase=phase)
         elif phase == "reset":
-            emit_success(state, reset_setup_state(resolved_vault, yes=yes))
+            _emit_bot_setup(state, reset_setup_state(resolved_vault, yes=yes), phase=phase)
         else:
             raise typer.BadParameter(f"Unknown setup phase: {phase}")
     except AppError as error:
@@ -368,7 +389,7 @@ def bot_setup_command(
 
 
 def _parse_bot_setup_args(args: list[str]) -> tuple[str, Path]:
-    phases = {"status", "resume", "discord", "visibility", "github", "oracle", "deploy", "doctor", "reset"}
+    phases = {"status", "resume", "files", "discord", "visibility", "github", "oracle", "deploy", "doctor", "reset"}
     raw_args = list(args)
     if not raw_args:
         return "overview", Path(".")
@@ -379,6 +400,13 @@ def _parse_bot_setup_args(args: list[str]) -> tuple[str, Path]:
     if len(raw_args) > 1:
         raise typer.BadParameter("Use `backet bot setup <vault>` or `backet bot setup <phase> <vault>`.")
     return "overview", Path(raw_args[0])
+
+
+def _emit_bot_setup(state: CLIState, result: CommandResult, *, phase: str) -> None:
+    if state.json_output:
+        emit_success(state, result)
+        return
+    emit_bot_setup_report(result, phase=phase)
 
 
 @bot_app.command("policy")

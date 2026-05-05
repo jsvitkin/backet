@@ -45,6 +45,20 @@ This file stores non-secret setup facts, such as app ID, server ID, role IDs, Gi
 
 Secrets are never stored there.
 
+If Backet says the deployment workflow or deploy assets are missing, install them from the CLI:
+
+```bash
+backet bot setup files /path/to/vault
+```
+
+Run this from the private vault repository. If your vault is not the repository root, point Backet at the repo:
+
+```bash
+backet bot setup files /path/to/vault --repo-root /path/to/private-repo
+```
+
+This creates `.github/workflows/deploy-backet-bot.yml` and `deploy/bot/*`. Review, commit, and push them before deploying.
+
 ## 2. Set Up Discord
 
 Run:
@@ -184,6 +198,8 @@ The repository needs:
 - note visibility metadata
 - `deploy/bot/*`
 - `.github/workflows/deploy-backet-bot.yml`
+
+The workflow installed by `backet bot setup files` installs the released Backet wheel with bot dependencies. Your private vault repository does not need to contain the Backet source tree.
 
 ## 6. Commit And Push
 

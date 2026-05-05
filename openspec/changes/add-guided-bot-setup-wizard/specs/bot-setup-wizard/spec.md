@@ -19,6 +19,12 @@ The system MUST provide a guided CLI setup flow that walks a user through every 
 - **WHEN** a phase cannot be completed fully by Backet because an external account, browser consent, or missing tool is required
 - **THEN** the system MUST report the exact next action, mark the phase pending, and avoid marking the whole setup complete
 
+#### Scenario: Install deployment files
+- **WHEN** a user runs `backet bot setup files <vault>` from the private vault repository or passes `--repo-root`
+- **THEN** the system MUST create the private deploy workflow and `deploy/bot/*` assets needed by GitHub Actions
+- **AND** the system MUST avoid overwriting changed files unless the user explicitly passes the overwrite option
+- **AND** the human output MUST summarize created, updated, unchanged, and skipped files without dumping raw structured setup state
+
 ### Requirement: Setup state MUST store only committed-safe non-secret facts
 The system MUST persist setup progress and non-secret deployment facts in a committed-safe per-vault setup state file while keeping runtime bot configuration separate.
 

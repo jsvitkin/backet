@@ -76,3 +76,9 @@
 - [x] 10.2 Verify setup diagnostics remain useful when run in a clean vault, an existing bot-config vault, and a partially configured vault.
 - [x] 10.3 Verify a dry-run or mocked end-to-end setup transcript can be included in docs without exposing real IDs or secrets.
 - [x] 10.4 Verify the manual GitHub Actions workflow remains usable for users who do not run the wizard deploy phase.
+
+## 11. Human Setup Regression Fixes
+
+- [x] 11.1 Replace generic `CommandResult` printing for `backet bot setup` with a guided human renderer while preserving deterministic `--json`.
+- [x] 11.2 Add `backet bot setup files` to install the private deploy workflow and `deploy/bot/*` from the CLI.
+- [x] 11.3 Update the private deploy workflow template so vault-only private repositories install the released Backet wheel instead of requiring the Backet source tree.

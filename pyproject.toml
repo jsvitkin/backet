@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backet"
-version = "0.1.12"
+version = "0.1.13"
 description = "CLI and skill-pack manager for Obsidian-based Vampire: The Masquerade campaign vaults."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -47,6 +47,13 @@ packages = ["src/backet"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "metadata/compatibility.json" = "backet/resources/compatibility.json"
+".github/workflows/deploy-backet-bot.yml" = "backet/resources/bot_deploy/.github/workflows/deploy-backet-bot.yml"
+"deploy/bot/Dockerfile" = "backet/resources/bot_deploy/deploy/bot/Dockerfile"
+"deploy/bot/activate-release.sh" = "backet/resources/bot_deploy/deploy/bot/activate-release.sh"
+"deploy/bot/bootstrap-llama-model.sh" = "backet/resources/bot_deploy/deploy/bot/bootstrap-llama-model.sh"
+"deploy/bot/docker-compose.yml" = "backet/resources/bot_deploy/deploy/bot/docker-compose.yml"
+"deploy/bot/env.example" = "backet/resources/bot_deploy/deploy/bot/env.example"
+"deploy/bot/smoke-test.sh" = "backet/resources/bot_deploy/deploy/bot/smoke-test.sh"
 
 [tool.pytest.ini_options]
 addopts = "-q"
