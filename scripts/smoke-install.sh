@@ -42,7 +42,9 @@ RULES_REPLACEMENT_TEXT="${TMP_ROOT}/corrected-page.txt"
 
 mkdir -p "$VAULT_DIR"
 
-"$BACKET_BIN" --json update check | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok" and "update_available" in payload["data"]'
+INSTALLED_VERSION="$("$BACKET_BIN" --version)"
+"$BACKET_BIN" --json update apply --yes --version "$INSTALLED_VERSION" \
+  | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); data=payload["data"]; assert payload["status"] == "ok" and data["updated"] is False and data["latest_version"] == data["installed_version"] and "update_available" in data'
 test ! -f "${BACKET_CONFIG_HOME}/update-check.json"
 test ! -f "${BACKET_CONFIG_HOME}/update-state.json"
 "$BACKET_BIN" --json init "$VAULT_DIR" | "$PYTHON_BIN" -c 'import json,sys; payload=json.load(sys.stdin); assert payload["status"] == "ok"'
