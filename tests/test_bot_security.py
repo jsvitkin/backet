@@ -144,7 +144,7 @@ def test_bot_cli_contracts_and_openspec_validation(runner, tmp_path: Path) -> No
         ],
     )
     validation = subprocess.run(
-        ["openspec", "validate", "add-discord-query-bot"],
+        ["openspec", "validate", "--specs"],
         cwd=Path(__file__).resolve().parents[1],
         text=True,
         capture_output=True,

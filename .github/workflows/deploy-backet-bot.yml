@@ -73,9 +73,12 @@ jobs:
           ENV
 
       - name: Upload deploy assets and bundle
+        env:
+          ORACLE_VM_HOST: ${{ vars.ORACLE_VM_HOST || secrets.ORACLE_VM_HOST }}
+          ORACLE_VM_USER: ${{ vars.ORACLE_VM_USER || secrets.ORACLE_VM_USER }}
         run: |
           set -euo pipefail
-          vm="${{ secrets.ORACLE_VM_USER }}@${{ secrets.ORACLE_VM_HOST }}"
+          vm="${ORACLE_VM_USER}@${ORACLE_VM_HOST}"
           ssh_opts="-i ~/.ssh/backet_bot_deploy -o StrictHostKeyChecking=accept-new"
           ssh ${ssh_opts} "${vm}" "mkdir -p /srv/backet-bot/deploy /srv/backet-bot/uploads /srv/backet-bot/models"
           scp ${ssh_opts} deploy/bot/docker-compose.yml deploy/bot/*.sh "${vm}:/srv/backet-bot/deploy/"
@@ -85,9 +88,11 @@ jobs:
       - name: Activate release on Oracle VM
         env:
           MODEL_DOWNLOAD_TOKEN: ${{ secrets.MODEL_DOWNLOAD_TOKEN }}
+          ORACLE_VM_HOST: ${{ vars.ORACLE_VM_HOST || secrets.ORACLE_VM_HOST }}
+          ORACLE_VM_USER: ${{ vars.ORACLE_VM_USER || secrets.ORACLE_VM_USER }}
         run: |
           set -euo pipefail
-          vm="${{ secrets.ORACLE_VM_USER }}@${{ secrets.ORACLE_VM_HOST }}"
+          vm="${ORACLE_VM_USER}@${ORACLE_VM_HOST}"
           ssh_opts="-i ~/.ssh/backet_bot_deploy -o StrictHostKeyChecking=accept-new"
           ssh ${ssh_opts} "${vm}" \
             "MODEL_DOWNLOAD_TOKEN='${MODEL_DOWNLOAD_TOKEN}' /srv/backet-bot/deploy/activate-release.sh '/srv/backet-bot/uploads/${{ steps.package.outputs.archive }}' '${{ steps.package.outputs.release_id }}'"

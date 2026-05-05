@@ -21,6 +21,19 @@ from backet.bot_access import (
 from backet.bot_export import doctor_bot_bundle, export_bot_bundle
 from backet.bot_discord import run_discord_bot_result
 from backet.bot_runtime import answer_bot_query_result, inspect_bot_bundle
+from backet.bot_setup import (
+    capture_secret_from_stdin_or_prompt,
+    reset_setup_state,
+    resume_setup,
+    run_deploy_setup,
+    run_discord_setup,
+    run_github_setup,
+    run_oracle_setup,
+    run_setup_overview,
+    run_visibility_setup,
+    setup_doctor,
+    setup_status,
+)
 from backet.cli_update import (
     SKIP_UPDATE_CHECK_ENV,
     already_current_result,
@@ -218,6 +231,154 @@ def doctor_command(
         emit_success(state, result)
     except AppError as error:
         _handle_error(ctx, error)
+
+
+@bot_app.command("setup", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def bot_setup_command(
+    ctx: typer.Context,
+    token_stdin: Annotated[bool, typer.Option("--token-stdin", help="Read the Discord bot token from stdin.")] = False,
+    prompt_token: Annotated[bool, typer.Option("--prompt-token", help="Prompt for the Discord bot token without echoing.")] = False,
+    guild_id: Annotated[str | None, typer.Option("--guild-id", help="Discord server/guild ID after bot install.")] = None,
+    player_role_ids: Annotated[
+        list[str] | None,
+        typer.Option("--player-role-id", help="Repeatable Discord player role ID."),
+    ] = None,
+    storyteller_role_ids: Annotated[
+        list[str] | None,
+        typer.Option("--storyteller-role-id", help="Repeatable Discord Storyteller role ID."),
+    ] = None,
+    canon_channel_ids: Annotated[
+        list[str] | None,
+        typer.Option("--canon-channel-id", help="Repeatable Discord channel ID for player-safe canon commands."),
+    ] = None,
+    allow_empty_player: Annotated[
+        bool,
+        typer.Option("--allow-empty-player", help="Allow deployment to continue with no player-visible canon notes."),
+    ] = False,
+    repo: Annotated[str | None, typer.Option("--repo", help="Private GitHub repository in OWNER/REPO form.")] = None,
+    allow_public_repo: Annotated[
+        bool,
+        typer.Option("--allow-public-repo", help="Continue even when the repository is public."),
+    ] = False,
+    discord_token_stdin: Annotated[
+        bool,
+        typer.Option("--discord-token-stdin", help="Read DISCORD_TOKEN from stdin and send it directly to GitHub secrets."),
+    ] = False,
+    oracle_ssh_key_stdin: Annotated[
+        bool,
+        typer.Option("--oracle-ssh-key-stdin", help="Read ORACLE_VM_SSH_KEY from stdin and send it directly to GitHub secrets."),
+    ] = False,
+    model_token_stdin: Annotated[
+        bool,
+        typer.Option("--model-token-stdin", help="Read MODEL_DOWNLOAD_TOKEN from stdin and send it directly to GitHub secrets."),
+    ] = False,
+    host: Annotated[str | None, typer.Option("--host", help="Oracle VM public host or IP.")] = None,
+    user: Annotated[str | None, typer.Option("--user", help="Oracle VM SSH username.")] = None,
+    deploy_path: Annotated[str, typer.Option("--deploy-path", help="Remote deploy root.")] = "/srv/backet-bot",
+    ssh_key: Annotated[
+        Path | None,
+        typer.Option("--ssh-key", help="Local SSH key path for validation only; key contents are not stored."),
+    ] = None,
+    bootstrap: Annotated[
+        bool,
+        typer.Option("--bootstrap", help="Create/check the remote deploy layout after SSH validation."),
+    ] = False,
+    vault_path: Annotated[str, typer.Option("--vault-path", help="Vault path inside the GitHub repository.")] = ".",
+    release_id: Annotated[str | None, typer.Option("--release-id", help="Optional release ID for the workflow.")] = None,
+    watch: Annotated[bool, typer.Option("--watch", help="Watch the GitHub Actions run after dispatch.")] = False,
+    allow_dirty: Annotated[
+        bool,
+        typer.Option("--allow-dirty", help="Dispatch even if local Git state appears dirty or unpushed."),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Confirm setup state reset.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        phase, vault = _parse_bot_setup_args(ctx.args)
+        resolved_vault = vault.resolve()
+        if phase == "overview":
+            emit_success(state, run_setup_overview(resolved_vault))
+        elif phase == "status":
+            emit_success(state, setup_status(resolved_vault))
+        elif phase == "resume":
+            emit_success(state, resume_setup(resolved_vault))
+        elif phase == "discord":
+            token = capture_secret_from_stdin_or_prompt("Discord bot token", use_stdin=token_stdin, prompt=prompt_token)
+            emit_success(
+                state,
+                run_discord_setup(
+                    vault_root=resolved_vault,
+                    token=token,
+                    guild_id=guild_id,
+                    player_role_ids=player_role_ids or [],
+                    storyteller_role_ids=storyteller_role_ids or [],
+                    canon_channel_ids=canon_channel_ids or [],
+                ),
+            )
+        elif phase == "visibility":
+            emit_success(state, run_visibility_setup(resolved_vault, allow_empty_player=allow_empty_player))
+        elif phase == "github":
+            secret_values: dict[str, str] = {}
+            if discord_token_stdin:
+                secret_values["DISCORD_TOKEN"] = capture_secret_from_stdin_or_prompt("DISCORD_TOKEN", use_stdin=True) or ""
+            if oracle_ssh_key_stdin:
+                secret_values["ORACLE_VM_SSH_KEY"] = capture_secret_from_stdin_or_prompt("ORACLE_VM_SSH_KEY", use_stdin=True) or ""
+            if model_token_stdin:
+                secret_values["MODEL_DOWNLOAD_TOKEN"] = capture_secret_from_stdin_or_prompt("MODEL_DOWNLOAD_TOKEN", use_stdin=True) or ""
+            emit_success(
+                state,
+                run_github_setup(
+                    vault_root=resolved_vault,
+                    repo=repo,
+                    secret_values=secret_values,
+                    allow_public=allow_public_repo,
+                ),
+            )
+        elif phase == "oracle":
+            emit_success(
+                state,
+                run_oracle_setup(
+                    vault_root=resolved_vault,
+                    host=host,
+                    user=user,
+                    deploy_path=deploy_path,
+                    ssh_key_path=ssh_key,
+                    bootstrap=bootstrap,
+                ),
+            )
+        elif phase == "deploy":
+            emit_success(
+                state,
+                run_deploy_setup(
+                    vault_root=resolved_vault,
+                    vault_path=vault_path,
+                    release_id=release_id,
+                    watch=watch,
+                    allow_dirty=allow_dirty,
+                ),
+            )
+        elif phase == "doctor":
+            emit_success(state, setup_doctor(resolved_vault))
+        elif phase == "reset":
+            emit_success(state, reset_setup_state(resolved_vault, yes=yes))
+        else:
+            raise typer.BadParameter(f"Unknown setup phase: {phase}")
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+def _parse_bot_setup_args(args: list[str]) -> tuple[str, Path]:
+    phases = {"status", "resume", "discord", "visibility", "github", "oracle", "deploy", "doctor", "reset"}
+    raw_args = list(args)
+    if not raw_args:
+        return "overview", Path(".")
+    if raw_args[0] in phases:
+        if len(raw_args) > 2:
+            raise typer.BadParameter("Use `backet bot setup <phase> <vault>` with at most one vault path.")
+        return raw_args[0], Path(raw_args[1]) if len(raw_args) == 2 else Path(".")
+    if len(raw_args) > 1:
+        raise typer.BadParameter("Use `backet bot setup <vault>` or `backet bot setup <phase> <vault>`.")
+    return "overview", Path(raw_args[0])
 
 
 @bot_app.command("policy")

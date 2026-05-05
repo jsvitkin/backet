@@ -75,6 +75,10 @@ def bot_config_path(vault_root: Path) -> Path:
     return state_dir(vault_root) / "bot-config.yaml"
 
 
+def bot_setup_path(vault_root: Path) -> Path:
+    return state_dir(vault_root) / "bot-setup.yaml"
+
+
 def memory_dir(vault_root: Path) -> Path:
     return backet_root(vault_root) / "memory"
 

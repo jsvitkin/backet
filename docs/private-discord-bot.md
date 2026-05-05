@@ -1,12 +1,223 @@
 # Private Discord Bot
 
-For a shorter setup checklist that can be pasted into GitHub Wiki, see [Hosting Backet Bot](wiki/Hosting-Backet-Bot.md).
+Backet can run a private Discord bot for one Storyteller-controlled server. The bot is not published, the source PDFs are not copied, and the hosted VM reads only an exported runtime bundle.
 
-Backet can export a private, read-only Discord bot bundle for one Storyteller-controlled guild. The hosted bot reads only the exported bundle and does not need the full Obsidian vault, source PDFs, OCR scratch state, or write access to canon.
+The preferred setup path is the guided CLI:
 
-## Data Shape
+```bash
+backet bot setup /path/to/vault
+```
 
-The export command writes a bundle such as:
+That command creates committed-safe setup state, shows the current phase, and tells you the next action. You can stop and resume at any point.
+
+## Guided Flow
+
+Use these phases in order:
+
+```bash
+backet bot setup /path/to/vault
+backet bot setup discord /path/to/vault
+backet bot setup visibility /path/to/vault
+backet bot setup oracle /path/to/vault --host ORACLE_VM_HOST --user ubuntu
+backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO
+backet bot setup deploy /path/to/vault --vault-path .
+```
+
+Useful status commands:
+
+```bash
+backet bot setup status /path/to/vault
+backet bot setup resume /path/to/vault
+backet bot setup doctor /path/to/vault
+```
+
+The setup wizard writes non-secret facts to:
+
+```text
+.backet/state/bot-setup.yaml
+```
+
+The bot runtime still reads:
+
+```text
+.backet/state/bot-config.yaml
+```
+
+Secrets are never written to either file.
+
+## Discord Phase
+
+The wizard cannot safely create the Discord application for you, because that would require automating your Discord user account. It guides the browser-only parts and validates the result from the terminal.
+
+Run:
+
+```bash
+backet bot setup discord /path/to/vault
+```
+
+It will point you to the Discord Developer Portal and tell you to:
+
+- create an application
+- add a bot user
+- keep Message Content Intent disabled
+- use Guild Install
+- use the `applications.commands` and `bot` scopes
+- install the bot only into your private server
+
+After you copy the bot token from the Developer Portal, pass it through stdin so it does not land in shell history:
+
+```bash
+backet bot setup discord /path/to/vault --token-stdin
+```
+
+Then paste the token and press Enter. Backet validates it, generates the install URL, discovers the bot's guilds, channels, and roles, and lets you persist the IDs.
+
+If you already know the server and role IDs:
+
+```bash
+backet bot setup discord /path/to/vault \
+  --token-stdin \
+  --guild-id 123456789012345678 \
+  --player-role-id 234567890123456789 \
+  --storyteller-role-id 345678901234567890 \
+  --canon-channel-id 456789012345678901
+```
+
+Backet refuses Discord user tokens, passwords, cookies, and OAuth bearer tokens. It only uses bot-token plus browser-consent flows.
+
+## Visibility Phase
+
+Players see only notes explicitly marked player-visible:
+
+```yaml
+---
+backet:
+  visibility: player
+  bot_topics:
+    - canon
+---
+```
+
+Run:
+
+```bash
+backet bot setup visibility /path/to/vault
+```
+
+The wizard summarizes player-visible, Storyteller-only, bot-excluded, unmarked, missing-topic, and rules corpus state. If there are no player-visible notes, deployment is blocked until you either mark notes or confirm that an empty player canon index is intentional:
+
+```bash
+backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --dry-run
+backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --yes
+backet bot setup visibility /path/to/vault
+```
+
+Unmarked notes default to Storyteller-only for player safety.
+
+## GitHub Phase
+
+Backet deploys through the private GitHub Actions workflow. The wizard uses `gh` when available:
+
+```bash
+gh auth login
+gh auth refresh -h github.com -s repo -s workflow
+backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO
+```
+
+Secret values are sent to GitHub Actions secrets, not written to disk. Configure them one at a time through stdin:
+
+```bash
+backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO --discord-token-stdin
+backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO --oracle-ssh-key-stdin
+```
+
+GitHub secrets:
+
+- `DISCORD_TOKEN`
+- `ORACLE_VM_SSH_KEY`
+- `MODEL_DOWNLOAD_TOKEN` only when your model download URL requires it
+
+GitHub variables:
+
+- `DISCORD_GUILD_ID`
+- `ORACLE_VM_HOST`
+- `ORACLE_VM_USER`
+- `BOT_COMPOSE_PROFILES`
+- `LLAMA_MODEL_RELATIVE_PATH`
+- `LLAMA_MODEL_SHA256`
+- `LLAMA_MODEL_URL`
+
+The workflow also accepts Oracle host/user as secrets if you choose to hide those values, but variables are the default.
+
+Your private repository must contain:
+
+- vault Markdown needed for bot indexes
+- `.backet/config.yaml`
+- `.backet/state/bot-setup.yaml`
+- `.backet/state/bot-config.yaml`
+- `.backet/rules/rules.sqlite3` when rules answers are enabled
+- explicit note visibility metadata
+- `deploy/bot/*`
+- `.github/workflows/deploy-backet-bot.yml`
+
+## Oracle Phase
+
+V1 assumes you already have an SSH-reachable Oracle Always Free VM. Backet does not create Oracle cloud resources yet.
+
+Run:
+
+```bash
+backet bot setup oracle /path/to/vault --host ORACLE_VM_HOST --user ubuntu
+```
+
+To validate with a local key file:
+
+```bash
+backet bot setup oracle /path/to/vault --host ORACLE_VM_HOST --user ubuntu --ssh-key ~/.ssh/backet_bot_deploy
+```
+
+To ask Backet to create/check the remote deploy layout:
+
+```bash
+backet bot setup oracle /path/to/vault --host ORACLE_VM_HOST --user ubuntu --bootstrap
+```
+
+Expected VM layout:
+
+```text
+/srv/backet-bot/
+  deploy/
+  uploads/
+  releases/
+  data/
+  models/
+```
+
+The SSH private key value belongs in the GitHub secret `ORACLE_VM_SSH_KEY`, not in `.backet`.
+
+## Deploy Phase
+
+After setup files are committed and pushed:
+
+```bash
+backet bot setup deploy /path/to/vault --vault-path . --watch
+```
+
+The wizard dispatches `.github/workflows/deploy-backet-bot.yml`. GitHub Actions exports the private bundle, uploads it to the VM, activates the release, restarts the containers, and runs the smoke check.
+
+If local setup files are dirty or unpushed, deployment is blocked because GitHub Actions cannot see them yet.
+
+## Local Bundle Reference
+
+You can still export and test manually:
+
+```bash
+backet bot export /path/to/vault --output dist/bot-data --force
+backet bot doctor dist/bot-data
+backet bot ask dist/bot-data "What does the court know about Elysium?" --command canon.ask --role-id player-role
+```
+
+The bundle shape is:
 
 ```text
 bot-data/
@@ -19,163 +230,52 @@ bot-data/
     rules.sqlite3
 ```
 
-Player queries use the player index. Storyteller commands use the Storyteller index after role or user authorization. The shared `rules.sqlite3` is copied when present; source PDFs are not copied.
+The bundle does not include source PDFs, model files, tokens, SSH keys, or the full Obsidian vault.
 
-## Visibility Metadata
+## Optional Local Llama
 
-Notes are visible to players only when explicitly marked:
+Template answers are the default and work without a model. For local Llama, configure the runtime model and let the VM cache the GGUF file under `/srv/backet-bot/models`.
 
-```yaml
----
-backet:
-  visibility: player
-  bot_topics:
-    - canon
----
-```
+Recommended first model: Llama 3.2 3B Instruct GGUF Q4. Keep fallback to template enabled, because Always Free CPU-only resources can be slow.
 
-Storyteller-only notes use:
-
-```yaml
----
-backet:
-  visibility: storyteller
-  bot_topics:
-    - npc
-    - plotline
----
-```
-
-Bot-excluded notes use `visibility: excluded`. Unmarked notes default to Storyteller-only for player safety.
-
-Useful commands:
-
-```bash
-backet bot visibility audit /path/to/vault
-backet bot visibility list /path/to/vault --visibility player
-backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --dry-run
-backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --yes
-backet bot visibility clear /path/to/vault "Drafts/Maybe.md"
-```
-
-## Local Export And Dry Run
-
-```bash
-backet bot export /path/to/vault --output dist/bot-data --force
-backet bot doctor dist/bot-data
-backet bot ask dist/bot-data "What are Elysium customs?" --command canon.ask --role-id player-role
-```
-
-`backet bot ask` never connects to Discord. It exercises the same bundle runtime and permission path used by the hosted bot.
-
-## Discord Setup
-
-In the Discord Developer Portal:
-
-1. Create an application and bot.
-2. Invite it only to your private server with the `bot` and `applications.commands` scopes.
-3. Keep Message Content Intent disabled; Backet uses slash command options.
-4. Record the guild ID and the relevant role IDs.
-5. Store the bot token as a secret, never in the repository.
-
-Guild commands are registered for `/rules`, `/canon`, `/st`, and `/bot`. Storyteller commands default to private interaction responses. Player commands default to private unless the command policy explicitly allows public replies.
-
-Commit-safe bot config lives at `.backet/state/bot-config.yaml`:
-
-```yaml
-schema_version: 1
-guild_id: "123456789012345678"
-roles:
-  player:
-    - "234567890123456789"
-  storyteller:
-    - "345678901234567890"
-commands:
-  canon:
-    min_tier: player
-    topics: [canon]
-    channel_ids: ["456789012345678901"]
-    public_allowed: false
-answer_mode: template
-```
-
-## Local Llama
-
-Template answers are the default. To use a VM-local llama.cpp-compatible service:
-
-```yaml
-answer_mode: llama-local
-model:
-  endpoint: http://llama:8080/completion
-  timeout_seconds: 20
-  token_budget: 900
-  fallback: template
-  path: llama-3.2-3b-instruct-q4/model.gguf
-  sha256: "<sha256>"
-```
-
-Recommended first model: Llama 3.2 3B Instruct GGUF Q4. A Llama 3.1 8B Instruct Q4 model may work if the VM has enough memory and you can tolerate slower answers. Model files are VM-local cache assets and are not committed or bundled.
-
-The deployment assumes a small CPU-only Always Free style VM. Expect template answers to be immediate, 3B Q4 local Llama answers to be usable but not snappy, and 8B Q4 answers to be noticeably slower or memory-sensitive. Keep `fallback: template` enabled so the bot remains useful when inference is slow.
-
-## Oracle VM Layout
-
-The deploy assets assume:
-
-```text
-/srv/backet-bot/
-  deploy/
-    docker-compose.yml
-    .env
-    activate-release.sh
-    bootstrap-llama-model.sh
-  uploads/
-  releases/
-    run-123/
-  data/
-    current -> /srv/backet-bot/releases/run-123
-  models/
-    llama-3.2-3b-instruct-q4/model.gguf
-```
-
-Activation unpacks a release, validates it, updates `data/current`, bootstraps the model cache if configured, restarts Compose, and runs an inspect smoke check. Rollback is changing `data/current` back to an older release directory and restarting Compose.
-
-## Manual GitHub Actions Deploy
-
-The workflow at `.github/workflows/deploy-backet-bot.yml` is manual-only. It exports the bundle from a private repository, uploads the private artifact to the VM, writes the VM `.env` from GitHub secrets and variables, activates the release, bootstraps VM-local models when configured, and restarts the containers.
-
-Required private repository contents:
-
-- Vault Markdown needed for bot indexes
-- `.backet/config.yaml`
-- `.backet/state/bot-config.yaml`
-- `.backet/rules/rules.sqlite3` when rules are enabled
-- Explicit note visibility frontmatter
-- `deploy/bot/*`
-- `.github/workflows/deploy-backet-bot.yml`
-
-Required GitHub secrets:
-
-- `ORACLE_VM_HOST`
-- `ORACLE_VM_USER`
-- `ORACLE_VM_SSH_KEY`
-- `DISCORD_TOKEN`
-- `MODEL_DOWNLOAD_TOKEN` when the model URL requires one
-
-Useful GitHub variables:
-
-- `DISCORD_GUILD_ID`
-- `BOT_COMPOSE_PROFILES`, set to `llama` when using local Llama
-- `LLAMA_MODEL_RELATIVE_PATH`
-- `LLAMA_MODEL_SHA256`
-- `LLAMA_MODEL_URL`
-
-Never publish the bot bundle to a public release, package registry, or public container image. The code image may be public, but vault notes, extracted rules chunks, bot bundles, `.env`, tokens, keys, source PDFs, and GGUF model files stay private.
+Model files are VM-local cache assets. They are not committed and not bundled.
 
 ## Troubleshooting
 
-- Missing player-visible notes: run `backet bot visibility audit` and mark approved notes explicitly.
-- Incompatible bundle: run `backet bot doctor <bundle>` and redeploy after export.
-- Missing semantic backend: the runtime falls back or fails according to answer/retrieval mode; install the matching retrieval dependency or use exact/template behavior.
-- Discord token errors: rotate the token in the Developer Portal and update the GitHub or VM secret.
-- Slow Llama answers: use template mode, a smaller GGUF, a shorter token budget, or a longer timeout.
+### Missing player-visible notes
+
+Run:
+
+```bash
+backet bot setup visibility /path/to/vault
+```
+
+Then mark approved notes with `backet bot visibility set`. Unmarked notes stay Storyteller-only.
+
+### Incompatible bundle
+
+Run:
+
+```bash
+backet bot doctor dist/bot-data
+```
+
+Fix the reported manifest, policy, index, or rules database issue, then export and deploy again.
+
+### GitHub setup pending
+
+Run:
+
+```bash
+gh auth status
+gh auth refresh -h github.com -s repo -s workflow
+backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO
+```
+
+### Oracle setup pending
+
+Run:
+
+```bash
+backet bot setup oracle /path/to/vault --host ORACLE_VM_HOST --user ubuntu --bootstrap
+```
