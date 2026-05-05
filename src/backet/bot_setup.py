@@ -887,6 +887,33 @@ def run_deploy_setup(
     return _phase_command_result(vault_root, state, result)
 
 
+def configure_answer_setup(
+    vault_root: Path,
+    *,
+    mode: str,
+    model: dict[str, Any] | None = None,
+) -> CommandResult:
+    state = load_or_initialize_setup_state(vault_root, save=True)
+    normalized_mode = str(mode).strip() or "template"
+    if normalized_mode not in {"template", "llama-local"}:
+        raise AppError(
+            code="bot_setup_answer_mode_invalid",
+            message="Unsupported bot answer mode.",
+            hint="Use template or llama-local.",
+            details={"mode": mode},
+            exit_code=2,
+        )
+    answers: dict[str, Any] = {"mode": normalized_mode}
+    if normalized_mode == "llama-local":
+        answers["model"] = {str(key): str(value) for key, value in (model or {}).items() if value not in (None, "")}
+    state["answers"] = answers
+    _sync_runtime_config_from_setup(vault_root, state)
+    save_bot_setup_state(vault_root, state)
+    data = _setup_status_payload(vault_root, state)
+    data["answer_setup"] = answers
+    return CommandResult(message="Bot answer mode configured", data=data)
+
+
 def setup_doctor(vault_root: Path) -> CommandResult:
     state = load_or_initialize_setup_state(vault_root, save=True)
     issues: list[Issue] = []

@@ -7,6 +7,11 @@ The system MUST provide a guided CLI setup flow that walks a user through every 
 - **WHEN** a user runs `backet bot setup <vault>` for an initialized vault
 - **THEN** the system MUST show the setup phases, current completion state, required local prerequisites, and the next recommended action
 
+#### Scenario: Interactive setup performs guided actions
+- **WHEN** a user runs `backet bot setup <vault>` in an interactive terminal
+- **THEN** the system MUST prompt through the next incomplete phase and perform supported CLI actions such as installing deployment files, collecting non-secret facts, handing secrets to GitHub, validating Discord/SSH, and dispatching deployment when the user confirms
+- **AND** the system MUST allow the user to stop after a phase and resume later from saved setup state
+
 #### Scenario: Resume setup
 - **WHEN** a user reruns setup after completing one or more phases
 - **THEN** the system MUST resume from saved setup state instead of asking again for already validated non-secret facts

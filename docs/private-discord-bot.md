@@ -8,11 +8,17 @@ The preferred setup path is the guided CLI:
 backet bot setup /path/to/vault
 ```
 
-That command creates committed-safe setup state, shows the current phase, and tells you the next action. You can stop and resume at any point.
+In an interactive terminal, that command is a real wizard. It prompts through local deploy files, Discord bot validation and server/role/channel selection, visibility review, answer mode, GitHub secrets/variables, Oracle SSH validation, and deployment. You can stop and resume at any point.
+
+For a non-interactive, paste-safe status view:
+
+```bash
+backet bot setup --no-guided /path/to/vault
+```
 
 ## Guided Flow
 
-Use these phases in order:
+The main wizard runs these phases in order. The same focused commands remain available for automation or retrying one phase:
 
 ```bash
 backet bot setup /path/to/vault
@@ -46,7 +52,7 @@ The bot runtime still reads:
 
 Secrets are never written to either file.
 
-If setup reports that the deployment workflow or deploy assets are missing, install them from the CLI:
+If setup reports that the deployment workflow or deploy assets are missing, the interactive wizard asks to install them. You can also run the focused command:
 
 ```bash
 backet bot setup files /path/to/vault
@@ -64,7 +70,7 @@ This writes `.github/workflows/deploy-backet-bot.yml` and `deploy/bot/*`. Existi
 
 The wizard cannot safely create the Discord application for you, because that would require automating your Discord user account. It guides the browser-only parts and validates the result from the terminal.
 
-Run:
+The main wizard guides this phase. The focused command is:
 
 ```bash
 backet bot setup discord /path/to/vault
@@ -79,13 +85,13 @@ It will point you to the Discord Developer Portal and tell you to:
 - use the `applications.commands` and `bot` scopes
 - install the bot only into your private server
 
-After you copy the bot token from the Developer Portal, pass it through stdin so it does not land in shell history:
+In the interactive wizard, paste the bot token into the hidden prompt. For the focused command, pass it through stdin so it does not land in shell history:
 
 ```bash
 backet bot setup discord /path/to/vault --token-stdin
 ```
 
-Then paste the token and press Enter. Backet validates it, generates the install URL, discovers the bot's guilds, channels, and roles, and lets you persist the IDs.
+Then paste the token and press Enter. Backet validates it, generates the install URL, discovers the bot's guilds, channels, and roles, and lets you choose the mappings by number in the terminal.
 
 If you already know the server and role IDs:
 
@@ -113,7 +119,7 @@ backet:
 ---
 ```
 
-Run:
+The wizard runs this review before deployment. The focused command is:
 
 ```bash
 backet bot setup visibility /path/to/vault
@@ -131,7 +137,7 @@ Unmarked notes default to Storyteller-only for player safety.
 
 ## GitHub Phase
 
-Backet deploys through the private GitHub Actions workflow. The wizard uses `gh` when available:
+Backet deploys through the private GitHub Actions workflow. The wizard uses `gh` to configure secrets and variables when available:
 
 ```bash
 gh auth login
@@ -139,7 +145,7 @@ gh auth refresh -h github.com -s repo -s workflow
 backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO
 ```
 
-Secret values are sent to GitHub Actions secrets, not written to disk. Configure them one at a time through stdin:
+Secret values are sent to GitHub Actions secrets, not written to disk. The wizard prompts for the Discord token and SSH key path. Focused commands can configure them one at a time through stdin:
 
 ```bash
 backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO --discord-token-stdin
@@ -181,7 +187,7 @@ The installed workflow uses the public Backet release wheel plus bot dependencie
 
 V1 assumes you already have an SSH-reachable Oracle Always Free VM. Backet does not create Oracle cloud resources yet.
 
-Run:
+The wizard asks for the Oracle host, SSH user, deploy path, and local key path for validation. The focused command is:
 
 ```bash
 backet bot setup oracle /path/to/vault --host ORACLE_VM_HOST --user ubuntu
@@ -214,7 +220,7 @@ The SSH private key value belongs in the GitHub secret `ORACLE_VM_SSH_KEY`, not 
 
 ## Deploy Phase
 
-After setup files are committed and pushed:
+After setup files are committed and pushed, the wizard offers to deploy. The focused command is:
 
 ```bash
 backet bot setup deploy /path/to/vault --vault-path . --watch

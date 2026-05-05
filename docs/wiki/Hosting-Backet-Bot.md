@@ -8,7 +8,13 @@ The main command is:
 backet bot setup /path/to/vault
 ```
 
-It tells you what is done, what is missing, and which exact phase to run next.
+In an interactive terminal this is a guided wizard. It prompts you phase by phase, installs local deploy files when you confirm, asks for secrets through hidden input or file paths, uses `gh` for GitHub setup, validates Discord through the bot API, SSH-checks the Oracle VM, and offers to dispatch the deploy workflow.
+
+For paste-safe status without prompts:
+
+```bash
+backet bot setup --no-guided /path/to/vault
+```
 
 ## Before You Start
 
@@ -35,6 +41,8 @@ backet bot setup doctor /path/to/vault
 backet bot setup /path/to/vault
 ```
 
+You can stop whenever the wizard asks to continue. Run the same command again later and it resumes from `.backet/state/bot-setup.yaml`.
+
 Backet creates:
 
 ```text
@@ -45,7 +53,7 @@ This file stores non-secret setup facts, such as app ID, server ID, role IDs, Gi
 
 Secrets are never stored there.
 
-If Backet says the deployment workflow or deploy assets are missing, install them from the CLI:
+If Backet says the deployment workflow or deploy assets are missing, the wizard asks whether to install them. The focused command is also available:
 
 ```bash
 backet bot setup files /path/to/vault
@@ -61,13 +69,13 @@ This creates `.github/workflows/deploy-backet-bot.yml` and `deploy/bot/*`. Revie
 
 ## 2. Set Up Discord
 
-Run:
+The main wizard guides this phase. The focused command is:
 
 ```bash
 backet bot setup discord /path/to/vault
 ```
 
-Backet will tell you to open the Discord Developer Portal and:
+Backet tells you to open the Discord Developer Portal and:
 
 - create an application
 - add a bot
@@ -76,7 +84,7 @@ Backet will tell you to open the Discord Developer Portal and:
 - use the `applications.commands` and `bot` scopes
 - install the bot only into your private server
 
-When Discord shows the bot token, pass it through stdin:
+In the interactive wizard, paste the bot token into the hidden prompt. For the focused command, pass it through stdin:
 
 ```bash
 backet bot setup discord /path/to/vault --token-stdin
@@ -84,7 +92,7 @@ backet bot setup discord /path/to/vault --token-stdin
 
 Paste the token and press Enter.
 
-After the bot is installed in your server, run Discord setup again with the IDs you want to lock in:
+After the bot is installed in your server, the wizard lists visible servers, roles, and channels so you can choose by number. If you already know the IDs, the focused command accepts them:
 
 ```bash
 backet bot setup discord /path/to/vault \
@@ -99,7 +107,7 @@ Backet validates the bot token and discovers guilds, roles, and channels through
 
 ## 3. Review Player Visibility
 
-Run:
+The wizard runs this review before deployment. The focused command is:
 
 ```bash
 backet bot setup visibility /path/to/vault
@@ -122,7 +130,7 @@ Unmarked notes are Storyteller-only. That is intentional.
 
 ## 4. Check The Oracle VM
 
-Run:
+The wizard asks for the Oracle host, SSH user, deploy path, and local key path for validation. The focused command is:
 
 ```bash
 backet bot setup oracle /path/to/vault --host ORACLE_VM_HOST --user ubuntu
@@ -156,13 +164,13 @@ gh auth login
 gh auth refresh -h github.com -s repo -s workflow
 ```
 
-Tell Backet which private repository deploys the bot:
+The wizard asks for the private repository, sends required secrets to `gh secret set`, and writes non-secret deploy facts to GitHub variables. The focused command is:
 
 ```bash
 backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO
 ```
 
-Set secrets through the wizard:
+Set secrets through focused commands:
 
 ```bash
 backet bot setup github /path/to/vault --repo OWNER/PRIVATE_REPO --discord-token-stdin
@@ -215,7 +223,7 @@ GitHub Actions can only deploy what exists in the repository.
 
 ## 7. Deploy
 
-Run:
+The wizard offers to deploy after all previous phases pass. The focused command is:
 
 ```bash
 backet bot setup deploy /path/to/vault --vault-path . --watch

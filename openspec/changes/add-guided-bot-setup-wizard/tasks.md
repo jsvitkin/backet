@@ -82,3 +82,13 @@
 - [x] 11.1 Replace generic `CommandResult` printing for `backet bot setup` with a guided human renderer while preserving deterministic `--json`.
 - [x] 11.2 Add `backet bot setup files` to install the private deploy workflow and `deploy/bot/*` from the CLI.
 - [x] 11.3 Update the private deploy workflow template so vault-only private repositories install the released Backet wheel instead of requiring the Backet source tree.
+
+## 12. Interactive Wizard Regression Fixes
+
+- [x] 12.1 Add a real interactive `backet bot setup` wizard path instead of only a prettier status/next-action report.
+- [x] 12.2 Guide and execute the local deployment-files phase from the main wizard with confirmation.
+- [x] 12.3 Guide Discord bot-token validation, install URL handoff, guild selection, role selection, and channel selection from the main wizard.
+- [x] 12.4 Guide answer-mode selection, including optional Llama model metadata and private model token handoff.
+- [x] 12.5 Guide GitHub repository, secret, variable, Oracle fact, SSH validation/bootstrap, and deploy dispatch phases from the main wizard.
+- [x] 12.6 Preserve non-interactive human status with `--no-guided` and deterministic machine output with `--json`.
+- [x] 12.7 Add CLI regression coverage proving the main wizard installs missing deploy files interactively without raw structured dumps.

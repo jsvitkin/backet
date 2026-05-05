@@ -36,6 +36,7 @@ from backet.bot_setup import (
     setup_status,
 )
 from backet.bot_setup_output import emit_bot_setup_report
+from backet.bot_setup_wizard import GuidedBotSetupOptions, run_guided_bot_setup
 from backet.cli_update import (
     SKIP_UPDATE_CHECK_ENV,
     already_current_result,
@@ -301,6 +302,14 @@ def bot_setup_command(
         bool,
         typer.Option("--force-files", help="Overwrite existing deploy files when running `backet bot setup files`."),
     ] = False,
+    guided: Annotated[
+        bool,
+        typer.Option("--guided", help="Force the interactive guided setup wizard."),
+    ] = False,
+    no_guided: Annotated[
+        bool,
+        typer.Option("--no-guided", help="Show setup status/next action without interactive prompts."),
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", help="Confirm setup state reset.")] = False,
 ) -> None:
     state = ensure_state(ctx)
@@ -308,7 +317,23 @@ def bot_setup_command(
         phase, vault = _parse_bot_setup_args(ctx.args)
         resolved_vault = vault.resolve()
         if phase == "overview":
-            _emit_bot_setup(state, run_setup_overview(resolved_vault), phase=phase)
+            if _should_start_bot_setup_wizard(state, guided=guided, no_guided=no_guided):
+                run_guided_bot_setup(
+                    resolved_vault,
+                    GuidedBotSetupOptions(
+                        repo_root=repo_root,
+                        force_files=force_files,
+                        allow_public_repo=allow_public_repo,
+                        allow_empty_player=allow_empty_player,
+                        deploy_path=deploy_path,
+                        vault_path=vault_path,
+                        release_id=release_id,
+                        watch=True,
+                        allow_dirty=allow_dirty,
+                    ),
+                )
+            else:
+                _emit_bot_setup(state, run_setup_overview(resolved_vault), phase=phase)
         elif phase == "status":
             _emit_bot_setup(state, setup_status(resolved_vault), phase=phase)
         elif phase == "resume":
@@ -407,6 +432,14 @@ def _emit_bot_setup(state: CLIState, result: CommandResult, *, phase: str) -> No
         emit_success(state, result)
         return
     emit_bot_setup_report(result, phase=phase)
+
+
+def _should_start_bot_setup_wizard(state: CLIState, *, guided: bool, no_guided: bool) -> bool:
+    if state.json_output or no_guided:
+        return False
+    if guided:
+        return True
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 @bot_app.command("policy")

@@ -261,11 +261,31 @@ def test_setup_files_installs_private_deploy_workflow_and_assets(runner, tmp_pat
     assert (repo_root / "deploy/bot/docker-compose.yml").exists()
     assert (repo_root / "deploy/bot/activate-release.sh").exists()
     workflow = (repo_root / ".github/workflows/deploy-backet-bot.yml").read_text(encoding="utf-8")
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.13/backet-0.1.13-py3-none-any.whl" in workflow
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.14/backet-0.1.14-py3-none-any.whl" in workflow
     state = load_or_initialize_setup_state(vault)
     assert state["setup"]["phases"]["prerequisites"]["status"] == "done"
     assert "Deployment Files" in result.output
     assert "phases:" not in result.output
+
+
+def test_cli_setup_guided_installs_missing_deploy_files_before_stopping(runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    repo_root = tmp_path / "private-repo"
+
+    result = runner.invoke(
+        app,
+        ["bot", "setup", "--guided", "--repo-root", str(repo_root), str(vault)],
+        input="y\nn\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Backet bot setup wizard" in result.output
+    assert "Install or refresh those deployment files now?" in result.output
+    assert "Continue to the next setup phase?" in result.output
+    assert (repo_root / ".github/workflows/deploy-backet-bot.yml").exists()
+    assert (repo_root / "deploy/bot/docker-compose.yml").exists()
+    assert "phases:" not in result.output
+    assert "{'prerequisites'" not in result.output
 
 
 def test_setup_files_refuses_to_overwrite_changed_files_without_force(tmp_path: Path) -> None:
