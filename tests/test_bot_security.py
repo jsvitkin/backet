@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
 from contextlib import closing
 from pathlib import Path
@@ -143,6 +144,13 @@ def test_bot_cli_contracts_and_openspec_validation(runner, tmp_path: Path) -> No
             "player-role",
         ],
     )
+    assert human.exit_code == 0
+    assert "Exported private bot bundle" in human.stdout
+    assert ask.exit_code == 0
+    assert json.loads(ask.stdout)["data"]["sources"][0]["relative_path"] == "Public Court.md"
+
+    if shutil.which("openspec") is None:
+        pytest.skip("openspec CLI is not installed on this runner")
     validation = subprocess.run(
         ["openspec", "validate", "--specs"],
         cwd=Path(__file__).resolve().parents[1],
@@ -150,11 +158,6 @@ def test_bot_cli_contracts_and_openspec_validation(runner, tmp_path: Path) -> No
         capture_output=True,
         check=False,
     )
-
-    assert human.exit_code == 0
-    assert "Exported private bot bundle" in human.stdout
-    assert ask.exit_code == 0
-    assert json.loads(ask.stdout)["data"]["sources"][0]["relative_path"] == "Public Court.md"
     assert validation.returncode == 0, validation.stderr
 
 
