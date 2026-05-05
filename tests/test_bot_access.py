@@ -199,6 +199,72 @@ def test_bot_visibility_rejects_invalid_values(runner, tmp_path: Path) -> None:
     assert json.loads(bad_topic.stdout)["error"]["code"] == "bot_topic_invalid"
 
 
+def test_bot_visibility_without_subcommand_runs_guided_wizard(runner, tmp_path: Path) -> None:
+    vault = _make_bot_vault(tmp_path)
+    (vault / "Legacy.md").write_text("# Legacy\n\nNo visibility metadata yet.", encoding="utf-8")
+
+    result = runner.invoke(app, ["bot", "visibility", "--guided", "--vault", str(vault)], input="l\nq\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Bot visibility wizard" in result.output
+    assert "Bot visibility audit" in result.output
+    assert "Bot visibility list" in result.output
+    assert "Legacy.md" in result.output
+    assert "decisions:" not in result.output
+    assert "{'relative_path'" not in result.output
+
+
+def test_bot_without_subcommand_runs_guided_command_center(runner) -> None:
+    result = runner.invoke(app, ["bot", "--guided"], input="q\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Backet bot command center" in result.output
+    assert "Setup or deploy" in result.output
+    assert "Review or edit bot visibility" in result.output
+
+
+def test_bot_visibility_guided_set_previews_and_confirms(runner, tmp_path: Path) -> None:
+    vault = _make_bot_vault(tmp_path)
+    note = vault / "Primer.md"
+    note.write_text("# Primer\n\nVisible canon.\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "bot",
+            "visibility",
+            "set",
+            "--guided",
+            str(vault),
+            "Primer.md",
+            "--visibility",
+            "player",
+            "--topic",
+            "canon",
+        ],
+        input="y\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Bot visibility dry run complete" in result.output
+    assert "Apply this visibility update?" in result.output
+    assert "Bot visibility metadata updated" in result.output
+    assert read_note_frontmatter(note)["backet"] == {"visibility": "player", "bot_topics": ["canon"]}
+
+
+def test_bot_policy_uses_guided_human_renderer(runner, tmp_path: Path) -> None:
+    vault = _make_bot_vault(tmp_path)
+    _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nKnown court customs.")
+
+    result = runner.invoke(app, ["bot", "policy", str(vault)])
+
+    assert result.exit_code == 0, result.output
+    assert "Bot policy" in result.output
+    assert "Visibility:" in result.output
+    assert "config:" not in result.output
+    assert "{'schema_version'" not in result.output
+
+
 def test_bot_excluded_note_remains_available_to_normal_indexing(runner, tmp_path: Path) -> None:
     vault = _make_bot_vault(tmp_path)
     _write(vault / "Scratch.md", "excluded", [], "# Scratch\n\nThe normal index may still see this.")

@@ -10,6 +10,14 @@ backet bot setup /path/to/vault
 
 In an interactive terminal, that command is a real wizard. It prompts through local deploy files, Discord bot validation and server/role/channel selection, visibility review, answer mode, GitHub secrets/variables, Oracle SSH validation, and deployment. You can stop and resume at any point.
 
+For a menu covering the whole bot command surface:
+
+```bash
+backet bot
+```
+
+That command guides setup, visibility, policy review, bundle export, bundle doctor/inspect, dry-run questions, model checks, and foreground bot runtime.
+
 For a non-interactive, paste-safe status view:
 
 ```bash
@@ -119,7 +127,13 @@ backet:
 ---
 ```
 
-The wizard runs this review before deployment. The focused command is:
+The setup wizard runs this review before deployment and can open the visibility editor when notes need classification. You can open the editor directly:
+
+```bash
+backet bot visibility
+```
+
+The editor audits the vault, lists unclassified notes, previews changes, and asks before writing. The focused audit command is:
 
 ```bash
 backet bot setup visibility /path/to/vault

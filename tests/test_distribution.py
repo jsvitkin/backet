@@ -14,16 +14,16 @@ def test_distribution_metadata_loads_from_repo() -> None:
 
     assert metadata.repository == "jsvitkin/backet"
     assert metadata.default_ref == "v{cli_version}"
-    assert metadata.resolved_ref() == "v0.1.14"
-    assert metadata.release_artifact_name("0.1.14") == "backet-0.1.14-py3-none-any.whl"
+    assert metadata.resolved_ref() == "v0.1.15"
+    assert metadata.release_artifact_name("0.1.15") == "backet-0.1.15-py3-none-any.whl"
 
 
 def test_distribution_metadata_builds_release_url() -> None:
     metadata = load_distribution_metadata()
 
-    url = metadata.release_artifact_url("0.1.14", repository="example/backet")
+    url = metadata.release_artifact_url("0.1.15", repository="example/backet")
 
-    assert url == "https://github.com/example/backet/releases/download/v0.1.14/backet-0.1.14-py3-none-any.whl"
+    assert url == "https://github.com/example/backet/releases/download/v0.1.15/backet-0.1.15-py3-none-any.whl"
 
 
 def test_skills_archive_url_honors_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,7 +39,7 @@ def test_skills_archive_url_resolves_release_tags_and_branch_refs(monkeypatch: p
 
     assert (
         metadata.skills_archive_url(repository="example/backet")
-        == "https://codeload.github.com/example/backet/zip/refs/tags/v0.1.14"
+        == "https://codeload.github.com/example/backet/zip/refs/tags/v0.1.15"
     )
     assert (
         metadata.skills_archive_url(repository="example/backet", ref="main")

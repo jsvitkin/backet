@@ -261,7 +261,7 @@ def test_setup_files_installs_private_deploy_workflow_and_assets(runner, tmp_pat
     assert (repo_root / "deploy/bot/docker-compose.yml").exists()
     assert (repo_root / "deploy/bot/activate-release.sh").exists()
     workflow = (repo_root / ".github/workflows/deploy-backet-bot.yml").read_text(encoding="utf-8")
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.14/backet-0.1.14-py3-none-any.whl" in workflow
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.15/backet-0.1.15-py3-none-any.whl" in workflow
     state = load_or_initialize_setup_state(vault)
     assert state["setup"]["phases"]["prerequisites"]["status"] == "done"
     assert "Deployment Files" in result.output

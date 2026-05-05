@@ -10,6 +10,14 @@ backet bot setup /path/to/vault
 
 In an interactive terminal this is a guided wizard. It prompts you phase by phase, installs local deploy files when you confirm, asks for secrets through hidden input or file paths, uses `gh` for GitHub setup, validates Discord through the bot API, SSH-checks the Oracle VM, and offers to dispatch the deploy workflow.
 
+You can also start from the bot command center:
+
+```bash
+backet bot
+```
+
+That menu guides setup, visibility, policy review, export, bundle checks, dry-run questions, model checks, and foreground bot runtime.
+
 For paste-safe status without prompts:
 
 ```bash
@@ -107,13 +115,19 @@ Backet validates the bot token and discovers guilds, roles, and channels through
 
 ## 3. Review Player Visibility
 
-The wizard runs this review before deployment. The focused command is:
+The setup wizard runs this review before deployment. If player-visible canon is empty, it offers to open the visibility editor. You can open that editor directly:
+
+```bash
+backet bot visibility
+```
+
+It audits the vault, lists unclassified notes on request, previews metadata updates, and asks before writing. The focused audit command is:
 
 ```bash
 backet bot setup visibility /path/to/vault
 ```
 
-If players should see a folder, mark it explicitly:
+If players should see a folder, either choose the player-visible action in the editor or run the focused command:
 
 ```bash
 backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --dry-run

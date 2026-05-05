@@ -26,6 +26,7 @@ from backet.bot_setup import (
     save_bot_setup_state,
     setup_status,
 )
+from backet.bot_visibility_wizard import run_guided_visibility_wizard
 from backet.models import CommandResult
 
 
@@ -190,6 +191,9 @@ def _guide_visibility(vault_root: Path, options: GuidedBotSetupOptions) -> Comma
         return result
     if summary.get("player_index_notes", 0) == 0:
         click.echo("No player-visible canon notes are marked yet.")
+        if click.confirm("Open the guided visibility editor now?", default=True):
+            run_guided_visibility_wizard(vault_root)
+            return run_visibility_setup(vault_root, allow_empty_player=options.allow_empty_player)
         if click.confirm("Continue with rules-only/player-canon-empty behavior for now?", default=False):
             return run_visibility_setup(vault_root, allow_empty_player=True)
     return result

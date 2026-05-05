@@ -92,3 +92,12 @@
 - [x] 12.5 Guide GitHub repository, secret, variable, Oracle fact, SSH validation/bootstrap, and deploy dispatch phases from the main wizard.
 - [x] 12.6 Preserve non-interactive human status with `--no-guided` and deterministic machine output with `--json`.
 - [x] 12.7 Add CLI regression coverage proving the main wizard installs missing deploy files interactively without raw structured dumps.
+
+## 13. Bot Command Guidance Regression Fixes
+
+- [x] 13.1 Add a guided `backet bot` command center covering setup, visibility, policy, export, bundle checks, dry-run ask, model check, and foreground run.
+- [x] 13.2 Add a guided `backet bot visibility` editor for auditing, listing unclassified notes, marking player/Storyteller/excluded visibility, clearing metadata, previewing changes, and confirming writes.
+- [x] 13.3 Wire the setup wizard's visibility phase to offer the guided visibility editor before accepting an empty player-visible canon index.
+- [x] 13.4 Replace generic human output for bot policy, export, doctor, inspect, ask, model-check, and visibility commands with guided summaries and next actions while preserving `--json`.
+- [x] 13.5 Make focused visibility writes interactive in human terminals, with dry-run preview and confirmation by default, while preserving `--yes`, `--no-guided`, and non-interactive behavior.
+- [x] 13.6 Add CLI regression tests for the bot command center, visibility wizard, guided visibility writes, and human bot policy output.

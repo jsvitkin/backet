@@ -185,3 +185,22 @@ The system MUST provide setup diagnostics that are safe to display, commit, past
 #### Scenario: Doctor detects drift
 - **WHEN** setup state, runtime bot config, GitHub variables, or Oracle deploy layout disagree
 - **THEN** the setup doctor MUST identify the drift and recommend the smallest setup phase to rerun
+
+### Requirement: Bot command UX MUST be guided in human terminals
+The system MUST provide guided human-mode entry points for the private bot command surface while preserving deterministic JSON and focused automation commands.
+
+#### Scenario: Open bot command center
+- **WHEN** a user runs `backet bot` in an interactive terminal
+- **THEN** the system MUST offer a guided command center for setup, visibility, policy inspection, bundle export, bundle checks, dry-run questions, model checks, and foreground bot runtime
+
+#### Scenario: Open visibility editor
+- **WHEN** a user runs `backet bot visibility` in an interactive terminal
+- **THEN** the system MUST audit current visibility, explain that unmarked notes remain Storyteller-only, and offer guided actions to mark player-visible, Storyteller-only, excluded, list unclassified notes, or clear metadata
+
+#### Scenario: Guided visibility write
+- **WHEN** a user runs a human-mode visibility write such as `backet bot visibility set`
+- **THEN** the system MUST preview the affected notes before writing and ask for confirmation unless the user explicitly bypasses guidance
+
+#### Scenario: Human bot command output
+- **WHEN** a user runs bot policy, export, doctor, inspect, ask, model-check, or visibility commands without `--json`
+- **THEN** the system MUST show concise summaries and next actions instead of raw nested structured dumps

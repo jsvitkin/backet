@@ -20,6 +20,18 @@ from backet.bot_access import (
 )
 from backet.bot_export import doctor_bot_bundle, export_bot_bundle
 from backet.bot_discord import run_discord_bot_result
+from backet.bot_guided import run_guided_bot_command_center
+from backet.bot_output import (
+    emit_bot_answer_report,
+    emit_bot_bundle_doctor_report,
+    emit_bot_bundle_inspect_report,
+    emit_bot_export_report,
+    emit_bot_model_check_report,
+    emit_bot_policy_report,
+    emit_bot_visibility_audit_report,
+    emit_bot_visibility_list_report,
+    emit_bot_visibility_update_report,
+)
 from backet.bot_runtime import answer_bot_query_result, inspect_bot_bundle
 from backet.bot_setup import (
     capture_secret_from_stdin_or_prompt,
@@ -37,6 +49,11 @@ from backet.bot_setup import (
 )
 from backet.bot_setup_output import emit_bot_setup_report
 from backet.bot_setup_wizard import GuidedBotSetupOptions, run_guided_bot_setup
+from backet.bot_visibility_wizard import (
+    run_guided_visibility_clear,
+    run_guided_visibility_set,
+    run_guided_visibility_wizard,
+)
 from backet.cli_update import (
     SKIP_UPDATE_CHECK_ENV,
     already_current_result,
@@ -87,8 +104,8 @@ rules_app = typer.Typer(help="Manage ingested rulebook PDFs and raw rules retrie
 rules_scope_app = typer.Typer(help="Inspect and revise generated rule scope assertions.")
 blueprint_app = typer.Typer(help="Manage workflow blueprint scaffolding and status.")
 update_app = typer.Typer(help="Manage the installed backet CLI package.")
-bot_app = typer.Typer(help="Manage private Backet bot configuration and exports.")
-bot_visibility_app = typer.Typer(help="Inspect and update bot visibility metadata.")
+bot_app = typer.Typer(invoke_without_command=True, help="Manage private Backet bot configuration and exports.")
+bot_visibility_app = typer.Typer(invoke_without_command=True, help="Inspect and update bot visibility metadata.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(memory_app, name="memory")
 app.add_typer(rules_app, name="rules")
@@ -97,6 +114,45 @@ app.add_typer(update_app, name="update")
 app.add_typer(bot_app, name="bot")
 rules_app.add_typer(rules_scope_app, name="scope")
 bot_app.add_typer(bot_visibility_app, name="visibility")
+
+
+@bot_app.callback(invoke_without_command=True)
+def bot_callback(
+    ctx: typer.Context,
+    guided: Annotated[bool, typer.Option("--guided", help="Open the guided bot command center.")] = False,
+    no_guided: Annotated[bool, typer.Option("--no-guided", help="Show command help without interactive prompts.")] = False,
+) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    state = ensure_state(ctx)
+    try:
+        if _should_start_guided_command(state, guided=guided, no_guided=no_guided):
+            run_guided_bot_command_center(Path(".").resolve())
+            raise typer.Exit()
+        click.echo(ctx.get_help())
+        raise typer.Exit()
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_visibility_app.callback(invoke_without_command=True)
+def bot_visibility_callback(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Option("--vault", help="Path to the target vault for the guided visibility wizard.")] = Path("."),
+    guided: Annotated[bool, typer.Option("--guided", help="Open the guided visibility wizard.")] = False,
+    no_guided: Annotated[bool, typer.Option("--no-guided", help="Show command help without interactive prompts.")] = False,
+) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    state = ensure_state(ctx)
+    try:
+        if _should_start_guided_command(state, guided=guided, no_guided=no_guided):
+            run_guided_visibility_wizard(vault.resolve())
+            raise typer.Exit()
+        click.echo(ctx.get_help())
+        raise typer.Exit()
+    except AppError as error:
+        _handle_error(ctx, error)
 
 @app.callback(invoke_without_command=True)
 def main(
@@ -317,7 +373,7 @@ def bot_setup_command(
         phase, vault = _parse_bot_setup_args(ctx.args)
         resolved_vault = vault.resolve()
         if phase == "overview":
-            if _should_start_bot_setup_wizard(state, guided=guided, no_guided=no_guided):
+            if _should_start_guided_command(state, guided=guided, no_guided=no_guided):
                 run_guided_bot_setup(
                     resolved_vault,
                     GuidedBotSetupOptions(
@@ -434,7 +490,7 @@ def _emit_bot_setup(state: CLIState, result: CommandResult, *, phase: str) -> No
     emit_bot_setup_report(result, phase=phase)
 
 
-def _should_start_bot_setup_wizard(state: CLIState, *, guided: bool, no_guided: bool) -> bool:
+def _should_start_guided_command(state: CLIState, *, guided: bool, no_guided: bool) -> bool:
     if state.json_output or no_guided:
         return False
     if guided:
@@ -449,7 +505,11 @@ def bot_policy_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(state, inspect_bot_policy(vault.resolve()))
+        result = inspect_bot_policy(vault.resolve())
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_policy_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -466,7 +526,11 @@ def bot_export_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(state, export_bot_bundle(vault.resolve(), output_path=output, force=force))
+        result = export_bot_bundle(vault.resolve(), output_path=output, force=force)
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_export_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -480,7 +544,11 @@ def bot_doctor_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(state, doctor_bot_bundle(bundle))
+        result = doctor_bot_bundle(bundle)
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_bundle_doctor_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -494,7 +562,11 @@ def bot_inspect_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(state, inspect_bot_bundle(bundle))
+        result = inspect_bot_bundle(bundle)
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_bundle_inspect_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -523,18 +595,19 @@ def bot_ask_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(
-            state,
-            answer_bot_query_result(
-                bundle_root=bundle,
-                command=command,
-                question=question,
-                user_id=user_id,
-                role_ids=role_ids or [],
-                private=private,
-                limit=limit,
-            ),
+        result = answer_bot_query_result(
+            bundle_root=bundle,
+            command=command,
+            question=question,
+            user_id=user_id,
+            role_ids=role_ids or [],
+            private=private,
+            limit=limit,
         )
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_answer_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -568,7 +641,11 @@ def bot_model_check_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(state, validate_llama_model_files(bundle_root=bundle, models_root=models_root))
+        result = validate_llama_model_files(bundle_root=bundle, models_root=models_root)
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_model_check_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -580,7 +657,11 @@ def bot_visibility_audit_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(state, audit_bot_visibility(vault.resolve()))
+        result = audit_bot_visibility(vault.resolve())
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_visibility_audit_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -595,15 +676,16 @@ def bot_visibility_list_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(
-            state,
-            list_bot_visibility(
-                vault_root=vault.resolve(),
-                visibility=visibility,
-                topic=topic,
-                unclassified=unclassified,
-            ),
+        result = list_bot_visibility(
+            vault_root=vault.resolve(),
+            visibility=visibility,
+            topic=topic,
+            unclassified=unclassified,
         )
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_visibility_list_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -621,12 +703,13 @@ def bot_visibility_set_command(
     recursive: Annotated[bool, typer.Option("--recursive", help="Apply the update to Markdown notes under a directory.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing files.")] = False,
     yes: Annotated[bool, typer.Option("--yes", help="Confirm recursive writes without prompting.")] = False,
+    guided: Annotated[bool, typer.Option("--guided", help="Prompt through preview and confirmation.")] = False,
+    no_guided: Annotated[bool, typer.Option("--no-guided", help="Apply the focused command without interactive prompts.")] = False,
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(
-            state,
-            set_bot_visibility(
+        if _should_start_guided_command(state, guided=guided, no_guided=no_guided):
+            run_guided_visibility_set(
                 vault_root=vault.resolve(),
                 target=target,
                 visibility=visibility,
@@ -634,8 +717,21 @@ def bot_visibility_set_command(
                 recursive=recursive,
                 dry_run=dry_run,
                 yes=yes,
-            ),
+            )
+            return
+        result = set_bot_visibility(
+            vault_root=vault.resolve(),
+            target=target,
+            visibility=visibility,
+            topics=topics or [],
+            recursive=recursive,
+            dry_run=dry_run,
+            yes=yes,
         )
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_visibility_update_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -648,19 +744,31 @@ def bot_visibility_clear_command(
     recursive: Annotated[bool, typer.Option("--recursive", help="Clear metadata from Markdown notes under a directory.")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing files.")] = False,
     yes: Annotated[bool, typer.Option("--yes", help="Confirm recursive writes without prompting.")] = False,
+    guided: Annotated[bool, typer.Option("--guided", help="Prompt through preview and confirmation.")] = False,
+    no_guided: Annotated[bool, typer.Option("--no-guided", help="Apply the focused command without interactive prompts.")] = False,
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(
-            state,
-            clear_bot_visibility(
+        if _should_start_guided_command(state, guided=guided, no_guided=no_guided):
+            run_guided_visibility_clear(
                 vault_root=vault.resolve(),
                 target=target,
                 recursive=recursive,
                 dry_run=dry_run,
                 yes=yes,
-            ),
+            )
+            return
+        result = clear_bot_visibility(
+            vault_root=vault.resolve(),
+            target=target,
+            recursive=recursive,
+            dry_run=dry_run,
+            yes=yes,
         )
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_visibility_update_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
