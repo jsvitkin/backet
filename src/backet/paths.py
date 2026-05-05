@@ -71,6 +71,10 @@ def blueprint_state_path(vault_root: Path, blueprint_id: str) -> Path:
     return blueprints_state_dir(vault_root) / f"{blueprint_id}.json"
 
 
+def bot_config_path(vault_root: Path) -> Path:
+    return state_dir(vault_root) / "bot-config.yaml"
+
+
 def memory_dir(vault_root: Path) -> Path:
     return backet_root(vault_root) / "memory"
 

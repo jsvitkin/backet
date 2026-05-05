@@ -83,6 +83,10 @@ class IndexState:
 def open_index_connection(vault_root: Path) -> sqlite3.Connection:
     ensure_bootstrapped_vault(vault_root)
     db_path = index_db_path(vault_root)
+    return open_index_database(db_path)
+
+
+def open_index_database(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
@@ -303,6 +307,91 @@ def index_vault(vault_root: Path, full: bool = False) -> CommandResult:
             "full_reindex": full,
         },
     )
+
+
+def build_scoped_index(
+    vault_root: Path,
+    db_path: Path,
+    relative_paths: list[str],
+    scope_name: str,
+) -> dict[str, object]:
+    ensure_bootstrapped_vault(vault_root)
+    current_files = _scan_markdown_files(vault_root)
+    normalized_paths = sorted(dict.fromkeys(path.replace("\\", "/").strip("/") for path in relative_paths if path))
+    missing_paths = [path for path in normalized_paths if path not in current_files]
+    if missing_paths:
+        raise AppError(
+            code="scoped_index_path_missing",
+            message="One or more requested scoped-index paths are not eligible indexed Markdown notes.",
+            hint="Check bot visibility metadata and `.backetignore` before exporting.",
+            details={"scope": scope_name, "missing_paths": missing_paths},
+            exit_code=2,
+        )
+
+    if db_path.exists():
+        db_path.unlink()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    backend = resolve_embedding_backend()
+    indexed_at = timestamp_now()
+    parsed_notes = [_parse_markdown_file(vault_root, current_files[path]) for path in normalized_paths]
+    embeddings = _embed_parsed_notes(parsed_notes, backend)
+    content_fingerprint = fingerprint_text(
+        json.dumps(
+            {
+                "scope": scope_name,
+                "paths": [
+                    {"relative_path": note.relative_path, "content_hash": note.content_hash}
+                    for note in parsed_notes
+                ],
+            },
+            sort_keys=True,
+        )
+    )
+
+    with closing(open_index_database(db_path)) as connection:
+        for parsed_note, embedding_result in zip(parsed_notes, embeddings, strict=False):
+            _upsert_note(connection, parsed_note, embedding_result, indexed_at)
+
+        chunk_count = connection.execute("SELECT COUNT(*) AS count FROM chunks").fetchone()["count"]
+        _write_index_meta(
+            connection,
+            {
+                "last_indexed_at": indexed_at,
+                "embedding_backend": backend.name,
+                "embedding_model": backend.model_name,
+                "access_scope": scope_name,
+                "content_fingerprint": content_fingerprint,
+            },
+        )
+        connection.execute(
+            """
+            INSERT INTO index_runs (
+                started_at, completed_at, notes_scanned, notes_changed, notes_deleted, total_notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                indexed_at,
+                timestamp_now(),
+                len(normalized_paths),
+                len(normalized_paths),
+                0,
+                len(normalized_paths),
+            ),
+        )
+        connection.commit()
+
+    return {
+        "scope": scope_name,
+        "path": str(db_path),
+        "relative_paths": normalized_paths,
+        "note_count": len(normalized_paths),
+        "chunk_count": int(chunk_count),
+        "content_fingerprint": content_fingerprint,
+        "embedding_backend": backend.name,
+        "embedding_model": backend.model_name,
+    }
 
 
 def require_current_index(vault_root: Path, refresh: bool = False) -> IndexState:

@@ -246,6 +246,25 @@ class SemanticRulesSearch:
 def open_rules_connection(vault_root: Path) -> sqlite3.Connection:
     ensure_bootstrapped_vault(vault_root)
     db_path = rules_db_path(vault_root)
+    return open_rules_database(db_path)
+
+
+def open_rules_database(db_path: Path, readonly: bool = False) -> sqlite3.Connection:
+    db_path = db_path.expanduser().resolve()
+    if readonly:
+        if not db_path.exists():
+            raise AppError(
+                code="rules_db_missing",
+                message="Rules database is missing.",
+                hint="Export or ingest rules before querying them.",
+                details={"rules_db": str(db_path)},
+                exit_code=2,
+            )
+        connection = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
@@ -616,6 +635,27 @@ def query_rules(
     scope_tags: list[str] | None = None,
 ) -> CommandResult:
     ensure_bootstrapped_vault(vault_root)
+    with closing(open_rules_connection(vault_root)) as connection:
+        return query_rules_connection(
+            connection,
+            query=query,
+            limit=limit,
+            book_id=book_id,
+            scope_tags=scope_tags or [],
+            db_label=str(vault_root),
+            data_key="vault",
+        )
+
+
+def query_rules_connection(
+    connection: sqlite3.Connection,
+    query: str,
+    limit: int,
+    book_id: str | None = None,
+    scope_tags: list[str] | None = None,
+    db_label: str | None = None,
+    data_key: str = "rules_db",
+) -> CommandResult:
     if limit <= 0:
         raise AppError(
             code="rules_limit_invalid",
@@ -635,54 +675,54 @@ def query_rules(
         )
 
     normalized_tags = normalize_scope_tags(scope_tags or [])
-    with closing(open_rules_connection(vault_root)) as connection:
-        excluded_chunks = _active_excluded_chunk_count(connection, book_id)
-        exact_rows = _search_rule_chunks(
-            connection,
-            fts_query,
-            book_id=book_id,
-            scope_tags=normalized_tags,
-            limit=max(limit * 4, 12),
+    excluded_chunks = _active_excluded_chunk_count(connection, book_id)
+    exact_rows = _search_rule_chunks(
+        connection,
+        fts_query,
+        book_id=book_id,
+        scope_tags=normalized_tags,
+        limit=max(limit * 4, 12),
+    )
+    semantic = _search_semantic_rule_chunks(
+        connection,
+        query,
+        book_id=book_id,
+        scope_tags=normalized_tags,
+        limit=max(limit * 4, RULE_SEMANTIC_LIMIT),
+    )
+    rows = _merge_rule_candidates(exact_rows, semantic.candidates, scope_tags=normalized_tags)
+    if not rows:
+        raise AppError(
+            code="rules_query_empty",
+            message="No ingested rule chunks matched the requested query.",
+            hint="Adjust the query or ingest the relevant rulebook first.",
+            details={
+                "query": query,
+                "book_id": book_id,
+                "scope_tags": normalized_tags,
+                "retrieval_mode": semantic.retrieval_mode,
+                "semantic_error": semantic.error,
+                "reviewed_exclusions": {"excluded_chunks": excluded_chunks},
+            },
+            exit_code=2,
         )
-        semantic = _search_semantic_rule_chunks(
-            connection,
-            query,
-            book_id=book_id,
-            scope_tags=normalized_tags,
-            limit=max(limit * 4, RULE_SEMANTIC_LIMIT),
+    primary_rows, fallback_rows, ambiguity = _apply_precedence(rows, scope_tags=normalized_tags, explicit_book_id=book_id)
+    if ambiguity is not None:
+        raise AppError(
+            code="rules_query_ambiguous",
+            message="Multiple supplement-specific rulebooks match this query with comparable precedence.",
+            hint="Re-run the query with `--book-id` or narrower `--scope-tag` filters.",
+            details=ambiguity,
+            exit_code=2,
         )
-        rows = _merge_rule_candidates(exact_rows, semantic.candidates, scope_tags=normalized_tags)
-        if not rows:
-            raise AppError(
-                code="rules_query_empty",
-                message="No ingested rule chunks matched the requested query.",
-                hint="Adjust the query or ingest the relevant rulebook first.",
-                details={
-                    "query": query,
-                    "book_id": book_id,
-                    "scope_tags": normalized_tags,
-                    "retrieval_mode": semantic.retrieval_mode,
-                    "semantic_error": semantic.error,
-                    "reviewed_exclusions": {"excluded_chunks": excluded_chunks},
-                },
-                exit_code=2,
-            )
-        primary_rows, fallback_rows, ambiguity = _apply_precedence(rows, scope_tags=normalized_tags, explicit_book_id=book_id)
-        if ambiguity is not None:
-            raise AppError(
-                code="rules_query_ambiguous",
-                message="Multiple supplement-specific rulebooks match this query with comparable precedence.",
-                hint="Re-run the query with `--book-id` or narrower `--scope-tag` filters.",
-                details=ambiguity,
-                exit_code=2,
-            )
 
     primary = [_row_to_rule_result(row) for row in primary_rows[:limit]]
     fallback = [_row_to_rule_result(row) for row in fallback_rows[:limit]]
+    label = db_label or "rules.sqlite3"
     return CommandResult(
         message="Retrieved ingested rule chunks",
         data={
-            "vault": str(vault_root),
+            data_key: label,
             "query": query,
             "book_id": book_id,
             "scope_tags": normalized_tags,

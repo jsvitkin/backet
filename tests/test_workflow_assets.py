@@ -28,6 +28,10 @@ def test_workflow_skills_encode_discuss_before_write_and_rules_aware_grounding()
     assert "backet context" in workflow_skill
     assert "backet rules query" in workflow_skill
     assert "cited support material" in workflow_skill
+    assert "backet.visibility: player" in workflow_skill
+    assert "backet.bot_topics" in workflow_skill
+    assert "backet bot visibility audit" in workflow_skill
+    assert len(workflow_skill.splitlines()) < 80
 
     assert "backet blueprint status" in city_skill
     assert "backet blueprint apply" in city_skill
@@ -96,6 +100,21 @@ def test_fixture_workflow_validation_combines_vault_context_and_ambiguous_rules(
     assert ambiguous_result.exit_code == 2
     ambiguous_payload = json.loads(ambiguous_result.stdout)
     assert ambiguous_payload["error"]["code"] == "rules_query_ambiguous"
+
+
+def test_private_discord_bot_docs_cover_setup_and_troubleshooting() -> None:
+    docs = Path("docs/private-discord-bot.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "Private Discord Bot Bundles" in readme
+    assert "backet bot export" in readme
+    assert "Discord Developer Portal" in docs
+    assert "GitHub Actions" in docs
+    assert "ORACLE_VM_SSH_KEY" in docs
+    assert "DISCORD_TOKEN" in docs
+    assert "Llama 3.2 3B" in docs
+    assert "Missing player-visible notes" in docs
+    assert "Incompatible bundle" in docs
 
 
 def _ingest_book(

@@ -194,6 +194,36 @@ For higher-quality local semantic retrieval, install the optional Sentence Trans
 pipx inject backet "sentence-transformers>=3.4.1"
 ```
 
+## Private Discord Bot Bundles
+
+Backet can export a private Discord bot bundle for a single Storyteller-controlled server. The bot is not a public downloadable rules bot: it runs from a private read-only bundle containing access-scoped vault indexes, `access-policy.json`, `manifest.json`, and the shared `.backet/rules/rules.sqlite3` when rules are enabled. Source PDFs, OCR scratch state, model files, deploy credentials, and the full vault workflow stay out of the hosted runtime.
+
+Mark player-visible canon explicitly in note frontmatter:
+
+```yaml
+---
+backet:
+  visibility: player
+  bot_topics:
+    - canon
+---
+```
+
+Unmarked notes default to Storyteller-only for player safety. Use the CLI instead of hand-editing large folders:
+
+```bash
+backet bot visibility audit /path/to/vault
+backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --dry-run
+backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --yes
+backet bot export /path/to/vault --output dist/bot-data --force
+backet bot doctor dist/bot-data
+backet bot ask dist/bot-data "What are Elysium customs?" --command canon.ask --role-id player-role
+```
+
+Hosted deployment targets an Oracle Always Free VM with Docker Compose and outbound Discord Gateway access. Install the optional bot dependency group in the runtime image with `.[bot]`. Local Llama synthesis is optional; template answers remain the deterministic fallback, and GGUF model files stay in a VM-local model cache rather than in Git or bot bundles.
+
+See [docs/private-discord-bot.md](docs/private-discord-bot.md) for Discord Developer Portal setup, role/channel mapping, local Llama configuration, GitHub Actions deploy secrets, Oracle VM layout, rollback, and troubleshooting.
+
 ## Development
 
 Use a normal Python virtual environment and `pip`. The project requires Python 3.11 or newer.

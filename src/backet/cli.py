@@ -10,6 +10,17 @@ import typer
 
 from backet import __version__
 from backet.blueprints import apply_blueprint, blueprint_status
+from backet.bot_answers import validate_llama_model_files
+from backet.bot_access import (
+    audit_bot_visibility,
+    clear_bot_visibility,
+    inspect_bot_policy,
+    list_bot_visibility,
+    set_bot_visibility,
+)
+from backet.bot_export import doctor_bot_bundle, export_bot_bundle
+from backet.bot_discord import run_discord_bot_result
+from backet.bot_runtime import answer_bot_query_result, inspect_bot_bundle
 from backet.cli_update import (
     SKIP_UPDATE_CHECK_ENV,
     already_current_result,
@@ -59,12 +70,16 @@ rules_app = typer.Typer(help="Manage ingested rulebook PDFs and raw rules retrie
 rules_scope_app = typer.Typer(help="Inspect and revise generated rule scope assertions.")
 blueprint_app = typer.Typer(help="Manage workflow blueprint scaffolding and status.")
 update_app = typer.Typer(help="Manage the installed backet CLI package.")
+bot_app = typer.Typer(help="Manage private Backet bot configuration and exports.")
+bot_visibility_app = typer.Typer(help="Inspect and update bot visibility metadata.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(memory_app, name="memory")
 app.add_typer(rules_app, name="rules")
 app.add_typer(blueprint_app, name="blueprint")
 app.add_typer(update_app, name="update")
+app.add_typer(bot_app, name="bot")
 rules_app.add_typer(rules_scope_app, name="scope")
+bot_app.add_typer(bot_visibility_app, name="visibility")
 
 @app.callback(invoke_without_command=True)
 def main(
@@ -201,6 +216,229 @@ def doctor_command(
     try:
         result = diagnose_vault(vault.resolve(), fix=fix)
         emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_app.command("policy")
+def bot_policy_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, inspect_bot_policy(vault.resolve()))
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_app.command("export")
+def bot_export_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Directory where the private bot bundle should be written."),
+    ] = Path("dist/bot-data"),
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing output directory.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, export_bot_bundle(vault.resolve(), output_path=output, force=force))
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_app.command("doctor")
+def bot_doctor_command(
+    ctx: typer.Context,
+    bundle: Annotated[Path, typer.Argument(help="Path to an exported bot bundle.", file_okay=False, dir_okay=True)] = Path(
+        "dist/bot-data"
+    ),
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, doctor_bot_bundle(bundle))
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_app.command("inspect")
+def bot_inspect_command(
+    ctx: typer.Context,
+    bundle: Annotated[Path, typer.Argument(help="Path to an exported bot bundle.", file_okay=False, dir_okay=True)] = Path(
+        "dist/bot-data"
+    ),
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, inspect_bot_bundle(bundle))
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_app.command("ask")
+def bot_ask_command(
+    ctx: typer.Context,
+    bundle: Annotated[Path, typer.Argument(help="Path to an exported bot bundle.", file_okay=False, dir_okay=True)] = Path(
+        "dist/bot-data"
+    ),
+    question: Annotated[str, typer.Argument(help="Question to answer from the bot bundle.")] = "",
+    command: Annotated[
+        str,
+        typer.Option("--command", help="Dry-run command route: rules.ask, canon.ask, st.ask, st.npc, st.plot, st.statblock."),
+    ] = "canon.ask",
+    user_id: Annotated[str | None, typer.Option("--user-id", help="Discord user ID for access simulation.")] = None,
+    role_ids: Annotated[
+        list[str] | None,
+        typer.Option("--role-id", help="Repeatable Discord role ID for access simulation."),
+    ] = None,
+    private: Annotated[
+        bool | None,
+        typer.Option("--private/--public", help="Override response visibility for the dry run."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of sources per corpus.")] = 4,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(
+            state,
+            answer_bot_query_result(
+                bundle_root=bundle,
+                command=command,
+                question=question,
+                user_id=user_id,
+                role_ids=role_ids or [],
+                private=private,
+                limit=limit,
+            ),
+        )
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_app.command("run")
+def bot_run_command(
+    ctx: typer.Context,
+    bundle: Annotated[Path, typer.Argument(help="Path to an exported bot bundle.", file_okay=False, dir_okay=True)] = Path(
+        "dist/bot-data"
+    ),
+    token: Annotated[str | None, typer.Option("--token", help="Discord bot token. Prefer DISCORD_TOKEN.")] = None,
+    guild_id: Annotated[str | None, typer.Option("--guild-id", help="Configured Discord guild ID.")] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, run_discord_bot_result(bundle_root=bundle, token=token, guild_id=guild_id))
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_app.command("model-check")
+def bot_model_check_command(
+    ctx: typer.Context,
+    bundle: Annotated[Path, typer.Argument(help="Path to an exported bot bundle.", file_okay=False, dir_okay=True)] = Path(
+        "dist/bot-data"
+    ),
+    models_root: Annotated[
+        Path | None,
+        typer.Option("--models-root", help="VM-local model cache root for relative model paths."),
+    ] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, validate_llama_model_files(bundle_root=bundle, models_root=models_root))
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_visibility_app.command("audit")
+def bot_visibility_audit_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, audit_bot_visibility(vault.resolve()))
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_visibility_app.command("list")
+def bot_visibility_list_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    visibility: Annotated[str | None, typer.Option("--visibility", help="Filter by bot visibility.")] = None,
+    topic: Annotated[str | None, typer.Option("--topic", help="Filter by bot topic.")] = None,
+    unclassified: Annotated[bool, typer.Option("--unclassified", help="Show notes without explicit visibility metadata.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(
+            state,
+            list_bot_visibility(
+                vault_root=vault.resolve(),
+                visibility=visibility,
+                topic=topic,
+                unclassified=unclassified,
+            ),
+        )
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_visibility_app.command("set")
+def bot_visibility_set_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    target: Annotated[str, typer.Argument(help="Vault-relative Markdown note or directory to update.")] = "",
+    visibility: Annotated[str, typer.Option("--visibility", help="Bot visibility: player, storyteller, or excluded.")] = "",
+    topics: Annotated[
+        list[str] | None,
+        typer.Option("--topic", help="Repeatable bot topic, such as canon, npc, plotline, statblock, or rules-summary."),
+    ] = None,
+    recursive: Annotated[bool, typer.Option("--recursive", help="Apply the update to Markdown notes under a directory.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing files.")] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Confirm recursive writes without prompting.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(
+            state,
+            set_bot_visibility(
+                vault_root=vault.resolve(),
+                target=target,
+                visibility=visibility,
+                topics=topics or [],
+                recursive=recursive,
+                dry_run=dry_run,
+                yes=yes,
+            ),
+        )
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_visibility_app.command("clear")
+def bot_visibility_clear_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    target: Annotated[str, typer.Argument(help="Vault-relative Markdown note or directory to update.")] = "",
+    recursive: Annotated[bool, typer.Option("--recursive", help="Clear metadata from Markdown notes under a directory.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing files.")] = False,
+    yes: Annotated[bool, typer.Option("--yes", help="Confirm recursive writes without prompting.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(
+            state,
+            clear_bot_visibility(
+                vault_root=vault.resolve(),
+                target=target,
+                recursive=recursive,
+                dry_run=dry_run,
+                yes=yes,
+            ),
+        )
     except AppError as error:
         _handle_error(ctx, error)
 

@@ -359,8 +359,11 @@ def _query_semantic_scores(connection: sqlite3.Connection, note_ids: list[int], 
     if not rows:
         return {}
 
-    backend = resolve_embedding_backend()
-    query_vector = backend.encode_many([query]).vectors[0]
+    try:
+        backend = resolve_embedding_backend()
+        query_vector = backend.encode_many([query]).vectors[0]
+    except AppError:
+        return {}
     scored = []
     for row in rows:
         score = cosine_similarity(query_vector, json.loads(row["embedding_json"]))

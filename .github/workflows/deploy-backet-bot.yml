@@ -1,0 +1,93 @@
+name: Deploy private Backet bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      vault_path:
+        description: "Vault path inside this private repository"
+        required: true
+        default: "."
+      release_id:
+        description: "Optional release id"
+        required: false
+        default: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Backet with bot dependencies
+        run: python -m pip install '.[bot]'
+
+      - name: Export private bot bundle
+        run: backet bot export "${{ inputs.vault_path }}" --output bot-data --force
+
+      - name: Package private bot bundle
+        id: package
+        run: |
+          set -euo pipefail
+          release_id="${{ inputs.release_id }}"
+          if [ -z "${release_id}" ]; then
+            release_id="run-${GITHUB_RUN_ID}"
+          fi
+          tar -czf "backet-bot-${release_id}.tar.gz" -C bot-data .
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          echo "archive=backet-bot-${release_id}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Keep bundle artifact private to this workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-backet-bot-bundle-${{ steps.package.outputs.release_id }}
+          path: ${{ steps.package.outputs.archive }}
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Prepare SSH key
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.ORACLE_VM_SSH_KEY }}" > ~/.ssh/backet_bot_deploy
+          chmod 600 ~/.ssh/backet_bot_deploy
+
+      - name: Write deploy environment
+        run: |
+          set -euo pipefail
+          cat > .env.deploy <<'ENV'
+          DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }}
+          DISCORD_GUILD_ID=${{ vars.DISCORD_GUILD_ID }}
+          BACKET_BOT_BUNDLE=/srv/backet-bot/data/current
+          BACKET_SKIP_UPDATE_CHECK=1
+          COMPOSE_PROFILES=${{ vars.BOT_COMPOSE_PROFILES }}
+          LLAMA_MODEL_RELATIVE_PATH=${{ vars.LLAMA_MODEL_RELATIVE_PATH }}
+          LLAMA_MODEL_SHA256=${{ vars.LLAMA_MODEL_SHA256 }}
+          LLAMA_MODEL_URL=${{ vars.LLAMA_MODEL_URL }}
+          ENV
+
+      - name: Upload deploy assets and bundle
+        run: |
+          set -euo pipefail
+          vm="${{ secrets.ORACLE_VM_USER }}@${{ secrets.ORACLE_VM_HOST }}"
+          ssh_opts="-i ~/.ssh/backet_bot_deploy -o StrictHostKeyChecking=accept-new"
+          ssh ${ssh_opts} "${vm}" "mkdir -p /srv/backet-bot/deploy /srv/backet-bot/uploads /srv/backet-bot/models"
+          scp ${ssh_opts} deploy/bot/docker-compose.yml deploy/bot/*.sh "${vm}:/srv/backet-bot/deploy/"
+          scp ${ssh_opts} .env.deploy "${vm}:/srv/backet-bot/deploy/.env"
+          scp ${ssh_opts} "${{ steps.package.outputs.archive }}" "${vm}:/srv/backet-bot/uploads/${{ steps.package.outputs.archive }}"
+
+      - name: Activate release on Oracle VM
+        env:
+          MODEL_DOWNLOAD_TOKEN: ${{ secrets.MODEL_DOWNLOAD_TOKEN }}
+        run: |
+          set -euo pipefail
+          vm="${{ secrets.ORACLE_VM_USER }}@${{ secrets.ORACLE_VM_HOST }}"
+          ssh_opts="-i ~/.ssh/backet_bot_deploy -o StrictHostKeyChecking=accept-new"
+          ssh ${ssh_opts} "${vm}" \
+            "MODEL_DOWNLOAD_TOKEN='${MODEL_DOWNLOAD_TOKEN}' /srv/backet-bot/deploy/activate-release.sh '/srv/backet-bot/uploads/${{ steps.package.outputs.archive }}' '${{ steps.package.outputs.release_id }}'"

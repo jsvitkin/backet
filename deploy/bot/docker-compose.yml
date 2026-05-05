@@ -1,0 +1,33 @@
+services:
+  backet-bot:
+    build:
+      context: ../..
+      dockerfile: deploy/bot/Dockerfile
+    image: backet-bot:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      BACKET_SKIP_UPDATE_CHECK: "1"
+      BACKET_BOT_BUNDLE: /srv/backet-bot/data/current
+    volumes:
+      - /srv/backet-bot/data:/srv/backet-bot/data:ro
+      - /srv/backet-bot/releases:/srv/backet-bot/releases:ro
+      - /srv/backet-bot/models:/srv/backet-bot/models:ro
+    command: ["bot", "run", "/srv/backet-bot/data/current"]
+
+  llama:
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggerganov/llama.cpp:server}
+    profiles: ["llama"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - /srv/backet-bot/models:/models:ro
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--model"
+      - "/models/${LLAMA_MODEL_RELATIVE_PATH:-llama-3.2-3b-instruct-q4/model.gguf}"

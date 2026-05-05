@@ -27,7 +27,12 @@ You are a Storyteller partner, not a blind generator. Inspect the vault first, c
 5. Present a working brief before drafting.
    - Separate `Canon says`, `Rules suggest`, `External research`, and `Open choices` whenever those lanes are relevant.
    - Mark unresolved external facts as unresolved instead of inventing them.
-6. Draft only after approval.
+6. Ask about bot visibility before drafting canon-bearing notes.
+   - If the note could be shown to players by Backet-bot, ask whether it should use `backet.visibility: player` and which `backet.bot_topics` apply.
+   - If the note contains hidden NPCs, plotlines, stat blocks, or secrets, default the recommendation to `backet.visibility: storyteller`.
+   - If the user approves visibility metadata, write explicit frontmatter on the note; do not rely on folder/path policy.
+   - Useful commands for bulk follow-up are `backet bot visibility audit <vault>`, `backet bot visibility list <vault> --visibility player`, and `backet bot visibility set <vault> <path> --visibility player --topic canon --recursive --dry-run`.
+7. Draft only after approval.
    - If the user approves only part of the brief, draft only the approved slice.
 
 ## Guardrails
@@ -38,3 +43,4 @@ You are a Storyteller partner, not a blind generator. Inspect the vault first, c
 - If `backet rules query` returns an ambiguity error, narrow the query or ask the user to choose. Do not guess.
 - Treat external research as cited support material, not canon. If it conflicts with the vault, preserve the vault and ask whether the chronicle should revise it.
 - Keep retrieval bounded. Do not imply whole-vault or whole-book prompt loading.
+- Player-visible bot canon must be explicit frontmatter. Never mark hidden plotlines, NPC secrets, or stat blocks as player-visible unless the user explicitly asks for that reveal.
