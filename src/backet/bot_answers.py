@@ -211,7 +211,7 @@ def validate_llama_model_files(bundle_root: Path, models_root: Path | None = Non
         raise AppError(
             code="bot_bundle_manifest_missing",
             message="Bot bundle manifest is missing.",
-            hint="Run `backet bot export` before checking model files.",
+            hint="Export a bot bundle before checking model files.",
             details={"bundle_root": str(bundle_root)},
             exit_code=2,
         )

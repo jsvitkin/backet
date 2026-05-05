@@ -203,15 +203,56 @@ def test_bot_visibility_without_subcommand_runs_guided_wizard(runner, tmp_path: 
     vault = _make_bot_vault(tmp_path)
     (vault / "Legacy.md").write_text("# Legacy\n\nNo visibility metadata yet.", encoding="utf-8")
 
-    result = runner.invoke(app, ["bot", "visibility", "--guided", "--vault", str(vault)], input="l\nq\n")
+    result = runner.invoke(app, ["bot", "visibility", "--guided", "--vault", str(vault)], input="4\n7\n")
 
     assert result.exit_code == 0, result.output
     assert "Bot visibility wizard" in result.output
-    assert "Bot visibility audit" in result.output
+    assert "Current visibility" in result.output
+    assert "What would you like to do?" in result.output
     assert "Bot visibility list" in result.output
     assert "Legacy.md" in result.output
+    assert "Action [" not in result.output
+    assert "backet bot visibility set" not in result.output
     assert "decisions:" not in result.output
     assert "{'relative_path'" not in result.output
+
+
+def test_bot_visibility_wizard_end_to_end_classifies_fake_vault_without_command_recipes(
+    runner,
+    tmp_path: Path,
+) -> None:
+    vault = _make_bot_vault(tmp_path)
+    player_folder = vault / "Player Facing"
+    player_folder.mkdir()
+    (player_folder / "Primer.md").write_text("# Primer\n\nPublic court facts.", encoding="utf-8")
+    (player_folder / "Laws.md").write_text("# Laws\n\nPublic domain rules.", encoding="utf-8")
+    secrets = vault / "Secrets"
+    secrets.mkdir()
+    (secrets / "Prince.md").write_text("# Prince\n\nHidden plot material.", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["bot", "visibility", "--guided", "--vault", str(vault)],
+        input="1\n1\n1\ny\ny\n3\n1\ny\n7\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "What would you like to do?" in result.output
+    assert "Suggested targets from this vault" in result.output
+    assert "Apply this visibility update?" in result.output
+    assert "Action [" not in result.output
+    assert "Run `" not in result.output
+    assert "backet bot visibility set" not in result.output
+    assert "{'relative_path'" not in result.output
+    assert read_note_frontmatter(player_folder / "Primer.md")["backet"] == {
+        "visibility": "player",
+        "bot_topics": ["canon"],
+    }
+    assert read_note_frontmatter(player_folder / "Laws.md")["backet"] == {
+        "visibility": "player",
+        "bot_topics": ["canon"],
+    }
+    assert read_note_frontmatter(secrets / "Prince.md")["backet"] == {"visibility": "excluded"}
 
 
 def test_bot_without_subcommand_runs_guided_command_center(runner) -> None:
@@ -263,6 +304,22 @@ def test_bot_policy_uses_guided_human_renderer(runner, tmp_path: Path) -> None:
     assert "Visibility:" in result.output
     assert "config:" not in result.output
     assert "{'schema_version'" not in result.output
+
+
+def test_bot_visibility_audit_human_output_points_to_wizard_without_command_recipe(
+    runner,
+    tmp_path: Path,
+) -> None:
+    vault = _make_bot_vault(tmp_path)
+    (vault / "Legacy.md").write_text("# Legacy\n\nNo visibility metadata yet.", encoding="utf-8")
+
+    result = runner.invoke(app, ["bot", "visibility", "audit", str(vault)])
+
+    assert result.exit_code == 0, result.output
+    assert "Bot visibility audit" in result.output
+    assert "Open the guided visibility editor" in result.output
+    assert "Run `" not in result.output
+    assert "backet bot visibility set" not in result.output
 
 
 def test_bot_excluded_note_remains_available_to_normal_indexing(runner, tmp_path: Path) -> None:

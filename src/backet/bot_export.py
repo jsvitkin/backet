@@ -120,7 +120,7 @@ def export_bot_bundle(vault_root: Path, output_path: Path, force: bool = False) 
                 code="bot_export_no_player_notes",
                 severity="warning",
                 message="No notes are explicitly player-visible for bot export.",
-                hint="Use `backet bot visibility set` to mark player-facing notes.",
+                hint="Open the guided visibility editor and mark player-facing notes.",
                 safe_to_fix=False,
             )
         )
@@ -162,7 +162,7 @@ def doctor_bot_bundle(bundle_root: Path) -> CommandResult:
         raise AppError(
             code="bot_bundle_manifest_missing",
             message="Bot bundle manifest is missing.",
-            hint="Run `backet bot export` before checking a bundle.",
+            hint="Export a bot bundle before checking it.",
             details={"bundle_root": str(root)},
             exit_code=2,
         )

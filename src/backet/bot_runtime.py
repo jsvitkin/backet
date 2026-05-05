@@ -107,7 +107,7 @@ class BotBundle:
             raise AppError(
                 code="bot_bundle_manifest_missing",
                 message="Bot bundle manifest is missing.",
-                hint="Run `backet bot export` first.",
+                hint="Export a bot bundle first.",
                 details={"bundle_root": str(root)},
                 exit_code=2,
             )

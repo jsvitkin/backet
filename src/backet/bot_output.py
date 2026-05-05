@@ -19,7 +19,7 @@ def emit_bot_policy_report(result: CommandResult) -> None:
     _print_roles(config)
     _print_command_policies(config)
     _print_visibility_summary(summary)
-    _print_next("Use `backet bot setup` to configure Discord/GitHub/Oracle deployment.")
+    _print_next("Open the guided bot setup when you are ready to configure Discord, GitHub, and Oracle deployment.")
 
 
 def emit_bot_export_report(result: CommandResult) -> None:
@@ -33,7 +33,7 @@ def emit_bot_export_report(result: CommandResult) -> None:
     _line("Rules database", "included" if rules.get("included") else "not included")
     _print_created(result.created)
     _print_issues(result.issues)
-    _print_next("Run `backet bot doctor <bundle>` before deploying or testing answers.")
+    _print_next("Use the bundle doctor before deploying or testing answers.")
 
 
 def emit_bot_bundle_doctor_report(result: CommandResult) -> None:
@@ -45,9 +45,9 @@ def emit_bot_bundle_doctor_report(result: CommandResult) -> None:
     _line("Status", "ok" if data.get("ok") else "needs attention")
     _print_issues(result.issues)
     if data.get("ok"):
-        _print_next("Run `backet bot inspect <bundle>` or `backet bot ask <bundle>` to test it.")
+        _print_next("Inspect the bundle or try a dry-run bot question when you are ready to test it.")
     else:
-        _print_next("Re-export the bundle with `backet bot export <vault> --force` after fixing issues.")
+        _print_next("Fix the issues above, then re-export the bundle.")
 
 
 def emit_bot_bundle_inspect_report(result: CommandResult) -> None:
@@ -66,7 +66,7 @@ def emit_bot_bundle_inspect_report(result: CommandResult) -> None:
             console.print(f"  - {name}: {meta.get('note_count', 0)} notes, {meta.get('chunk_count', 0)} chunks")
     rules = dict(data.get("rules", {}) or {})
     _line("Rules database", "included" if rules.get("included") else "not included")
-    _print_next("Run `backet bot ask <bundle>` to test a simulated Discord question.")
+    _print_next("Try a dry-run Discord question to verify access and answer behavior.")
 
 
 def emit_bot_answer_report(result: CommandResult) -> None:
@@ -126,10 +126,10 @@ def emit_bot_visibility_list_report(result: CommandResult) -> None:
             continue
         topics = ", ".join(decision.get("topics") or []) or "none"
         marker = "default" if decision.get("metadata_source") == "default" else "explicit"
-        console.print(f"  - {decision.get('relative_path')} [{decision.get('visibility')}; {topics}; {marker}]")
+        console.print(f"  - {decision.get('relative_path')} ({decision.get('visibility')}; {topics}; {marker})")
     if len(decisions) > 40:
         console.print(f"  ... {len(decisions) - 40} more")
-    _print_next("Run `backet bot visibility` for the guided visibility editor.")
+    _print_next("Open the guided visibility editor to change these entries.")
 
 
 def emit_bot_visibility_update_report(result: CommandResult) -> None:
@@ -156,9 +156,9 @@ def emit_bot_visibility_update_report(result: CommandResult) -> None:
         if len(updates) > 40:
             console.print(f"  ... {len(updates) - 40} more")
     if data.get("dry_run"):
-        _print_next("If the preview is right, rerun without `--dry-run`; recursive writes also need `--yes`.")
+        _print_next("Review the preview above. In guided mode, confirm the prompt to apply it.")
     else:
-        _print_next("Run `backet bot visibility audit <vault>` to review the updated policy.")
+        _print_next("Review visibility again when you are ready to check the updated policy.")
 
 
 def _print_roles(config: dict[str, Any]) -> None:
@@ -206,11 +206,11 @@ def _print_visibility_summary(summary: dict[str, Any]) -> None:
 def _print_visibility_guidance(summary: dict[str, Any]) -> None:
     actions: list[str] = []
     if summary.get("unclassified_notes", 0):
-        actions.append("Run `backet bot visibility` to classify unmarked notes by folder or note.")
+        actions.append("Open the guided visibility editor to classify unmarked notes by folder or note.")
     if summary.get("player_index_notes", 0) == 0:
-        actions.append("Mark player-facing canon with `backet bot visibility set ... --visibility player --topic canon`.")
+        actions.append("Mark at least one safe canon note as player-visible before expecting player canon answers.")
     if summary.get("missing_topic_notes", 0):
-        actions.append("Add bot topics to notes that should be queryable.")
+        actions.append("Add explicit bot topics to notes that should be queryable.")
     if not actions:
         actions.append("Policy looks classified. Re-run setup or export when ready.")
     console.print("Next:")

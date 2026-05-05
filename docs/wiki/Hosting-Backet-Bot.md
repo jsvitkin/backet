@@ -121,13 +121,24 @@ The setup wizard runs this review before deployment. If player-visible canon is 
 backet bot visibility
 ```
 
-It audits the vault, lists unclassified notes on request, previews metadata updates, and asks before writing. The focused audit command is:
+It audits the vault, explains that unmarked notes stay Storyteller-only, then shows numbered choices:
+
+- mark player-facing notes as player-visible
+- mark hidden notes as Storyteller-only
+- exclude notes from bot export
+- review unclassified notes
+- clear bot visibility metadata
+- refresh or finish
+
+When you choose a write action, the editor suggests notes and folders from the scanned vault. Pick a number or type a vault-relative path, review the dry-run preview, then confirm before files are changed.
+
+The focused audit command is:
 
 ```bash
 backet bot setup visibility /path/to/vault
 ```
 
-If players should see a folder, either choose the player-visible action in the editor or run the focused command:
+If players should see a folder, choose the player-visible action in the editor, select the suggested folder, keep the default `canon` topic if appropriate, and confirm the preview. For automation or scripts, the focused command remains available:
 
 ```bash
 backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --dry-run
@@ -302,8 +313,8 @@ Oracle setup pending:
 
 Player answers are empty:
 
-- mark player-facing notes with `backet bot visibility set`
-- rerun visibility setup
+- open the visibility editor and mark player-facing notes
+- rerun the visibility setup check
 - redeploy
 
 Llama is slow:

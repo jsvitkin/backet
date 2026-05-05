@@ -244,7 +244,8 @@ def test_cli_setup_overview_uses_guided_human_output(runner, tmp_path: Path, mon
     assert "Backet bot setup" in result.output
     assert "Progress" in result.output
     assert "What To Do Next" in result.output
-    assert "backet bot setup files" in result.output
+    assert "local deployment files from the prerequisites step" in result.output
+    assert "backet bot setup files" not in result.output
     assert "phases:" not in result.output
     assert "last_phase_result:" not in result.output
     assert "{'prerequisites'" not in result.output
@@ -261,7 +262,7 @@ def test_setup_files_installs_private_deploy_workflow_and_assets(runner, tmp_pat
     assert (repo_root / "deploy/bot/docker-compose.yml").exists()
     assert (repo_root / "deploy/bot/activate-release.sh").exists()
     workflow = (repo_root / ".github/workflows/deploy-backet-bot.yml").read_text(encoding="utf-8")
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.15/backet-0.1.15-py3-none-any.whl" in workflow
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.16/backet-0.1.16-py3-none-any.whl" in workflow
     state = load_or_initialize_setup_state(vault)
     assert state["setup"]["phases"]["prerequisites"]["status"] == "done"
     assert "Deployment Files" in result.output

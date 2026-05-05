@@ -101,3 +101,4 @@
 - [x] 13.4 Replace generic human output for bot policy, export, doctor, inspect, ask, model-check, and visibility commands with guided summaries and next actions while preserving `--json`.
 - [x] 13.5 Make focused visibility writes interactive in human terminals, with dry-run preview and confirmation by default, while preserving `--yes`, `--no-guided`, and non-interactive behavior.
 - [x] 13.6 Add CLI regression tests for the bot command center, visibility wizard, guided visibility writes, and human bot policy output.
+- [x] 13.7 Replace terse visibility action codes with a numbered guided editor that suggests fake-vault-derived notes/folders and add an end-to-end wizard test that writes player/excluded metadata without command-recipe output.

@@ -78,7 +78,7 @@ def run_guided_bot_setup(vault_root: Path, options: GuidedBotSetupOptions | None
             _echo_pending_result(result)
             return result
         if phase != SETUP_PHASES[-1] and not click.confirm("Continue to the next setup phase?", default=True):
-            click.echo("Stopped. Run `backet bot setup` again to resume from here.")
+            click.echo("Stopped. Reopen the guided setup when you are ready to resume.")
             return setup_status(vault_root)
 
     click.echo()
@@ -303,7 +303,7 @@ def _guide_deploy(vault_root: Path, options: GuidedBotSetupOptions) -> CommandRe
             "phase": "deploy",
             "status": PHASE_NEEDS_ACTION,
             "message": "Deployment not dispatched",
-            "next_actions": ["Run `backet bot setup deploy <vault> --watch` when you are ready."],
+            "next_actions": ["Continue through the guided deploy step when you are ready."],
             "warnings": [],
             "data": {},
         }
@@ -334,7 +334,7 @@ def _echo_pending_result(result: CommandResult) -> None:
     if actions:
         click.echo("Next:")
         for action in actions:
-            click.echo(f"  - {action}")
+            click.echo(f"  - {_humanize_pending_action(str(action))}")
 
 
 def _echo_file_summary(files: dict[str, Any]) -> None:
@@ -345,6 +345,24 @@ def _echo_file_summary(files: dict[str, Any]) -> None:
             click.echo(f"  {label}:")
             for value in values:
                 click.echo(f"    - {value}")
+
+
+def _humanize_pending_action(value: str) -> str:
+    if "backet bot setup files" in value:
+        return "Install or refresh the local deployment files from the prerequisites step."
+    if "backet bot setup discord" in value:
+        return "Continue the Discord step with the bot token, server, roles, and channels."
+    if "backet bot setup visibility" in value:
+        return "Continue the visibility review."
+    if "backet bot visibility set" in value:
+        return "Open the visibility editor and mark safe player-facing notes, or explicitly allow empty player canon."
+    if "backet bot setup github" in value:
+        return "Continue the GitHub step for repository, secrets, and variables."
+    if "backet bot setup oracle" in value:
+        return "Continue the Oracle VM step."
+    if "backet bot setup deploy" in value:
+        return "Continue the deploy step when setup files and vault state are pushed."
+    return value
 
 
 def _maybe_open_url(prompt: str, url: str) -> None:

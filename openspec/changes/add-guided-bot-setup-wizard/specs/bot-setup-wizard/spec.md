@@ -142,7 +142,7 @@ The setup wizard MUST review bot visibility policy and block deployment when pla
 
 #### Scenario: Visibility policy invalid
 - **WHEN** visibility validation reports invalid metadata or ambiguous player-facing policy
-- **THEN** the wizard MUST block deployment and recommend the relevant `backet bot visibility` commands needed to inspect or fix the vault
+- **THEN** the wizard MUST block deployment and offer the guided visibility editor needed to inspect or fix the vault
 
 #### Scenario: No player-visible canon
 - **WHEN** no notes are player-visible but setup otherwise succeeds
@@ -195,7 +195,11 @@ The system MUST provide guided human-mode entry points for the private bot comma
 
 #### Scenario: Open visibility editor
 - **WHEN** a user runs `backet bot visibility` in an interactive terminal
-- **THEN** the system MUST audit current visibility, explain that unmarked notes remain Storyteller-only, and offer guided actions to mark player-visible, Storyteller-only, excluded, list unclassified notes, or clear metadata
+- **THEN** the system MUST audit current visibility, explain that unmarked notes remain Storyteller-only, and offer numbered guided actions to mark player-visible, Storyteller-only, excluded, list unclassified notes, or clear metadata
+
+#### Scenario: Choose visibility targets from scanned vault context
+- **WHEN** a user marks or clears bot visibility through the guided editor
+- **THEN** the system MUST suggest candidate notes and folders from the scanned vault context and also allow a vault-relative path to be typed manually
 
 #### Scenario: Guided visibility write
 - **WHEN** a user runs a human-mode visibility write such as `backet bot visibility set`
@@ -203,4 +207,4 @@ The system MUST provide guided human-mode entry points for the private bot comma
 
 #### Scenario: Human bot command output
 - **WHEN** a user runs bot policy, export, doctor, inspect, ask, model-check, or visibility commands without `--json`
-- **THEN** the system MUST show concise summaries and next actions instead of raw nested structured dumps
+- **THEN** the system MUST show concise summaries and guided next actions instead of raw nested structured dumps or default command recipes

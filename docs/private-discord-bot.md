@@ -133,13 +133,15 @@ The setup wizard runs this review before deployment and can open the visibility 
 backet bot visibility
 ```
 
-The editor audits the vault, lists unclassified notes, previews changes, and asks before writing. The focused audit command is:
+The editor audits the vault, explains that unmarked notes stay Storyteller-only, then shows numbered choices to mark player-visible notes, mark Storyteller-only notes, exclude notes from export, review unclassified notes, clear metadata, refresh, or finish. For write actions it suggests notes and folders from the scanned vault, lets you pick a number or type a vault-relative path, previews the update, and asks before writing.
+
+The focused audit command is:
 
 ```bash
 backet bot setup visibility /path/to/vault
 ```
 
-The wizard summarizes player-visible, Storyteller-only, bot-excluded, unmarked, missing-topic, and rules corpus state. If there are no player-visible notes, deployment is blocked until you either mark notes or confirm that an empty player canon index is intentional:
+The wizard summarizes player-visible, Storyteller-only, bot-excluded, unmarked, missing-topic, and rules corpus state. If there are no player-visible notes, deployment is blocked until you either mark notes through the editor or confirm that an empty player canon index is intentional. For automation or scripts, the focused commands remain available:
 
 ```bash
 backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --dry-run
@@ -287,7 +289,7 @@ Run:
 backet bot setup visibility /path/to/vault
 ```
 
-Then mark approved notes with `backet bot visibility set`. Unmarked notes stay Storyteller-only.
+Then open the guided visibility editor and mark approved notes. Unmarked notes stay Storyteller-only.
 
 ### Incompatible bundle
 

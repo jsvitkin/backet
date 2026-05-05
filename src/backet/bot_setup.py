@@ -573,7 +573,7 @@ def run_visibility_setup(vault_root: Path, allow_empty_player: bool = False) -> 
         if not allow_empty_player:
             status = PHASE_NEEDS_ACTION
             next_actions.append(
-                "Mark player-facing notes with `backet bot visibility set`, or rerun visibility setup with --allow-empty-player."
+                "Open the guided visibility editor and mark player-facing notes, or explicitly allow empty player canon."
             )
     data = {
         "summary": {

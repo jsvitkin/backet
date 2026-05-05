@@ -35,9 +35,9 @@ def run_guided_bot_command_center(default_path: Path) -> CommandResult:
     click.echo("  7. Ask a dry-run bot question")
     click.echo("  8. Check local Llama model files")
     click.echo("  9. Run Discord bot in the foreground")
-    click.echo("  q. Quit")
-    choice = str(click.prompt("Action", default="2", show_default=False)).strip().lower()
-    if choice in {"q", "quit"}:
+    click.echo("  10. Finish")
+    choice = str(click.prompt("Choose a workflow", default="2", show_default=False)).strip().lower()
+    if choice in {"10", "q", "quit", "finish"}:
         return CommandResult(message="Backet bot command center closed", data={})
     if choice in {"1", "setup", "deploy"}:
         vault = _prompt_path("Vault path", default_path)
