@@ -144,10 +144,82 @@ def test_bot_runtime_keeps_unscoped_supplement_matches_answerable(runner, tmp_pa
         role_ids=["player-role"],
     )
 
-    assert "Closest permitted sources" in answer.text
+    assert "Relevant permitted rule text" in answer.text
     assert "Camarilla A" in answer.text
     assert "Camarilla B" in answer.text
     assert answer.sources[0]["source_type"] == "vault"
+
+
+def test_bot_playground_exports_fake_vault_and_prints_source_diagnostics(runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    _write_bot_config(vault)
+    _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nCourt customs.")
+    _ingest_book(
+        runner,
+        vault,
+        _create_text_pdf(
+            tmp_path / "rules.pdf",
+            [
+                _rule_page(
+                    "Hunger Frenzy",
+                    "A hunger frenzy makes the vampire seek blood from a nearby source until the hunger is addressed.",
+                )
+            ],
+        ),
+        "fake-core",
+        "Fake Core",
+        "core",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "bot",
+            "playground",
+            str(vault),
+            "How does hunger frenzy work?",
+            "--command",
+            "rules.ask",
+            "--role-id",
+            "player-role",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Bot playground" in result.output
+    assert "Mode: template-only" in result.output
+    assert "Answer" in result.output
+    assert "Retrieved Sources" in result.output
+    assert "Fake Core" in result.output
+    assert "{'schema_version'" not in result.output
+
+
+def test_bot_playground_accepts_question_from_current_vault(
+    runner,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    vault = _make_vault(tmp_path)
+    _write_bot_config(vault)
+    _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nCourt customs are public.")
+    monkeypatch.chdir(vault)
+
+    result = runner.invoke(
+        app,
+        [
+            "bot",
+            "playground",
+            "What court customs are public?",
+            "--command",
+            "canon.ask",
+            "--role-id",
+            "player-role",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert str(vault) in result.output.replace("\n", "")
+    assert "Court customs are public" in result.output
 
 
 def _make_vault(tmp_path: Path) -> Path:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import textwrap
 from typing import Any
 
+from backet.bot_answers import format_bot_source_label
 from backet.models import CommandResult, Issue
 from backet.output import console
 
@@ -76,16 +78,67 @@ def emit_bot_answer_report(result: CommandResult) -> None:
     _line("Access tier", data.get("access_tier"))
     _line("Response visibility", "private" if data.get("response_private") else "public")
     _line("Denied", _yes_no(data.get("denied")))
+    generation = dict(dict(data.get("diagnostics", {}) or {}).get("answer_generation", {}) or {})
+    if generation:
+        _line("Answer mode", generation.get("mode"))
+        _line("Fallback used", _yes_no(generation.get("fallback_used")))
+        if generation.get("diagnostics", {}).get("fallback_reason"):
+            _line("Fallback reason", generation["diagnostics"]["fallback_reason"])
     console.print()
     console.print("[bold]Answer[/bold]")
-    console.print(str(data.get("text") or ""))
+    console.print(str(data.get("text") or ""), markup=False, soft_wrap=True)
     sources = list(data.get("sources") or [])
     if sources:
         console.print()
         console.print("[bold]Sources[/bold]")
         for source in sources[:8]:
             if isinstance(source, dict):
-                console.print(f"  - {source.get('citation')}: {_source_label(source)}")
+                console.print(f"  - {source.get('citation')}: {format_bot_source_label(source)}")
+
+
+def emit_bot_playground_report(result: CommandResult) -> None:
+    data = result.data
+    console.print("[bold green]Bot playground[/bold green]")
+    _line("Vault", data.get("vault"))
+    _line("Bundle", data.get("bundle"))
+    _line("Command", data.get("command"))
+    _line("Mode", data.get("mode"))
+    _line("Source limit", data.get("limit"))
+    _print_visibility_summary(dict(data.get("export_summary", {}) or {}))
+    _print_issues(result.issues)
+    runs = list(data.get("runs") or [])
+    for index, run in enumerate(runs, start=1):
+        if not isinstance(run, dict):
+            continue
+        answer = dict(run.get("answer", {}) or {})
+        generation = dict(dict(answer.get("diagnostics", {}) or {}).get("answer_generation", {}) or {})
+        generation_diag = dict(generation.get("diagnostics", {}) or {})
+        console.print()
+        console.print(f"[bold]Run {index}[/bold]")
+        _line("Question", run.get("question"))
+        _line("Elapsed", f"{run.get('elapsed_seconds')}s")
+        _line("Access tier", answer.get("access_tier"))
+        _line("Response visibility", "private" if answer.get("response_private") else "public")
+        _line("Denied", _yes_no(answer.get("denied")))
+        if generation:
+            _line("Answer mode", generation.get("mode"))
+            _line("Fallback used", _yes_no(generation.get("fallback_used")))
+            if generation_diag.get("fallback_reason"):
+                _line("Fallback reason", generation_diag.get("fallback_reason"))
+        console.print()
+        console.print("[bold]Answer[/bold]")
+        console.print(str(answer.get("text") or ""), markup=False, soft_wrap=True)
+        debug_sources = list(run.get("source_debug") or [])
+        if debug_sources:
+            console.print()
+            console.print("[bold]Retrieved Sources[/bold]")
+            for source in debug_sources[:10]:
+                if isinstance(source, dict):
+                    _print_source_debug(source)
+        else:
+            console.print()
+            console.print("[bold]Retrieved Sources[/bold]")
+            console.print("  None")
 
 
 def emit_bot_model_check_report(result: CommandResult) -> None:
@@ -252,12 +305,27 @@ def _yes_no(value: Any) -> str:
     return "yes" if bool(value) else "no"
 
 
-def _source_label(source: dict[str, Any]) -> str:
-    if source.get("source_type") == "vault":
-        return f"{source.get('title')} ({source.get('relative_path')})"
-    if source.get("source_type") == "rules":
+def _print_source_debug(source: dict[str, Any]) -> None:
+    citation = source.get("citation")
+    kind = source.get("source_type")
+    title = source.get("title") or "untitled"
+    score = source.get("score")
+    reasons = ", ".join(str(reason) for reason in source.get("match_reasons", []) or []) or "none"
+    location = ""
+    if kind == "vault" and source.get("relative_path"):
+        location = f" ({source.get('relative_path')})"
+    if kind == "rules" and source.get("page_start"):
         page = source.get("page_start")
         if source.get("page_end") and source.get("page_end") != source.get("page_start"):
             page = f"{source.get('page_start')}-{source.get('page_end')}"
-        return f"{source.get('book_title')} p. {page} ({source.get('section_label')})"
-    return str(source)
+        location = f" p. {page}"
+    score_text = f"{float(score):.3f}" if isinstance(score, int | float) else str(score or "n/a")
+    console.print(f"  - {citation}: {title}{location}")
+    console.print(f"    score: {score_text}; matches: {reasons}")
+    excerpt = " ".join(str(source.get("excerpt") or "").split())
+    if excerpt:
+        wrapped = textwrap.wrap(excerpt, width=72, break_long_words=False, break_on_hyphens=False)
+        for line in wrapped[:3]:
+            console.print(f"    {line}", markup=False)
+        if len(wrapped) > 3:
+            console.print("    ...")

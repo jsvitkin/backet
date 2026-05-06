@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import textwrap
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ DEFAULT_MAX_RESPONSE_CHARS = 1900
 DEFAULT_PROMPT_SOURCE_CHARS = 720
 DEFAULT_TEMPLATE_SOURCE_LIMIT = 2
 DEFAULT_PROMPT_SOURCE_LIMIT = 3
+SOURCE_QUOTE_WIDTH = 90
 QUERY_TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
 QUERY_STOPWORDS = {
     "a",
@@ -59,6 +61,9 @@ QUERY_STOPWORDS = {
     "who",
     "why",
     "with",
+    "work",
+    "working",
+    "works",
 }
 
 
@@ -99,12 +104,12 @@ class TemplateAnswerGenerator:
                 diagnostics={"source_count": 0},
             )
         display_sources = _select_answer_sources(question, sources, limit=DEFAULT_TEMPLATE_SOURCE_LIMIT)
-        lines = ["Closest permitted sources:"]
+        lines = ["Relevant permitted rule text:"]
         for source in display_sources:
             snippet = _source_text_for_question(source, question, limit=DEFAULT_PROMPT_SOURCE_CHARS)
-            lines.append(f"[{source['citation']}] {_source_label(source)}\n{snippet}")
-        labels = "; ".join(_source_label(source) for source in display_sources)
-        lines.append(f"Sources: {labels}")
+            lines.append(f"**[{source['citation']}] {format_bot_source_label(source)}**\n{_format_source_quote(snippet)}")
+        labels = "; ".join(format_bot_source_label(source) for source in display_sources)
+        lines.append(f"**Sources:** {labels}")
         return GeneratedAnswer(
             text="\n".join(lines),
             mode=self.mode,
@@ -233,7 +238,7 @@ def build_llama_prompt(question: str, sources: list[dict[str, Any]], token_budge
         excerpt = _source_text_for_question(source, question, limit=source_limit)
         if not excerpt:
             continue
-        label = f"[{source['citation']}] {_source_label(source)}"
+        label = f"[{source['citation']}] {format_bot_source_label(source)}"
         block = f"{label}\n{excerpt}"
         blocks.append(block)
         remaining -= len(block)
@@ -355,18 +360,25 @@ def _extract_llama_text(data: dict[str, Any]) -> str:
     )
 
 
-def _source_label(source: dict[str, Any]) -> str:
+def format_bot_source_label(source: dict[str, Any]) -> str:
     if source["source_type"] == "vault":
         return f"{source['title']} ({source['relative_path']})"
     page = source["page_start"]
     if source.get("page_end") and source["page_end"] != source["page_start"]:
         page = f"{source['page_start']}-{source['page_end']}"
-    return f"{source['book_title']} p. {page} ({source['section_label']})"
+    section = _clean_section_label(str(source.get("section_label") or ""))
+    suffix = f" ({section})" if section else ""
+    return f"{source['book_title']} p. {page}{suffix}"
 
 
 def _source_text_for_question(source: dict[str, Any], question: str, limit: int) -> str:
     text = str(source.get("content") or source.get("excerpt") or "").strip()
     return _question_window(text, question, limit=limit)
+
+
+def _format_source_quote(snippet: str) -> str:
+    lines = textwrap.wrap(snippet, width=SOURCE_QUOTE_WIDTH, break_long_words=False, break_on_hyphens=False) or [snippet]
+    return "\n".join(f"> {line}" for line in lines)
 
 
 def _select_answer_sources(question: str, sources: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -375,24 +387,28 @@ def _select_answer_sources(question: str, sources: list[dict[str, Any]], limit: 
     terms = _question_terms(question)
     if not terms:
         return sources[:limit]
+    phrase = _question_phrase(terms)
 
-    ranked: list[tuple[int, int, float, int, dict[str, Any]]] = []
+    ranked: list[tuple[int, int, int, float, int, dict[str, Any]]] = []
     for index, source in enumerate(sources):
         text = str(source.get("content") or source.get("excerpt") or "").lower()
+        phrase_hit = 1 if phrase and phrase in text else 0
         term_hits = sum(1 for term in terms if term in text)
         exact_match = 1 if "exact" in set(source.get("match_reasons", [])) else 0
         score = float(source.get("score") or 0.0)
-        ranked.append((term_hits, exact_match, score, -index, source))
+        ranked.append((phrase_hit, term_hits, exact_match, score, -index, source))
 
-    relevant = [item for item in ranked if item[0] > 0 or item[1] > 0]
+    relevant = [item for item in ranked if item[0] > 0 or item[1] > 0 or item[2] > 0]
     if not relevant:
         return sources[:limit]
-    relevant.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3]))
-    return [item[4] for item in relevant[:limit]]
+    if any(item[0] > 0 for item in relevant):
+        relevant = [item for item in relevant if item[0] > 0]
+    relevant.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], -item[4]))
+    return [item[5] for item in relevant[:limit]]
 
 
 def _question_window(text: str, question: str, limit: int) -> str:
-    normalized = " ".join(text.split())
+    normalized = clean_bot_source_text(text)
     if not normalized or len(normalized) <= limit:
         return normalized
 
@@ -419,7 +435,7 @@ def _question_window(text: str, question: str, limit: int) -> str:
 def _best_window_start(lower_text: str, terms: list[str], limit: int) -> int:
     if not terms:
         return 0
-    phrase = " ".join(terms)
+    phrase = _question_phrase(terms)
     anchors: list[int] = []
     if len(terms) > 1:
         phrase_index = lower_text.find(phrase)
@@ -456,6 +472,33 @@ def _question_terms(question: str) -> list[str]:
         seen.add(term)
         terms.append(term)
     return terms
+
+
+def _question_phrase(terms: list[str]) -> str:
+    return " ".join(terms) if len(terms) > 1 else ""
+
+
+def clean_bot_source_text(text: str) -> str:
+    text = re.sub(r"\u00ad\s*", "", text)
+    cleaned = (
+        text.replace("\u0083", "-")
+        .replace("■", "-")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+    return " ".join(cleaned.split())
+
+
+def _clean_section_label(label: str) -> str:
+    cleaned = clean_bot_source_text(label)
+    if not cleaned:
+        return ""
+    compact = cleaned.replace(" ", "")
+    if len(compact) >= 4 and cleaned.count(" ") >= max(2, len(compact) // 2):
+        return ""
+    if compact.isdigit():
+        return ""
+    return cleaned
 
 
 def _fingerprint_text(text: str) -> str:

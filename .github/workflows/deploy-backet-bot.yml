@@ -30,7 +30,7 @@ jobs:
           BACKET_INSTALL_SPEC: ${{ vars.BACKET_INSTALL_SPEC }}
         run: |
           set -euo pipefail
-          install_spec="${BACKET_INSTALL_SPEC:-backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.20/backet-0.1.20-py3-none-any.whl}"
+          install_spec="${BACKET_INSTALL_SPEC:-backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.23/backet-0.1.23-py3-none-any.whl}"
           python -m pip install "${install_spec}"
 
       - name: Export private bot bundle

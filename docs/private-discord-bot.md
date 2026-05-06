@@ -256,6 +256,20 @@ backet bot doctor dist/bot-data
 backet bot ask dist/bot-data "What does the court know about Elysium?" --command canon.ask --role-id player-role
 ```
 
+For faster answer debugging, use the playground command. It exports a temporary bundle, runs the same bot runtime locally, uses fast template mode by default, and prints retrieved source scores and match reasons:
+
+```bash
+backet bot playground /path/to/vault "How does hunger frenzy work?" --command rules.ask --role-id player-role
+```
+
+From inside the vault directory, you can omit the path:
+
+```bash
+backet bot playground "How does hunger frenzy work?" --command rules.ask --role-id player-role
+```
+
+Add `--use-model` when you specifically want to test the configured local Llama endpoint. Add `--bundle-output dist/bot-playground --force` when you want to keep the exported bundle for inspection.
+
 The bundle shape is:
 
 ```text

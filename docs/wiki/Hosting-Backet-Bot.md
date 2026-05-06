@@ -279,6 +279,22 @@ next_phase: github
 
 Tokens, private keys, and model download tokens are not printed.
 
+## Local Answer Playground
+
+When a Discord answer looks wrong, test the same question locally first:
+
+```bash
+backet bot playground /path/to/vault "How does hunger frenzy work?" --command rules.ask --role-id player-role
+```
+
+From inside the vault directory, you can also run:
+
+```bash
+backet bot playground "How does hunger frenzy work?" --command rules.ask --role-id player-role
+```
+
+The playground exports a temporary bot bundle, answers in fast template mode, and shows which sources were retrieved with scores and match reasons. Use `--use-model` only when you want to test the configured local Llama endpoint. Use `--bundle-output dist/bot-playground --force` if you want to keep the bundle for manual inspection.
+
 ## Day-To-Day Redeploy
 
 When canon or rules change:

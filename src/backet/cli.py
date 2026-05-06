@@ -28,10 +28,12 @@ from backet.bot_output import (
     emit_bot_export_report,
     emit_bot_model_check_report,
     emit_bot_policy_report,
+    emit_bot_playground_report,
     emit_bot_visibility_audit_report,
     emit_bot_visibility_list_report,
     emit_bot_visibility_update_report,
 )
+from backet.bot_playground import run_bot_playground
 from backet.bot_runtime import answer_bot_query_result, inspect_bot_bundle
 from backet.bot_setup import (
     capture_secret_from_stdin_or_prompt,
@@ -610,6 +612,76 @@ def bot_ask_command(
             emit_bot_answer_report(result)
     except AppError as error:
         _handle_error(ctx, error)
+
+
+@bot_app.command("playground")
+def bot_playground_command(
+    ctx: typer.Context,
+    target: Annotated[
+        str,
+        typer.Argument(help="Vault path, or the question when running from the vault directory."),
+    ] = ".",
+    question: Annotated[str, typer.Argument(help="Question to run through the local playground.")] = "",
+    extra_questions: Annotated[
+        list[str] | None,
+        typer.Option("--question", help="Additional question to run. Can be repeated."),
+    ] = None,
+    command: Annotated[
+        str,
+        typer.Option("--command", help="Command route: rules.ask, canon.ask, st.ask, st.npc, st.plot, st.statblock."),
+    ] = "rules.ask",
+    user_id: Annotated[str | None, typer.Option("--user-id", help="Discord user ID for access simulation.")] = None,
+    role_ids: Annotated[
+        list[str] | None,
+        typer.Option("--role-id", help="Repeatable Discord role ID for access simulation."),
+    ] = None,
+    private: Annotated[
+        bool | None,
+        typer.Option("--private/--public", help="Override response visibility for the playground run."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of sources per corpus.")] = 4,
+    use_model: Annotated[
+        bool,
+        typer.Option("--use-model/--template-only", help="Use the configured local model instead of fast template mode."),
+    ] = False,
+    bundle_output: Annotated[
+        Path | None,
+        typer.Option("--bundle-output", help="Keep the exported playground bundle at this path."),
+    ] = None,
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing --bundle-output directory.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        vault, questions = _resolve_bot_playground_args(target, question, extra_questions or [])
+        result = run_bot_playground(
+            vault_root=vault,
+            questions=questions,
+            command=command,
+            user_id=user_id,
+            role_ids=role_ids or [],
+            private=private,
+            limit=limit,
+            use_model=use_model,
+            bundle_output=bundle_output,
+            force=force,
+        )
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_playground_report(result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+def _resolve_bot_playground_args(target: str, question: str, extra_questions: list[str]) -> tuple[Path, list[str]]:
+    stripped_target = target.strip()
+    stripped_question = question.strip()
+    if stripped_question:
+        return Path(stripped_target).expanduser().resolve(), [stripped_question, *extra_questions]
+    candidate = Path(stripped_target).expanduser()
+    if candidate.exists() and candidate.is_dir():
+        return candidate.resolve(), extra_questions
+    return Path(".").resolve(), [stripped_target, *extra_questions]
 
 
 @bot_app.command("run")

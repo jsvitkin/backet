@@ -96,13 +96,35 @@ def test_answer_context_windows_use_full_source_content_near_question_terms() ->
 
     template = TemplateAnswerGenerator().generate("What is a hunger frenzy?", sources)
     prompt = build_llama_prompt("What is a hunger frenzy?", sources, token_budget=64)
+    normalized_template = " ".join(template.text.replace("> ", "").split())
 
+    assert "Relevant permitted rule text" in template.text
     assert "Hunger frenzy: temptation causes hunger frenzy" in template.text
-    assert "fresh human blood from the closest source" in template.text
+    assert "fresh human blood from the closest source" in normalized_template
     assert "Noisy Supplement" not in template.text
     assert "Hunger frenzy: temptation causes hunger frenzy" in prompt
     assert "Noisy Supplement" not in prompt
     assert "Fury frenzy and unrelated table fragments. Many filler words" not in prompt
+
+
+def test_template_answer_cleans_pdf_heading_noise() -> None:
+    sources = [
+        {
+            "source_type": "rules",
+            "citation": "R1",
+            "book_title": "Core Rulebook",
+            "page_start": 265,
+            "page_end": 265,
+            "section_label": "D I S C I P L I N E S",
+            "content": "Mask of a Thousand Faces lets the vampire mimic a studied human appearance.",
+        }
+    ]
+
+    template = TemplateAnswerGenerator().generate("How does mask of a thousand faces work?", sources)
+
+    assert "D I S C I P L I N E S" not in template.text
+    assert "Core Rulebook p. 265" in template.text
+    assert "> Mask of a Thousand Faces lets" in template.text
 
 
 def test_llama_generator_uses_endpoint_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
