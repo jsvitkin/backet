@@ -31,4 +31,4 @@ echo "Preparing optional Llama model"
 echo "Starting Backet bot services"
 docker compose -f "${COMPOSE_FILE}" --env-file "${ROOT}/deploy/.env" up -d --build
 echo "Inspecting running Backet bot container"
-docker compose -f "${COMPOSE_FILE}" exec -T backet-bot bot inspect /srv/backet-bot/data/current
+docker compose -f "${COMPOSE_FILE}" exec -T backet-bot backet bot inspect /srv/backet-bot/data/current

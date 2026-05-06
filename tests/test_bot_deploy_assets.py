@@ -25,6 +25,7 @@ def test_oracle_vm_deploy_assets_are_present_and_private_by_default() -> None:
     assert "deploy/bot/Dockerfile" not in compose
     assert "replace-with-github-secret-or-vm-secret" in env_example
     assert "backet bot doctor" in activate
+    assert "backet bot inspect" in activate
     assert "data/current" in activate
     assert "docker compose" in activate
     assert "sha256sum --check" in bootstrap

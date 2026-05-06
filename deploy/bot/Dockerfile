@@ -12,7 +12,7 @@ RUN python -m pip install --upgrade pip \
     && if [ -n "${BACKET_INSTALL_SPEC}" ]; then \
          printf '%s\n' "${BACKET_INSTALL_SPEC}" > /tmp/backet-requirements.txt; \
        else \
-         printf '%s\n' 'backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.17/backet-0.1.17-py3-none-any.whl' > /tmp/backet-requirements.txt; \
+         printf '%s\n' 'backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.18/backet-0.1.18-py3-none-any.whl' > /tmp/backet-requirements.txt; \
        fi \
     && python -m pip install -r /tmp/backet-requirements.txt \
     && rm /tmp/backet-requirements.txt

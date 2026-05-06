@@ -84,8 +84,14 @@ def load_distribution_metadata() -> DistributionMetadata:
             return DistributionMetadata.from_path(candidate)
 
     resource = files("backet.resources").joinpath("compatibility.json")
-    with as_file(resource) as resource_path:
-        return DistributionMetadata.from_path(resource_path)
+    try:
+        with as_file(resource) as resource_path:
+            return DistributionMetadata.from_path(resource_path)
+    except FileNotFoundError:
+        source_candidate = Path(__file__).resolve().parents[2] / "metadata" / "compatibility.json"
+        if source_candidate.exists():
+            return DistributionMetadata.from_path(source_candidate)
+        raise
 
 
 @contextmanager
