@@ -197,7 +197,7 @@ def test_update_check_command_supports_json_and_human_output(runner, monkeypatch
 
     def fake_urlopen(*_args: object, **_kwargs: object) -> FakeResponse:
         calls.append("network")
-        return FakeResponse(fake_latest_response("0.1.20"))
+        return FakeResponse(fake_latest_response("0.1.21"))
 
     monkeypatch.setattr(cli_update, "urlopen", fake_urlopen)
 
@@ -208,7 +208,7 @@ def test_update_check_command_supports_json_and_human_output(runner, monkeypatch
     assert json_result.exit_code == 0
     payload = json.loads(json_result.stdout)
     assert payload["data"]["update_available"] is True
-    assert payload["data"]["latest_version"] == "0.1.20"
+    assert payload["data"]["latest_version"] == "0.1.21"
     assert human_result.exit_code == 0
     assert "A Backet update is available" in human_result.output
 
@@ -218,7 +218,7 @@ def test_update_apply_yes_runs_pipx_install_with_resolved_wheel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[list[str]] = []
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.20")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.21")))
     monkeypatch.setenv("BACKET_PIPX", "/tmp/pipx")
 
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -237,7 +237,7 @@ def test_update_apply_yes_runs_pipx_install_with_resolved_wheel(
             "/tmp/pipx",
             "install",
             "--force",
-            "https://github.com/jsvitkin/backet/releases/download/v0.1.20/backet-0.1.20-py3-none-any.whl",
+            "https://github.com/jsvitkin/backet/releases/download/v0.1.21/backet-0.1.21-py3-none-any.whl",
         ]
     ]
 
@@ -258,7 +258,7 @@ def test_update_apply_reports_already_current_without_reinstalling(
 
 
 def test_update_apply_reports_unsupported_updater(runner, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.20")))
+    monkeypatch.setattr(cli_update, "urlopen", lambda *_args, **_kwargs: FakeResponse(fake_latest_response("0.1.21")))
     monkeypatch.delenv("BACKET_PIPX", raising=False)
     monkeypatch.setattr(cli_update.shutil, "which", lambda _name: None)
 

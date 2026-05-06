@@ -20,6 +20,7 @@ from backet.errors import AppError
 from backet.models import CommandResult
 
 LOGGER = logging.getLogger("backet.bot.discord")
+DISCORD_ERROR_MESSAGE = "Backet hit an internal bot error before it could finish this command. The operator logs have the details."
 
 
 @dataclass(slots=True)
@@ -44,6 +45,7 @@ def run_discord_bot_result(bundle_root: Path, token: str | None = None, guild_id
 
 
 def run_discord_bot(bundle_root: Path, token: str | None = None, guild_id: str | None = None) -> None:
+    _configure_logging()
     discord = _require_discord()
     bundle = BotBundle.load(bundle_root)
     resolved_token = token or os.environ.get("DISCORD_TOKEN")
@@ -148,6 +150,9 @@ class _BacketDiscordClient:
         self.client.setup_hook = self._setup_hook
 
     def run(self, token: str, log_handler: Any | None = None) -> None:
+        if log_handler is None:
+            self.client.run(token)
+            return
         self.client.run(token, log_handler=log_handler)
 
     async def _setup_hook(self) -> None:
@@ -185,31 +190,31 @@ class _BacketDiscordClient:
 
         @bot.command(name="sources", description="Show sources from your most recent bot answer.")
         async def bot_sources(interaction: Any) -> None:
-            context = _context_from_interaction(interaction)
-            answer = self.recent_answers.get(str(context.user_id))
-            if answer is None:
-                await interaction.response.send_message(
-                    "No recent bot answer found for you.",
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                return
-            lines = [_source_summary(source) for source in answer.sources] or ["No sources were used."]
-            await interaction.response.send_message(
-                sanitize_discord_mentions("\n".join(lines)),
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            try:
+                await self._handle_sources(interaction)
+            except Exception:
+                LOGGER.exception("discord_bot_command_failed", extra={"command": "bot.sources"})
+                await self._send_error(interaction)
 
         @bot.command(name="health", description="Show bot health.")
         async def bot_health(interaction: Any) -> None:
-            context = _context_from_interaction(interaction)
-            health = build_discord_health(self.bundle, context)
-            await interaction.response.send_message(
-                sanitize_discord_mentions(_format_health(health)),
-                ephemeral=True,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            try:
+                await self._handle_health(interaction)
+            except Exception:
+                LOGGER.exception("discord_bot_command_failed", extra={"command": "bot.health"})
+                await self._send_error(interaction)
+
+        @bot.command(name="help", description="Show Backet bot commands.")
+        async def bot_help(interaction: Any) -> None:
+            try:
+                await interaction.response.send_message(
+                    _format_help(),
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception:
+                LOGGER.exception("discord_bot_command_failed", extra={"command": "bot.help"})
+                await self._send_error(interaction)
 
         self.tree.add_command(rules)
         self.tree.add_command(canon)
@@ -217,25 +222,81 @@ class _BacketDiscordClient:
         self.tree.add_command(bot)
 
     async def _handle_question(self, interaction: Any, command: str, question: str, private: bool | None) -> None:
+        try:
+            context = _context_from_interaction(interaction)
+            preliminary_private = True if command.startswith("st.") else private
+            await interaction.response.defer(
+                ephemeral=preliminary_private if preliminary_private is not None else True,
+                thinking=True,
+            )
+            answer = await asyncio.to_thread(
+                evaluate_discord_request,
+                self.bundle,
+                context,
+                command,
+                question,
+                preliminary_private,
+            )
+            if context.user_id:
+                self.recent_answers[str(context.user_id)] = answer
+            for part in answer.parts:
+                await interaction.followup.send(
+                    part,
+                    ephemeral=answer.response_private,
+                    allowed_mentions=self.discord.AllowedMentions.none(),
+                )
+        except Exception:
+            LOGGER.exception("discord_bot_command_failed", extra={"command": command})
+            await self._send_error(interaction)
+
+    async def _handle_sources(self, interaction: Any) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
         context = _context_from_interaction(interaction)
-        preliminary_private = True if command.startswith("st.") else private
-        await interaction.response.defer(ephemeral=preliminary_private if preliminary_private is not None else True, thinking=True)
-        answer = await asyncio.to_thread(
-            evaluate_discord_request,
-            self.bundle,
-            context,
-            command,
-            question,
-            preliminary_private,
-        )
-        if context.user_id:
-            self.recent_answers[str(context.user_id)] = answer
-        for part in answer.parts:
+        answer = self.recent_answers.get(str(context.user_id))
+        if answer is None:
             await interaction.followup.send(
-                part,
-                ephemeral=answer.response_private,
+                "No recent bot answer found for you.",
+                ephemeral=True,
                 allowed_mentions=self.discord.AllowedMentions.none(),
             )
+            return
+        lines = [_source_summary(source) for source in answer.sources] or ["No sources were used."]
+        text = sanitize_discord_mentions("\n".join(lines))
+        for part in split_discord_response(text):
+            await interaction.followup.send(
+                part,
+                ephemeral=True,
+                allowed_mentions=self.discord.AllowedMentions.none(),
+            )
+
+    async def _handle_health(self, interaction: Any) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        context = _context_from_interaction(interaction)
+        health = build_discord_health(self.bundle, context)
+        text = sanitize_discord_mentions(_format_health(health))
+        for part in split_discord_response(text):
+            await interaction.followup.send(
+                part,
+                ephemeral=True,
+                allowed_mentions=self.discord.AllowedMentions.none(),
+            )
+
+    async def _send_error(self, interaction: Any) -> None:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    DISCORD_ERROR_MESSAGE,
+                    ephemeral=True,
+                    allowed_mentions=self.discord.AllowedMentions.none(),
+                )
+                return
+            await interaction.response.send_message(
+                DISCORD_ERROR_MESSAGE,
+                ephemeral=True,
+                allowed_mentions=self.discord.AllowedMentions.none(),
+            )
+        except Exception:
+            LOGGER.exception("discord_bot_error_response_failed")
 
 
 def _require_discord() -> Any:
@@ -249,6 +310,16 @@ def _require_discord() -> Any:
             exit_code=2,
         ) from exc
     return discord
+
+
+def _configure_logging() -> None:
+    level_name = os.environ.get("BACKET_LOG_LEVEL", "INFO").strip().upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root = logging.getLogger()
+    if root.handlers:
+        root.setLevel(level)
+        return
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 
 def _context_from_interaction(interaction: Any) -> DiscordRequestContext:
@@ -290,4 +361,55 @@ def _source_summary(source: dict[str, Any]) -> str:
 
 
 def _format_health(health: dict[str, Any]) -> str:
-    return "\n".join(f"{key}: {value}" for key, value in health.items())
+    lines = [
+        f"ready: {_format_bool(health.get('ready'))}",
+        f"bundle schema: {health.get('bundle_schema_version', 'unknown')}",
+        f"answer mode: {health.get('answer_mode', 'template')}",
+    ]
+    if health.get("guild_id"):
+        lines.append(f"guild id: {health['guild_id']}")
+    if health.get("exported_at"):
+        lines.append(f"exported at: {health['exported_at']}")
+    indexes = dict(health.get("indexes") or {})
+    for scope in ("player", "storyteller"):
+        meta = dict(indexes.get(scope) or {})
+        if meta:
+            lines.append(f"{scope} index: {meta.get('note_count', 0)} notes, {meta.get('chunk_count', 0)} chunks")
+    rules = dict(health.get("rules") or {})
+    if rules:
+        included = "included" if rules.get("included") else "not included"
+        size = _format_bytes(int(rules.get("size_bytes") or 0)) if rules.get("size_bytes") else "unknown size"
+        path = rules.get("path") or "unknown path"
+        lines.append(f"rules: {included}, {size}, {path}")
+    return "\n".join(lines)
+
+
+def _format_help() -> str:
+    return "\n".join(
+        [
+            "Backet bot commands:",
+            "/rules ask - ask player-available rules questions.",
+            "/canon ask - ask player-safe canon questions.",
+            "/st ask - ask Storyteller-only mixed questions.",
+            "/st npc - ask Storyteller-only NPC questions.",
+            "/st plot - ask Storyteller-only plot questions.",
+            "/bot sources - show sources from your latest bot answer.",
+            "/bot health - show runtime health.",
+            "/bot help - show this help.",
+        ]
+    )
+
+
+def _format_bool(value: Any) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
+def _format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{size} B"

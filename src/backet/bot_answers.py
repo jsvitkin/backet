@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import socket
 import urllib.error
 import urllib.request
@@ -115,7 +116,7 @@ class LlamaLocalAnswerGenerator:
         fallback: AnswerGenerator | None = None,
     ) -> None:
         config = dict(model_config or {})
-        self.endpoint = str(config.get("endpoint") or DEFAULT_LLAMA_ENDPOINT)
+        self.endpoint = str(config.get("endpoint") or os.environ.get("BACKET_LLAMA_ENDPOINT") or DEFAULT_LLAMA_ENDPOINT)
         self.timeout_seconds = float(config.get("timeout_seconds") or config.get("timeout") or DEFAULT_LLAMA_TIMEOUT_SECONDS)
         self.token_budget = int(config.get("token_budget") or DEFAULT_LLAMA_TOKEN_BUDGET)
         self.max_response_chars = int(config.get("max_response_chars") or DEFAULT_MAX_RESPONSE_CHARS)

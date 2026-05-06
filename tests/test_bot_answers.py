@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from backet.bot_answers import LlamaLocalAnswerGenerator, validate_llama_model_files
 from backet.bot_runtime import BotBundle, answer_bot_query
 from backet.cli import app
@@ -58,6 +60,14 @@ def test_llama_generator_falls_back_on_timeout_and_missing_citations() -> None:
     assert "[V1]" in timeout.text
     assert missing_citation.fallback_used is True
     assert missing_citation.diagnostics["fallback_reason"] == "bot_llama_output_missing_citation"
+
+
+def test_llama_generator_uses_endpoint_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BACKET_LLAMA_ENDPOINT", "http://llama:8080/completion")
+
+    generator = LlamaLocalAnswerGenerator(model_config={})
+
+    assert generator.endpoint == "http://llama:8080/completion"
 
 
 def test_llama_model_check_validates_vm_local_path_and_checksum(runner, tmp_path: Path) -> None:

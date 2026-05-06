@@ -57,6 +57,44 @@ AUDIT_FINDING_CATEGORIES = {"maintenance", "review", "notice", "blocked", "scope
 MANUAL_REPLACEMENT_MIN_CHARS = 20
 REPAIR_SCORE_IMPROVEMENT_THRESHOLD = 0.15
 FTS_TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
+RULE_QUERY_STOPWORDS = {
+    "a",
+    "about",
+    "an",
+    "and",
+    "are",
+    "as",
+    "ask",
+    "at",
+    "be",
+    "by",
+    "can",
+    "do",
+    "does",
+    "explain",
+    "for",
+    "from",
+    "how",
+    "i",
+    "in",
+    "is",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "please",
+    "tell",
+    "that",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "who",
+    "why",
+    "with",
+}
 SEMANTIC_WEIGHT = 0.75
 SUPPLEMENT_SCOPE_BOOST = 0.15
 RULE_SEMANTIC_LIMIT = 40
@@ -2885,7 +2923,7 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
 
 def _candidate_has_precedence_scope(candidate: RuleSearchCandidate, scope_tags: list[str]) -> bool:
     if not scope_tags:
-        return True
+        return False
     requested = set(scope_tags)
     authoritative_tags = {
         assertion["tag"]
@@ -3081,8 +3119,6 @@ def _score_rule_candidate(candidate: RuleSearchCandidate, scope_tags: list[str])
         reasons.add("retrieval-metadata")
 
     if candidate.tier == "supplement":
-        if not scope_tags:
-            reasons.add("supplement-precedence")
         authoritative_overlap = _scope_assertion_overlap(candidate, scope_tags, authoritative=True)
         contextual_overlap = _scope_assertion_overlap(candidate, scope_tags, authoritative=False)
         fallback_overlap = len(set(candidate.scope_tags) & set(scope_tags)) if candidate.scope_fallback_used else 0
@@ -3100,9 +3136,6 @@ def _score_rule_candidate(candidate: RuleSearchCandidate, scope_tags: list[str])
             score += SUPPLEMENT_SCOPE_BOOST + (0.03 * fallback_overlap)
         elif scope_tags:
             reasons.add("scope-mismatch")
-        elif candidate.scope_tags:
-            score += SUPPLEMENT_SCOPE_BOOST + (0.03 * len(candidate.scope_tags))
-            reasons.add("scope-assertion" if candidate.scope_assertions else "source-scope-fallback")
     elif scope_tags:
         reasons.add("core-fallback")
 
@@ -3549,7 +3582,11 @@ def _audit_summary(connection: sqlite3.Connection, book_id: str) -> dict[str, An
 
 
 def build_rules_fts_query(text: str) -> str:
-    terms = [term for term in FTS_TOKEN_PATTERN.findall(text.lower()) if len(term) > 1]
+    terms = [
+        term
+        for term in FTS_TOKEN_PATTERN.findall(text.lower())
+        if len(term) > 1 and term not in RULE_QUERY_STOPWORDS
+    ]
     return " OR ".join(f'"{term}"' for term in terms)
 
 

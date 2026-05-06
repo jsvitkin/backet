@@ -12,6 +12,7 @@ from backet.cli import app
 from backet.embeddings import EmbeddingResult
 from backet.errors import AppError
 from backet.rules import (
+    build_rules_fts_query,
     classify_rule_chunk,
     ingest_rulebook,
     normalize_scope_tags,
@@ -35,6 +36,10 @@ def test_split_rule_chunks_preserves_paragraph_boundaries() -> None:
 
     assert len(chunks) >= 2
     assert chunks[0].startswith("Paragraph 1")
+
+
+def test_rules_fts_query_drops_question_stopwords() -> None:
+    assert build_rules_fts_query("What is a hunger check?") == '"hunger" OR "check"'
 
 
 def test_rules_ingest_clean_pdf_and_query_metadata(runner, tmp_path: Path) -> None:
@@ -477,6 +482,37 @@ def test_rules_query_applies_supplement_precedence_and_core_fallback(runner, tmp
     payload = json.loads(result.stdout)
     assert payload["data"]["primary_results"][0]["book_id"] == "camarilla"
     assert payload["data"]["fallback_results"][0]["book_id"] == "core-v5"
+
+
+def test_rules_query_without_scope_prefers_core_and_keeps_supplements_as_fallback(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    core_pdf = _create_text_pdf(
+        tmp_path / "core.pdf",
+        [
+            _rule_page(
+                "Blood Potency",
+                "Core rules explain Blood Potency for all vampires. Blood Potency controls blood surge, mending, and feeding limitations.",
+            )
+        ],
+    )
+    supplement_pdf = _create_text_pdf(
+        tmp_path / "supplement.pdf",
+        [
+            _rule_page(
+                "Ancient Icon",
+                "This supplement relic affects vampires with Blood Potency five or greater and changes how their Hunger can be reduced.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, core_pdf, "core-v5", "Core Rulebook", "core")
+    _ingest_book(runner, vault, supplement_pdf, "icon-book", "Icon Book", "supplement")
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "blood potency", "--limit", "2"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["primary_results"][0]["book_id"] == "core-v5"
+    assert payload["data"]["fallback_results"][0]["book_id"] == "icon-book"
 
 
 def test_rules_ingest_generates_scope_assertions_and_review_commands(runner, tmp_path: Path) -> None:

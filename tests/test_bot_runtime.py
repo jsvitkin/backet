@@ -99,7 +99,7 @@ def test_bot_ask_cli_exercises_runtime_without_discord(runner, tmp_path: Path) -
     assert payload["data"]["sources"][0]["relative_path"] == "Player Primer.md"
 
 
-def test_bot_runtime_surfaces_rule_ambiguity(runner, tmp_path: Path) -> None:
+def test_bot_runtime_keeps_unscoped_supplement_matches_answerable(runner, tmp_path: Path) -> None:
     vault = _make_vault(tmp_path)
     _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nCourt customs.")
     _ingest_book(
@@ -144,9 +144,10 @@ def test_bot_runtime_surfaces_rule_ambiguity(runner, tmp_path: Path) -> None:
         role_ids=["player-role"],
     )
 
-    assert "multiple comparable rule sources" in answer.text
+    assert "I found permitted sources" in answer.text
     assert "Camarilla A" in answer.text
     assert "Camarilla B" in answer.text
+    assert answer.sources[0]["source_type"] == "vault"
 
 
 def _make_vault(tmp_path: Path) -> Path:

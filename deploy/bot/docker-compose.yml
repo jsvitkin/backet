@@ -12,6 +12,7 @@ services:
     environment:
       BACKET_SKIP_UPDATE_CHECK: "1"
       BACKET_BOT_BUNDLE: /srv/backet-bot/data/current
+      BACKET_LLAMA_ENDPOINT: ${BACKET_LLAMA_ENDPOINT:-http://llama:8080/completion}
     volumes:
       - /srv/backet-bot/data:/srv/backet-bot/data:ro
       - /srv/backet-bot/releases:/srv/backet-bot/releases:ro

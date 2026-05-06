@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from backet.bot_discord import DiscordRequestContext, build_discord_health, evaluate_discord_request
+from backet.bot_discord import DiscordRequestContext, _format_health, _format_help, build_discord_health, evaluate_discord_request
 from backet.bot_runtime import BotBundle, open_index_readonly
 from backet.cli import app
 from backet.vault import initialize_vault
@@ -100,6 +100,32 @@ def test_discord_health_hides_sensitive_details_from_players(runner, tmp_path: P
     assert "guild_id" not in player
     assert storyteller["guild_id"] == "guild-a"
     assert storyteller["indexes"]["storyteller"]["note_count"] == 1
+
+
+def test_discord_health_format_is_compact_for_storytellers(runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    _write_bot_config(vault, guild_id="guild-a")
+    _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nCourt customs.")
+    output = _export_bundle(runner, vault, tmp_path)
+    bundle = BotBundle.load(output)
+    bundle.manifest["indexes"]["storyteller"]["relative_paths"] = [f"Note {index}.md" for index in range(500)]
+
+    health = build_discord_health(
+        bundle,
+        DiscordRequestContext(guild_id="guild-a", user_id="storyteller", role_ids=["st-role"], channel_id="allowed"),
+    )
+    text = _format_health(health)
+
+    assert len(text) < 1900
+    assert "storyteller index: 1 notes" in text
+    assert "Note 499.md" not in text
+
+
+def test_discord_help_includes_registered_bot_help_command() -> None:
+    text = _format_help()
+
+    assert "/bot help" in text
+    assert "/rules ask" in text
 
 
 def _make_vault(tmp_path: Path) -> Path:
