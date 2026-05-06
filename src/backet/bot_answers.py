@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -17,6 +18,46 @@ DEFAULT_LLAMA_ENDPOINT = "http://127.0.0.1:8080/completion"
 DEFAULT_LLAMA_TIMEOUT_SECONDS = 20.0
 DEFAULT_LLAMA_TOKEN_BUDGET = 900
 DEFAULT_MAX_RESPONSE_CHARS = 1900
+DEFAULT_PROMPT_SOURCE_CHARS = 720
+QUERY_TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
+QUERY_STOPWORDS = {
+    "a",
+    "about",
+    "an",
+    "and",
+    "are",
+    "as",
+    "ask",
+    "at",
+    "be",
+    "by",
+    "can",
+    "do",
+    "does",
+    "explain",
+    "for",
+    "from",
+    "how",
+    "i",
+    "in",
+    "is",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "please",
+    "tell",
+    "that",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "who",
+    "why",
+    "with",
+}
 
 
 @dataclass(slots=True)
@@ -55,10 +96,11 @@ class TemplateAnswerGenerator:
                 mode=self.mode,
                 diagnostics={"source_count": 0},
             )
-        lines = ["I found permitted sources for that:"]
-        for source in sources[:4]:
-            lines.append(f"[{source['citation']}] {str(source['excerpt']).strip()}")
-        labels = "; ".join(_source_label(source) for source in sources[:4])
+        lines = ["Closest permitted sources:"]
+        for source in sources[:3]:
+            snippet = _source_text_for_question(source, question, limit=DEFAULT_PROMPT_SOURCE_CHARS)
+            lines.append(f"[{source['citation']}] {_source_label(source)}\n{snippet}")
+        labels = "; ".join(_source_label(source) for source in sources[:3])
         lines.append(f"Sources: {labels}")
         return GeneratedAnswer(
             text="\n".join(lines),
@@ -171,23 +213,24 @@ def generate_answer_from_config(
 
 
 def build_llama_prompt(question: str, sources: list[dict[str, Any]], token_budget: int) -> str:
-    char_budget = max(1200, token_budget * 4)
+    char_budget = max(2200, min(6000, token_budget * 24))
     header = (
         "You are Backet-bot. Answer only from the SOURCE blocks below. "
-        "Every factual claim must cite one or more source labels like [V1] or [R1]. "
-        "If the sources are insufficient, say that the permitted sources are insufficient.\n\n"
+        "Every sentence must cite one or more source labels like [V1] or [R1]. "
+        "If the sources are insufficient, say that the permitted sources are insufficient. "
+        "Write 2-4 concise sentences and do not invent beyond the sources.\n\n"
         f"QUESTION:\n{question.strip()}\n\n"
         "SOURCES:\n"
     )
     remaining = max(200, char_budget - len(header))
     blocks: list[str] = []
     for source in sources:
-        excerpt = str(source.get("excerpt", "")).strip()
+        source_limit = min(DEFAULT_PROMPT_SOURCE_CHARS, max(240, remaining // max(1, len(sources))))
+        excerpt = _source_text_for_question(source, question, limit=source_limit)
         if not excerpt:
             continue
         label = f"[{source['citation']}] {_source_label(source)}"
-        block_budget = max(160, remaining // max(1, len(sources)))
-        block = f"{label}\n{excerpt[:block_budget]}"
+        block = f"{label}\n{excerpt}"
         blocks.append(block)
         remaining -= len(block)
         if remaining <= 0:
@@ -315,6 +358,78 @@ def _source_label(source: dict[str, Any]) -> str:
     if source.get("page_end") and source["page_end"] != source["page_start"]:
         page = f"{source['page_start']}-{source['page_end']}"
     return f"{source['book_title']} p. {page} ({source['section_label']})"
+
+
+def _source_text_for_question(source: dict[str, Any], question: str, limit: int) -> str:
+    text = str(source.get("content") or source.get("excerpt") or "").strip()
+    return _question_window(text, question, limit=limit)
+
+
+def _question_window(text: str, question: str, limit: int) -> str:
+    normalized = " ".join(text.split())
+    if not normalized or len(normalized) <= limit:
+        return normalized
+
+    terms = _question_terms(question)
+    lower = normalized.lower()
+    start = _best_window_start(lower, terms, limit)
+    end = min(len(normalized), start + limit)
+    if start > 0 and not normalized[start - 1].isspace():
+        next_space = normalized.find(" ", start)
+        if 0 <= next_space < start + 40:
+            start = next_space + 1
+    if end < len(normalized):
+        previous_space = normalized.rfind(" ", start, end)
+        if previous_space > start + int(limit * 0.6):
+            end = previous_space
+    snippet = normalized[start:end].strip()
+    if start > 0:
+        snippet = f"... {snippet}"
+    if end < len(normalized):
+        snippet = f"{snippet} ..."
+    return snippet
+
+
+def _best_window_start(lower_text: str, terms: list[str], limit: int) -> int:
+    if not terms:
+        return 0
+    phrase = " ".join(terms)
+    anchors: list[int] = []
+    if len(terms) > 1:
+        phrase_index = lower_text.find(phrase)
+        if phrase_index >= 0:
+            return phrase_index
+    for term in terms:
+        index = lower_text.find(term)
+        while index >= 0 and len(anchors) < 40:
+            anchors.append(index)
+            index = lower_text.find(term, index + len(term))
+    if not anchors:
+        return 0
+
+    best_start = 0
+    best_score = -1
+    for anchor in anchors:
+        current_start = max(0, anchor - limit // 4)
+        window = lower_text[current_start : current_start + limit]
+        score = sum(window.count(term) for term in terms)
+        if phrase and phrase in window:
+            score += 5
+        if score > best_score or (score == best_score and current_start < best_start):
+            best_score = score
+            best_start = current_start
+    return best_start
+
+
+def _question_terms(question: str) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in QUERY_TOKEN_PATTERN.findall(question.lower()):
+        if len(term) <= 1 or term in QUERY_STOPWORDS or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
 
 
 def _fingerprint_text(text: str) -> str:

@@ -144,7 +144,7 @@ def test_bot_runtime_keeps_unscoped_supplement_matches_answerable(runner, tmp_pa
         role_ids=["player-role"],
     )
 
-    assert "I found permitted sources" in answer.text
+    assert "Closest permitted sources" in answer.text
     assert "Camarilla A" in answer.text
     assert "Camarilla B" in answer.text
     assert answer.sources[0]["source_type"] == "vault"

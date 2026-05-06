@@ -385,6 +385,7 @@ def retrieve_rule_sources(bundle: BotBundle, question: str, limit: int) -> list[
                 "page_end": source["page_end"],
                 "section_label": source["section_label"],
                 "excerpt": source["excerpt"],
+                "content": source["content"],
                 "score": source["score"],
                 "match_reasons": source["match_reasons"],
             }

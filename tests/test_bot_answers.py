@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from backet.bot_answers import LlamaLocalAnswerGenerator, validate_llama_model_files
+from backet.bot_answers import LlamaLocalAnswerGenerator, TemplateAnswerGenerator, build_llama_prompt, validate_llama_model_files
 from backet.bot_runtime import BotBundle, answer_bot_query
 from backet.cli import app
 from backet.errors import AppError
@@ -60,6 +60,35 @@ def test_llama_generator_falls_back_on_timeout_and_missing_citations() -> None:
     assert "[V1]" in timeout.text
     assert missing_citation.fallback_used is True
     assert missing_citation.diagnostics["fallback_reason"] == "bot_llama_output_missing_citation"
+
+
+def test_answer_context_windows_use_full_source_content_near_question_terms() -> None:
+    sources = [
+        {
+            "source_type": "rules",
+            "citation": "R1",
+            "book_title": "Core Rulebook",
+            "page_start": 222,
+            "page_end": 222,
+            "section_label": "Frenzy",
+            "excerpt": "Fury frenzy and table fragments before the useful answer.",
+            "content": (
+                "Fury frenzy and unrelated table fragments. "
+                "Many filler words appear before the useful rule text. " * 8
+                + "Hunger frenzy: temptation causes hunger frenzy; the Beast always craves more blood. "
+                "Every time a vampire fails a Rouse Check while at Hunger 5, they must make a hunger frenzy test. "
+                "During a hunger frenzy, the vampire seeks fresh human blood from the closest source."
+            ),
+        }
+    ]
+
+    template = TemplateAnswerGenerator().generate("What is a hunger frenzy?", sources)
+    prompt = build_llama_prompt("What is a hunger frenzy?", sources, token_budget=64)
+
+    assert "Hunger frenzy: temptation causes hunger frenzy" in template.text
+    assert "fresh human blood from the closest source" in template.text
+    assert "Hunger frenzy: temptation causes hunger frenzy" in prompt
+    assert "Fury frenzy and unrelated table fragments. Many filler words" not in prompt
 
 
 def test_llama_generator_uses_endpoint_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
