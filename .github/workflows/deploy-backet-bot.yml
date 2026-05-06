@@ -30,7 +30,7 @@ jobs:
           BACKET_INSTALL_SPEC: ${{ vars.BACKET_INSTALL_SPEC }}
         run: |
           set -euo pipefail
-          install_spec="${BACKET_INSTALL_SPEC:-backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.16/backet-0.1.16-py3-none-any.whl}"
+          install_spec="${BACKET_INSTALL_SPEC:-backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.17/backet-0.1.17-py3-none-any.whl}"
           python -m pip install "${install_spec}"
 
       - name: Export private bot bundle
@@ -71,6 +71,7 @@ jobs:
           DISCORD_GUILD_ID=${{ vars.DISCORD_GUILD_ID }}
           BACKET_BOT_BUNDLE=/srv/backet-bot/data/current
           BACKET_SKIP_UPDATE_CHECK=1
+          BACKET_INSTALL_SPEC=${{ vars.BACKET_INSTALL_SPEC }}
           COMPOSE_PROFILES=${{ vars.BOT_COMPOSE_PROFILES }}
           LLAMA_MODEL_RELATIVE_PATH=${{ vars.LLAMA_MODEL_RELATIVE_PATH }}
           LLAMA_MODEL_SHA256=${{ vars.LLAMA_MODEL_SHA256 }}
@@ -84,9 +85,9 @@ jobs:
         run: |
           set -euo pipefail
           vm="${ORACLE_VM_USER}@${ORACLE_VM_HOST}"
-          ssh_opts="-i ~/.ssh/backet_bot_deploy -o StrictHostKeyChecking=accept-new"
+          ssh_opts="-i ~/.ssh/backet_bot_deploy -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
           ssh ${ssh_opts} "${vm}" "mkdir -p /srv/backet-bot/deploy /srv/backet-bot/uploads /srv/backet-bot/models"
-          scp ${ssh_opts} deploy/bot/docker-compose.yml deploy/bot/*.sh "${vm}:/srv/backet-bot/deploy/"
+          scp ${ssh_opts} deploy/bot/Dockerfile deploy/bot/docker-compose.yml deploy/bot/*.sh "${vm}:/srv/backet-bot/deploy/"
           scp ${ssh_opts} .env.deploy "${vm}:/srv/backet-bot/deploy/.env"
           scp ${ssh_opts} "${{ steps.package.outputs.archive }}" "${vm}:/srv/backet-bot/uploads/${{ steps.package.outputs.archive }}"
 
@@ -98,6 +99,6 @@ jobs:
         run: |
           set -euo pipefail
           vm="${ORACLE_VM_USER}@${ORACLE_VM_HOST}"
-          ssh_opts="-i ~/.ssh/backet_bot_deploy -o StrictHostKeyChecking=accept-new"
+          ssh_opts="-i ~/.ssh/backet_bot_deploy -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
           ssh ${ssh_opts} "${vm}" \
             "MODEL_DOWNLOAD_TOKEN='${MODEL_DOWNLOAD_TOKEN}' /srv/backet-bot/deploy/activate-release.sh '/srv/backet-bot/uploads/${{ steps.package.outputs.archive }}' '${{ steps.package.outputs.release_id }}'"

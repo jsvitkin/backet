@@ -23,6 +23,7 @@ MODEL_PATH="${ROOT}/models/${MODEL_RELATIVE_PATH}"
 mkdir -p "$(dirname "${MODEL_PATH}")"
 
 if [[ -f "${MODEL_PATH}" && -n "${MODEL_SHA256}" ]]; then
+  echo "Checking existing Llama model checksum: ${MODEL_PATH}"
   echo "${MODEL_SHA256}  ${MODEL_PATH}" | sha256sum --check --status && exit 0
 fi
 
@@ -39,19 +40,22 @@ fi
 TMP_PATH="${MODEL_PATH}.download"
 rm -f "${TMP_PATH}"
 
+echo "Downloading Llama model to ${MODEL_PATH}"
 if [[ -n "${MODEL_DOWNLOAD_TOKEN:-}" ]]; then
-  curl --fail --location --silent --show-error \
+  curl --fail --location --show-error --progress-bar \
     --header "Authorization: Bearer ${MODEL_DOWNLOAD_TOKEN}" \
     --output "${TMP_PATH}" \
     "${MODEL_URL}"
 else
-  curl --fail --location --silent --show-error \
+  curl --fail --location --show-error --progress-bar \
     --output "${TMP_PATH}" \
     "${MODEL_URL}"
 fi
 
 if [[ -n "${MODEL_SHA256}" ]]; then
+  echo "Checking downloaded Llama model checksum"
   echo "${MODEL_SHA256}  ${TMP_PATH}" | sha256sum --check --status
 fi
 
 mv "${TMP_PATH}" "${MODEL_PATH}"
+echo "Llama model ready: ${MODEL_PATH}"

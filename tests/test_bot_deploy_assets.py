@@ -15,15 +15,23 @@ def test_oracle_vm_deploy_assets_are_present_and_private_by_default() -> None:
     workflow = _read(".github/workflows/deploy-backet-bot.yml")
 
     assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/" in workflow
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/" in dockerfile
+    assert "COPY src" not in dockerfile
     assert "/srv/backet-bot/data" in compose
     assert "/srv/backet-bot/models" in compose
     assert "profiles: [\"llama\"]" in compose
+    assert "ghcr.io/ggml-org/llama.cpp:server" in compose
+    assert "ghcr.io/ggerganov/llama.cpp:server" not in compose
+    assert "deploy/bot/Dockerfile" not in compose
     assert "replace-with-github-secret-or-vm-secret" in env_example
     assert "backet bot doctor" in activate
     assert "data/current" in activate
     assert "docker compose" in activate
     assert "sha256sum --check" in bootstrap
+    assert "--progress-bar" in bootstrap
     assert "workflow_dispatch" in workflow
+    assert "ServerAliveInterval=30" in workflow
+    assert "deploy/bot/Dockerfile" in workflow
     assert "actions/upload-artifact" in workflow
     assert "retention-days: 1" in workflow
     assert "gh release" not in workflow

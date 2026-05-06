@@ -1,8 +1,10 @@
 services:
   backet-bot:
     build:
-      context: ../..
-      dockerfile: deploy/bot/Dockerfile
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BACKET_INSTALL_SPEC: ${BACKET_INSTALL_SPEC:-}
     image: backet-bot:local
     restart: unless-stopped
     env_file:
@@ -17,7 +19,7 @@ services:
     command: ["bot", "run", "/srv/backet-bot/data/current"]
 
   llama:
-    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggerganov/llama.cpp:server}
+    image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
     profiles: ["llama"]
     restart: unless-stopped
     ports:

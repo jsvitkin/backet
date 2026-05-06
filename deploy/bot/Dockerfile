@@ -1,17 +1,21 @@
 FROM python:3.13-slim
 
+ARG BACKET_INSTALL_SPEC=""
+
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     BACKET_SKIP_UPDATE_CHECK=1
 
 WORKDIR /app
 
-COPY pyproject.toml README.md /app/
-COPY src /app/src
-COPY metadata /app/metadata
-
 RUN python -m pip install --upgrade pip \
-    && python -m pip install '.[bot]'
+    && if [ -n "${BACKET_INSTALL_SPEC}" ]; then \
+         printf '%s\n' "${BACKET_INSTALL_SPEC}" > /tmp/backet-requirements.txt; \
+       else \
+         printf '%s\n' 'backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.17/backet-0.1.17-py3-none-any.whl' > /tmp/backet-requirements.txt; \
+       fi \
+    && python -m pip install -r /tmp/backet-requirements.txt \
+    && rm /tmp/backet-requirements.txt
 
 RUN useradd --create-home --uid 10001 backet
 USER backet

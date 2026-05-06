@@ -10,8 +10,10 @@ RELEASE_DIR="${ROOT}/releases/${RELEASE_ID}"
 mkdir -p "${ROOT}/uploads" "${ROOT}/releases" "${ROOT}/data" "${ROOT}/models"
 rm -rf "${RELEASE_DIR}"
 mkdir -p "${RELEASE_DIR}"
+echo "Extracting Backet bot release: ${RELEASE_ID}"
 tar -xzf "${ARCHIVE}" -C "${RELEASE_DIR}"
 
+echo "Checking Backet bot bundle"
 if command -v backet >/dev/null 2>&1; then
   backet bot doctor "${RELEASE_DIR}"
 else
@@ -23,7 +25,10 @@ fi
 ln -sfn "${RELEASE_DIR}" "${ROOT}/data/current.next"
 mv -Tf "${ROOT}/data/current.next" "${ROOT}/data/current"
 
+echo "Preparing optional Llama model"
 "${ROOT}/deploy/bootstrap-llama-model.sh"
 
+echo "Starting Backet bot services"
 docker compose -f "${COMPOSE_FILE}" --env-file "${ROOT}/deploy/.env" up -d --build
+echo "Inspecting running Backet bot container"
 docker compose -f "${COMPOSE_FILE}" exec -T backet-bot bot inspect /srv/backet-bot/data/current

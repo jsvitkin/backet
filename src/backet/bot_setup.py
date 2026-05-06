@@ -1118,7 +1118,7 @@ def _git_root_for(path: Path) -> Path | None:
 
 def _render_deploy_repository_file(relative: str) -> bytes:
     raw = _read_packaged_deploy_file(relative)
-    if relative == ".github/workflows/deploy-backet-bot.yml":
+    if relative in {".github/workflows/deploy-backet-bot.yml", "deploy/bot/Dockerfile"}:
         text = raw.decode("utf-8")
         metadata = load_distribution_metadata()
         install_spec = f"backet[bot] @ {metadata.release_artifact_url(__version__)}"
