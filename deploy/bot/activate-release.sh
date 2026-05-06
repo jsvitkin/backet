@@ -12,6 +12,8 @@ rm -rf "${RELEASE_DIR}"
 mkdir -p "${RELEASE_DIR}"
 echo "Extracting Backet bot release: ${RELEASE_ID}"
 tar -xzf "${ARCHIVE}" -C "${RELEASE_DIR}"
+chmod a+rx "${ROOT}" "${ROOT}/data" "${ROOT}/releases"
+chmod -R a+rX "${RELEASE_DIR}"
 
 echo "Checking Backet bot bundle"
 if command -v backet >/dev/null 2>&1; then
