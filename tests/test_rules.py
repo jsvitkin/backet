@@ -217,7 +217,46 @@ def test_rules_query_falls_back_to_exact_when_semantic_backend_is_unavailable(
     assert payload["data"]["retrieval_mode"] == "semantic_unavailable"
     assert payload["data"]["semantic_error"]["code"] == "embedding_backend_unavailable"
     assert payload["data"]["primary_results"][0]["section_label"] == "Feeding Rights"
-    assert payload["data"]["primary_results"][0]["match_reasons"] == ["exact", "retrieval-metadata"]
+    assert "exact" in payload["data"]["primary_results"][0]["match_reasons"]
+    assert "retrieval-metadata" in payload["data"]["primary_results"][0]["match_reasons"]
+
+
+def test_rules_query_prefers_definition_over_incidental_cost_mentions(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "definitions.pdf",
+        [
+            _rule_page(
+                "Discipline Power",
+                "Cost: One Rouse Check. System: This power mentions a Rouse Check only as an activation cost.",
+            ),
+            _rule_page(
+                "Rousing the Blood",
+                (
+                    "The rules call for a Rouse Check when vampiric blood is stirred. "
+                    "To make a Rouse Check, the player rolls a single die. "
+                    "On a success Hunger remains unchanged; on a failure Hunger increases by one."
+                ),
+            ),
+            _rule_page(
+                "Damage Types",
+                "Aggravated damage: causes severe wounds and lasting injuries. Superficial damage is tracked separately.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    rouse = runner.invoke(app, ["--json", "rules", "query", str(vault), "What is a rouse check?", "--limit", "1"])
+    damage = runner.invoke(app, ["--json", "rules", "query", str(vault), "What is aggravated damage?", "--limit", "1"])
+
+    assert rouse.exit_code == 0, rouse.stdout
+    assert damage.exit_code == 0, damage.stdout
+    rouse_first = json.loads(rouse.stdout)["data"]["primary_results"][0]
+    damage_first = json.loads(damage.stdout)["data"]["primary_results"][0]
+    assert rouse_first["section_label"] == "Rousing the Blood"
+    assert damage_first["section_label"] == "Damage Types"
+    assert "definition-match" in rouse_first["match_reasons"]
+    assert "definition-match" in damage_first["match_reasons"]
 
 
 def test_rules_query_downranks_non_answer_sections(runner, tmp_path: Path) -> None:

@@ -144,10 +144,11 @@ def test_bot_runtime_keeps_unscoped_supplement_matches_answerable(runner, tmp_pa
         role_ids=["player-role"],
     )
 
-    assert "Relevant permitted rule text" in answer.text
-    assert "Camarilla A" in answer.text
-    assert "Camarilla B" in answer.text
+    assert "**Short answer:**" in answer.text
+    assert "Camarilla" in answer.text
+    assert "blood doll" in answer.text
     assert answer.sources[0]["source_type"] == "vault"
+    assert any(source["source_type"] == "rules" for source in answer.sources)
 
 
 def test_bot_playground_exports_fake_vault_and_prints_source_diagnostics(runner, tmp_path: Path) -> None:

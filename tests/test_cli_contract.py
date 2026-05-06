@@ -12,7 +12,7 @@ def test_version_supports_json_output(runner) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["status"] == "ok"
-    assert payload["data"]["version"] == "0.1.23"
+    assert payload["data"]["version"] == "0.1.24"
 
 
 def test_init_missing_vault_uses_actionable_json_error(runner, tmp_path: Path) -> None:

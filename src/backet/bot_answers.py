@@ -20,7 +20,8 @@ DEFAULT_LLAMA_TIMEOUT_SECONDS = 20.0
 DEFAULT_LLAMA_TOKEN_BUDGET = 900
 DEFAULT_MAX_RESPONSE_CHARS = 1900
 DEFAULT_PROMPT_SOURCE_CHARS = 720
-DEFAULT_TEMPLATE_SOURCE_LIMIT = 2
+DEFAULT_TEMPLATE_SOURCE_LIMIT = 1
+DEFAULT_TEMPLATE_DETAIL_CHARS = 420
 DEFAULT_PROMPT_SOURCE_LIMIT = 3
 SOURCE_QUOTE_WIDTH = 90
 QUERY_TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
@@ -104,10 +105,15 @@ class TemplateAnswerGenerator:
                 diagnostics={"source_count": 0},
             )
         display_sources = _select_answer_sources(question, sources, limit=DEFAULT_TEMPLATE_SOURCE_LIMIT)
-        lines = ["Relevant permitted rule text:"]
+        lines = _format_short_answer(question, display_sources)
+        if lines:
+            lines.append("")
+            lines.append("**Source detail:**")
+        else:
+            lines = ["Relevant permitted rule text:"]
         for source in display_sources:
-            snippet = _source_text_for_question(source, question, limit=DEFAULT_PROMPT_SOURCE_CHARS)
-            lines.append(f"**[{source['citation']}] {format_bot_source_label(source)}**\n{_format_source_quote(snippet)}")
+            snippet = _source_text_for_question(source, question, limit=DEFAULT_TEMPLATE_DETAIL_CHARS)
+            lines.append(f"**{format_bot_source_label(source)}**\n{_format_source_quote(snippet)}")
         labels = "; ".join(format_bot_source_label(source) for source in display_sources)
         lines.append(f"**Sources:** {labels}")
         return GeneratedAnswer(
@@ -224,9 +230,12 @@ def build_llama_prompt(question: str, sources: list[dict[str, Any]], token_budge
     char_budget = max(2200, min(6000, token_budget * 24))
     header = (
         "You are Backet-bot. Answer only from the SOURCE blocks below. "
-        "Every sentence must cite one or more source labels like [V1] or [R1]. "
+        "Cite sources only once at the end as 'Sources: ...'. "
         "If the sources are insufficient, say that the permitted sources are insufficient. "
-        "Write 2-4 concise sentences and do not invent beyond the sources.\n\n"
+        "Start with the direct answer, not a list of sources. "
+        "Do not put bracket labels like [R1] in the answer body, do not quote whole source blocks, "
+        "do not print a 'closest sources' section, and do not invent beyond the sources. "
+        "Write 2-4 concise Discord-friendly sentences, or 1-3 short bullets when the rule is procedural.\n\n"
         f"QUESTION:\n{question.strip()}\n\n"
         "SOURCES:\n"
     )
@@ -253,7 +262,10 @@ def validate_generated_answer(text: str, sources: list[dict[str, Any]], max_char
     if len(text) > max_chars:
         return "bot_llama_output_too_long"
     citations = {f"[{source['citation']}]" for source in sources}
-    if citations and not any(citation in text for citation in citations):
+    source_labels = {format_bot_source_label(source).casefold() for source in sources}
+    lowered = text.casefold()
+    has_source_label = "sources:" in lowered and any(label in lowered for label in source_labels)
+    if citations and not any(citation in text for citation in citations) and not has_source_label:
         return "bot_llama_output_missing_citation"
     return None
 
@@ -381,6 +393,246 @@ def _format_source_quote(snippet: str) -> str:
     return "\n".join(f"> {line}" for line in lines)
 
 
+def _format_short_answer(question: str, sources: list[dict[str, Any]]) -> list[str]:
+    terms = _question_terms(question)
+    if not terms:
+        return []
+    bullets: list[str] = []
+    for source in sources[:3]:
+        source_text = clean_bot_source_text(str(source.get("content") or source.get("excerpt") or ""))
+        for segment in _direct_rule_answer_segments(question, source_text, terms):
+            if segment not in bullets:
+                bullets.append(segment)
+            if len(bullets) >= 2:
+                return ["**Short answer:**", *(f"- {bullet}" for bullet in bullets)]
+        if bullets:
+            break
+        segments = _answer_segments(source_text, terms)
+        if not segments:
+            continue
+        for segment in segments:
+            if segment not in bullets:
+                bullets.append(segment)
+            if len(bullets) >= 2:
+                return ["**Short answer:**", *(f"- {bullet}" for bullet in bullets)]
+        if bullets:
+            break
+    if not bullets:
+        return []
+    return ["**Short answer:**", *(f"- {bullet}" for bullet in bullets)]
+
+
+def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> list[str]:
+    lowered_question = question.casefold()
+    if not ("dicepool" in lowered_question or "dice pool" in lowered_question or "pool" in lowered_question):
+        return []
+    if "hunt" not in lowered_question and "predator" not in lowered_question:
+        return []
+
+    wanted_keys = _question_key_aliases(terms)
+    if not wanted_keys:
+        return []
+
+    matches = re.finditer(
+        r"\b(?P<key>[A-Za-z][A-Za-z '\-]{1,45}?)\s*:\s*(?P<pool>[A-Z][A-Za-z]+(?:\s*\+\s*[A-Z][A-Za-z]+)+)\s*:",
+        text,
+    )
+    for match in matches:
+        key = match.group("key").strip()
+        normalized_key = _compact_key(key)
+        if normalized_key not in wanted_keys:
+            continue
+        pool = re.sub(r"\s*\+\s*", " + ", match.group("pool").strip())
+        return [f"{_display_rule_key(key)} hunting dice pool: {pool}."]
+    return []
+
+
+def _question_key_aliases(terms: list[str]) -> set[str]:
+    aliases: set[str] = set()
+    for term in terms:
+        aliases.add(_compact_key(term))
+    for left, right in zip(terms, terms[1:]):
+        aliases.add(_compact_key(left + right))
+        aliases.add(_compact_key(f"{left} {right}"))
+    return {alias for alias in aliases if len(alias) >= 4}
+
+
+def _compact_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.casefold())
+
+
+def _display_rule_key(text: str) -> str:
+    compact = _compact_key(text)
+    overrides = {
+        "alleycat": "Alley Cat",
+    }
+    return overrides.get(compact, _title_answer_heading(text))
+
+
+def _answer_segments(snippet: str, terms: list[str]) -> list[str]:
+    prepared = _prepare_sentence_boundaries(snippet)
+    raw_segments = [segment.strip(" -") for segment in re.split(r"(?<=[.!?])\s+", prepared) if segment.strip(" -")]
+    if not raw_segments:
+        raw_segments = [prepared]
+    phrase = _question_phrase(terms)
+    scored: list[tuple[int, int, int, int, int, str]] = []
+    for index, segment in enumerate(raw_segments):
+        cleaned = _clean_answer_segment(segment, terms)
+        if len(cleaned) < 24 or _looks_like_bad_answer_segment(cleaned):
+            continue
+        lower = cleaned.lower()
+        term_hits = sum(1 for term in terms if re.search(rf"\b{re.escape(term)}\b", lower))
+        if term_hits == 0:
+            continue
+        phrase_hit = 1 if phrase and phrase in lower else 0
+        ordered = 1 if _first_ordered_term_start(lower, terms) >= 0 else 0
+        cue = 1 if any(value in lower for value in ("system:", "cost:", "dice pool", "dice pools", "on a success", "on a failure", "to make")) else 0
+        scored.append((phrase_hit, term_hits, cue, ordered, index, cleaned))
+    scored.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4]))
+    selected = sorted(scored[:2], key=lambda item: item[4])
+    segments = [_limit_sentence(_merge_following_rule_outcomes(item[5], raw_segments, item[4], terms)) for item in selected]
+    if segments and _looks_like_complete_definition(segments[0]):
+        return [segments[0]]
+    return segments
+
+
+def _prepare_sentence_boundaries(text: str) -> str:
+    text = re.sub(r"\bp\.\s*(\d+)", r"page \1", text)
+    text = re.sub(r"\bp\.", "page", text)
+    prepared = re.sub(r"\s+(Cost|Dice Pools?|System|Duration|Prerequisite|Level \d)\s*:", r". \1:", text)
+    prepared = re.sub(r"\s+(Cost|Dice Pools?|System|Duration|Prerequisite|Level \d)\b", r". \1", prepared)
+    return prepared
+
+
+def _clean_answer_segment(segment: str, terms: list[str]) -> str:
+    cleaned = segment.strip()
+    cleaned = re.sub(r"^(?:\.\s*)+", "", cleaned).strip()
+    cleaned = re.sub(r"^\([^)]{0,220}\)\s*", "", cleaned).strip()
+    start = _first_ordered_term_start(cleaned.lower(), terms)
+    if 0 < start < 300 and _looks_like_leading_table_noise(cleaned[:start]):
+        cleaned = cleaned[start:].lstrip(" :;-")
+        start = _first_ordered_term_start(cleaned.lower(), terms)
+    if 0 < start < 120 and re.match(r"^(Cost|Dice Pools?|System|Duration|Prerequisite):", cleaned, flags=re.IGNORECASE):
+        cleaned = cleaned[start:].lstrip(" :;-")
+    cleaned = re.sub(r"^(Cost|Dice Pools?|System|Duration|Prerequisite):\s*", r"\1: ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(Committing\s+.+?)\s+(To begin\b)", r"\1: \2", cleaned)
+    cleaned = cleaned.rstrip(" ,;:")
+    phrase = _question_phrase(terms)
+    if phrase:
+        match = re.match(rf"({re.escape(phrase)})\s+([A-Z])", cleaned, flags=re.IGNORECASE)
+        if match:
+            prefix = match.group(1)
+            if prefix.islower():
+                prefix = prefix.title()
+            cleaned = f"{prefix}: {cleaned[match.start(2):]}"
+    term_span = _ordered_terms_span(cleaned.lower(), terms)
+    if term_span and term_span[0] == 0 and term_span[1] < 90:
+        tail = cleaned[term_span[1] :].lstrip()
+        if tail and tail[0].isupper():
+            heading = _title_answer_heading(cleaned[: term_span[1]].strip())
+            cleaned = f"{heading}: {tail}"
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
+
+
+def _merge_following_rule_outcomes(segment: str, raw_segments: list[str], index: int, terms: list[str]) -> str:
+    lower = segment.lower()
+    if not (lower.startswith("to make ") or "player rolls" in lower):
+        return segment
+    merged = [segment]
+    for raw in raw_segments[index + 1 : index + 4]:
+        cleaned = _clean_answer_segment(raw, terms)
+        next_lower = cleaned.lower()
+        if not next_lower.startswith(("as always", "on a success", "on a failure")):
+            break
+        merged.append(cleaned)
+    return " ".join(merged)
+
+
+def _looks_like_complete_definition(segment: str) -> bool:
+    lower = segment.lower()
+    return lower.startswith("to make ") and ("on a success" in lower or "on a failure" in lower)
+
+
+def _ordered_terms_span(text: str, terms: list[str]) -> tuple[int, int] | None:
+    if not terms:
+        return None
+    first = re.search(rf"\b{re.escape(terms[0])}\b", text)
+    if first is None:
+        return None
+    start = first.start()
+    end = first.end()
+    previous = end
+    for term in terms[1:]:
+        match = re.search(rf"\b{re.escape(term)}\b", text[previous:])
+        if match is None:
+            return None
+        end = previous + match.end()
+        previous = end
+    return start, end
+
+
+def _title_answer_heading(text: str) -> str:
+    small_words = {"a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"}
+    words = text.split()
+    titled: list[str] = []
+    for index, word in enumerate(words):
+        lower = word.lower()
+        if index > 0 and lower in small_words:
+            titled.append(lower)
+        else:
+            titled.append(lower.capitalize())
+    return " ".join(titled)
+
+
+def _looks_like_bad_answer_segment(segment: str) -> bool:
+    lower = segment.lower()
+    if "..." in segment:
+        return True
+    if re.search(r"[\ue000-\uf8ff]", segment):
+        return True
+    if lower.startswith(("for example, this represents", "for example, this tracker")):
+        return True
+    if segment.count("(") != segment.count(")"):
+        return True
+    if re.search(r"\b(?:page|p)\s*$", segment, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _looks_like_leading_table_noise(text: str) -> bool:
+    lower = text.lower()
+    if "difficulty" in lower or lower.startswith("sample "):
+        return True
+    return len(re.findall(r"\b\d+\b", text)) >= 3
+
+
+def _first_ordered_term_start(text: str, terms: list[str]) -> int:
+    if not terms:
+        return -1
+    first = re.search(rf"\b{re.escape(terms[0])}\b", text)
+    if first is None:
+        return -1
+    previous = first.start()
+    for term in terms[1:]:
+        match = re.search(rf"\b{re.escape(term)}\b", text[previous + 1 :])
+        if match is None:
+            return first.start()
+        previous = previous + 1 + match.start()
+    return first.start()
+
+
+def _limit_sentence(sentence: str, limit: int = 320) -> str:
+    sentence = " ".join(sentence.split())
+    if len(sentence) <= limit:
+        return sentence
+    end = sentence.rfind(" ", 0, limit - 4)
+    if end < 80:
+        end = limit - 4
+    return sentence[:end].rstrip(" ,;:") + " ..."
+
+
 def _select_answer_sources(question: str, sources: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     if not sources or limit <= 0:
         return []
@@ -437,10 +689,17 @@ def _best_window_start(lower_text: str, terms: list[str], limit: int) -> int:
         return 0
     phrase = _question_phrase(terms)
     anchors: list[int] = []
+    for alias in _question_key_aliases(terms):
+        alias_match = re.search(rf"\b{re.escape(alias)}\s*:", lower_text)
+        if alias_match:
+            return alias_match.start()
     if len(terms) > 1:
         phrase_index = lower_text.find(phrase)
         if phrase_index >= 0:
             return phrase_index
+        ordered_span = _ordered_terms_span(lower_text, terms)
+        if ordered_span and ordered_span[1] - ordered_span[0] <= 140:
+            return ordered_span[0]
     for term in terms:
         index = lower_text.find(term)
         while index >= 0 and len(anchors) < 40:
@@ -486,6 +745,7 @@ def clean_bot_source_text(text: str) -> str:
         .replace("\r\n", "\n")
         .replace("\r", "\n")
     )
+    cleaned = re.sub(r"[\ue000-\uf8ff]+", "", cleaned)
     return " ".join(cleaned.split())
 
 

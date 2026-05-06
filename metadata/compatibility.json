@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "cli_version": "0.1.23",
+  "cli_version": "0.1.24",
   "repository": "jsvitkin/backet",
   "default_ref": "v{cli_version}",
   "release_artifact_pattern": "backet-{version}-py3-none-any.whl",

@@ -57,7 +57,8 @@ def test_llama_generator_falls_back_on_timeout_and_missing_citations() -> None:
 
     assert timeout.fallback_used is True
     assert timeout.diagnostics["fallback_reason"] == "bot_llama_timeout"
-    assert "[V1]" in timeout.text
+    assert "Player Primer" in timeout.text
+    assert "[V1]" not in timeout.text
     assert missing_citation.fallback_used is True
     assert missing_citation.diagnostics["fallback_reason"] == "bot_llama_output_missing_citation"
 
@@ -98,11 +99,11 @@ def test_answer_context_windows_use_full_source_content_near_question_terms() ->
     prompt = build_llama_prompt("What is a hunger frenzy?", sources, token_budget=64)
     normalized_template = " ".join(template.text.replace("> ", "").split())
 
-    assert "Relevant permitted rule text" in template.text
+    assert "**Short answer:**" in template.text
     assert "Hunger frenzy: temptation causes hunger frenzy" in template.text
     assert "fresh human blood from the closest source" in normalized_template
     assert "Noisy Supplement" not in template.text
-    assert "Hunger frenzy: temptation causes hunger frenzy" in prompt
+    assert "temptation causes hunger frenzy" in prompt.lower()
     assert "Noisy Supplement" not in prompt
     assert "Fury frenzy and unrelated table fragments. Many filler words" not in prompt
 
@@ -125,6 +126,55 @@ def test_template_answer_cleans_pdf_heading_noise() -> None:
     assert "D I S C I P L I N E S" not in template.text
     assert "Core Rulebook p. 265" in template.text
     assert "> Mask of a Thousand Faces lets" in template.text
+
+
+def test_template_answer_skips_pdf_tracker_glyph_fragments() -> None:
+    sources = [
+        {
+            "source_type": "rules",
+            "citation": "R1",
+            "book_title": "Core Rulebook",
+            "page_start": 241,
+            "page_end": 241,
+            "section_label": "Humanity",
+            "content": (
+                "For example, this represents a rating of Humanity 6: \ue0ee\ue0ee\ue0ef\ue0ef "
+                "Stains can mark corruption on the Humanity track. "
+                "If too many Stains build up without repentance or redress, Humanity might drop."
+            ),
+        }
+    ]
+
+    template = TemplateAnswerGenerator().generate("How do stains work?", sources)
+
+    assert "\ue0ee" not in template.text
+    assert "If too many Stains build up" in template.text
+
+
+def test_template_answer_extracts_predator_pool_rows_without_source_codes() -> None:
+    sources = [
+        {
+            "source_type": "rules",
+            "citation": "R1",
+            "book_title": "Core Rulebook",
+            "page_start": 309,
+            "page_end": 309,
+            "section_label": "Predator Pools",
+            "content": (
+                "Predator Pools explain the hunting approach. "
+                "alleycat: Strength + Brawl: You take blood by force or threat."
+            ),
+        }
+    ]
+
+    template = TemplateAnswerGenerator().generate(
+        "Whats the hunting dicepool for an alley cat predator type vampire",
+        sources,
+    )
+
+    assert "Alley Cat hunting dice pool: Strength + Brawl." in template.text
+    assert "[R1]" not in template.text
+    assert "**Core Rulebook p. 309 (Predator Pools)**" in template.text
 
 
 def test_llama_generator_uses_endpoint_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -412,7 +412,7 @@ def build_fts_query(text: str) -> str:
 
 def fts_rank_to_score(rank: float) -> float:
     positive_rank = abs(rank)
-    return 1.0 / (1.0 + positive_rank)
+    return positive_rank / (positive_rank + 8.0)
 
 
 def normalize_target(target: str) -> str:

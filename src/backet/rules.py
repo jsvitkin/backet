@@ -94,8 +94,17 @@ RULE_QUERY_STOPWORDS = {
     "who",
     "why",
     "with",
+    "work",
+    "working",
+    "works",
 }
-SEMANTIC_WEIGHT = 0.75
+SEMANTIC_WEIGHT = 0.45
+LEXICAL_COVERAGE_WEIGHT = 0.18
+LEXICAL_FREQUENCY_WEIGHT = 0.08
+LEXICAL_PROXIMITY_WEIGHT = 0.32
+LEXICAL_DEFINITION_WEIGHT = 0.12
+LEXICAL_DEFINITION_QUERY_WEIGHT = 0.5
+LEXICAL_INCIDENTAL_COST_PENALTY = 0.25
 SUPPLEMENT_SCOPE_BOOST = 0.15
 RULE_SEMANTIC_LIMIT = 40
 NON_ANSWER_SECTION_PENALTIES = {
@@ -266,6 +275,7 @@ class RuleSearchCandidate:
     retrieval_flags: list[str]
     exact_score: float = 0.0
     semantic_score: float = 0.0
+    lexical_score: float = 0.0
     quality_penalty: float = 0.0
     score: float = 0.0
     match_reasons: list[str] = field(default_factory=list)
@@ -702,6 +712,7 @@ def query_rules_connection(
             details={"limit": limit},
             exit_code=2,
         )
+    query_terms = _rules_query_terms(query)
     fts_query = build_rules_fts_query(query)
     if not fts_query:
         raise AppError(
@@ -728,7 +739,13 @@ def query_rules_connection(
         scope_tags=normalized_tags,
         limit=max(limit * 4, RULE_SEMANTIC_LIMIT),
     )
-    rows = _merge_rule_candidates(exact_rows, semantic.candidates, scope_tags=normalized_tags)
+    rows = _merge_rule_candidates(
+        exact_rows,
+        semantic.candidates,
+        scope_tags=normalized_tags,
+        query_terms=query_terms,
+        definition_query=_is_definition_rule_query(query),
+    )
     if not rows:
         raise AppError(
             code="rules_query_empty",
@@ -2873,7 +2890,7 @@ def _apply_precedence(
             "scope_tags": rows_for_book[0].scope_tags,
         }
         for book_id, score, _, rows_for_book in book_scores[1:]
-        if abs(score - primary_score) <= 0.05
+        if abs(score - primary_score) <= 0.2
     ]
     if competing:
         return [], [], {
@@ -2914,6 +2931,7 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
         "score": round(row.score, 6),
         "exact_score": round(row.exact_score, 6),
         "semantic_score": round(row.semantic_score, 6),
+        "lexical_score": round(row.lexical_score, 6),
         "quality_penalty": round(row.quality_penalty, 6),
         "match_reasons": sorted(set(row.match_reasons)),
         "section_kind": row.section_kind,
@@ -3054,6 +3072,8 @@ def _merge_rule_candidates(
     exact_rows: list[sqlite3.Row],
     semantic_rows: list[tuple[sqlite3.Row, float]],
     scope_tags: list[str],
+    query_terms: list[str],
+    definition_query: bool,
 ) -> list[RuleSearchCandidate]:
     candidates: dict[int, RuleSearchCandidate] = {}
     for row in exact_rows:
@@ -3067,7 +3087,12 @@ def _merge_rule_candidates(
         candidate.match_reasons.append("semantic")
 
     for candidate in candidates.values():
-        _score_rule_candidate(candidate, scope_tags=scope_tags)
+        _score_rule_candidate(
+            candidate,
+            scope_tags=scope_tags,
+            query_terms=query_terms,
+            definition_query=definition_query,
+        )
     return sorted(candidates.values(), key=_candidate_sort_key)
 
 
@@ -3111,9 +3136,17 @@ def _candidate_from_row(row: sqlite3.Row) -> RuleSearchCandidate:
     )
 
 
-def _score_rule_candidate(candidate: RuleSearchCandidate, scope_tags: list[str]) -> None:
-    score = candidate.exact_score + (candidate.semantic_score * SEMANTIC_WEIGHT)
+def _score_rule_candidate(
+    candidate: RuleSearchCandidate,
+    scope_tags: list[str],
+    query_terms: list[str],
+    definition_query: bool,
+) -> None:
+    candidate.lexical_score = _lexical_rule_score(candidate, query_terms, definition_query=definition_query)
+    score = candidate.exact_score + (candidate.semantic_score * SEMANTIC_WEIGHT) + candidate.lexical_score
     reasons = set(candidate.match_reasons)
+    if candidate.lexical_score > 0:
+        reasons.add("lexical")
 
     if candidate.section_kind != "unknown" or candidate.retrieval_flags:
         reasons.add("retrieval-metadata")
@@ -3140,6 +3173,9 @@ def _score_rule_candidate(candidate: RuleSearchCandidate, scope_tags: list[str])
         reasons.add("core-fallback")
 
     penalty = _rule_quality_penalty(candidate)
+    if definition_query and candidate.lexical_score >= 1.0 and candidate.exact_score > 0:
+        reasons.add("definition-match")
+        penalty = min(penalty, 0.15)
     if penalty > 0:
         reasons.add("quality-penalty")
     candidate.quality_penalty = penalty
@@ -3171,6 +3207,124 @@ def _rule_quality_penalty(candidate: RuleSearchCandidate) -> float:
 
 def _candidate_sort_key(candidate: RuleSearchCandidate) -> tuple[float, int, int]:
     return (-candidate.score, candidate.page_start, candidate.chunk_id)
+
+
+def _lexical_rule_score(candidate: RuleSearchCandidate, query_terms: list[str], *, definition_query: bool) -> float:
+    if not query_terms:
+        return 0.0
+    haystack = " ".join(
+        str(part)
+        for part in (
+            candidate.book_title,
+            candidate.section_label,
+            candidate.content,
+        )
+        if part
+    ).lower()
+    term_counts = [_term_count(haystack, term) for term in query_terms]
+    hit_terms = sum(1 for count in term_counts if count > 0)
+    if hit_terms == 0:
+        return 0.0
+    coverage = hit_terms / len(query_terms)
+    frequency = min(sum(term_counts), 8) / 8
+    proximity = _ordered_term_proximity(haystack, query_terms)
+    definition = 1.0 if proximity and _definition_cue_near_terms(haystack, query_terms) else 0.0
+    score = (
+        (coverage * LEXICAL_COVERAGE_WEIGHT)
+        + (frequency * LEXICAL_FREQUENCY_WEIGHT)
+        + (proximity * LEXICAL_PROXIMITY_WEIGHT)
+        + (definition * LEXICAL_DEFINITION_WEIGHT)
+    )
+    if definition_query:
+        score += _definition_query_cue_score(haystack, query_terms) * LEXICAL_DEFINITION_QUERY_WEIGHT
+        if _incidental_cost_near_terms(haystack, query_terms):
+            score -= LEXICAL_INCIDENTAL_COST_PENALTY
+    return round(max(score, 0.0), 6)
+
+
+def _term_count(text: str, term: str) -> int:
+    return len(re.findall(rf"\b{re.escape(term)}\b", text))
+
+
+def _ordered_term_proximity(text: str, terms: list[str]) -> float:
+    if len(terms) == 1:
+        return 1.0 if _term_count(text, terms[0]) else 0.0
+    positions: list[list[int]] = []
+    for term in terms:
+        current = [match.start() for match in re.finditer(rf"\b{re.escape(term)}\b", text)]
+        if not current:
+            return 0.0
+        positions.append(current)
+    best_span: int | None = None
+    for start in positions[0]:
+        previous = start
+        span_start = start
+        for current_positions in positions[1:]:
+            next_position = next((position for position in current_positions if position > previous), None)
+            if next_position is None:
+                break
+            previous = next_position
+        else:
+            span = previous - span_start
+            best_span = span if best_span is None else min(best_span, span)
+    if best_span is None:
+        return 0.35
+    if best_span <= 80:
+        return 1.0
+    if best_span <= 180:
+        return 0.7
+    return 0.45
+
+
+def _definition_cue_near_terms(text: str, terms: list[str]) -> bool:
+    first = terms[0]
+    first_index = text.find(first)
+    if first_index < 0:
+        return False
+    window_start = max(0, first_index - 80)
+    window_end = min(len(text), first_index + 260)
+    window = text[window_start:window_end]
+    return any(cue in window for cue in ("to make", "system:", "cost:", "dice pool", "dice pools", "on a success", "on a failure"))
+
+
+def _definition_query_cue_score(text: str, terms: list[str]) -> float:
+    phrase = " ".join(terms)
+    if not phrase:
+        return 0.0
+    if re.search(rf"\b{re.escape(phrase)}\b\s*:", text):
+        return 1.0
+    if re.search(rf"\b(?:committing|performing|using)\s+{re.escape(phrase)}\b[^.?!]{{0,180}}\b(?:to begin|begin|requires|must)\b", text):
+        return 1.0
+    if re.search(rf"\b(?:to make|rules call for|failure on|success on)\b[^.?!]{{0,160}}\b{re.escape(phrase)}\b", text):
+        return 1.0
+    if re.search(rf"\b{re.escape(phrase)}\b[^.?!]{{0,160}}\b(?:player rolls|rolls? a single die)\b", text):
+        return 1.0
+    if re.search(rf"\b{re.escape(phrase)}\b[^.?!]{{0,200}}\b(?:hunger remains|hunger increases|hunger die)\b", text):
+        return 0.5
+    return 0.0
+
+
+def _incidental_cost_near_terms(text: str, terms: list[str]) -> bool:
+    start = _ordered_terms_start(text, terms)
+    if start < 0:
+        return False
+    window = text[max(0, start - 90) : min(len(text), start + 140)]
+    return bool(re.search(r"\b(?:activation\s+)?cost\s*:", window))
+
+
+def _ordered_terms_start(text: str, terms: list[str]) -> int:
+    if not terms:
+        return -1
+    first = re.search(rf"\b{re.escape(terms[0])}\b", text)
+    if first is None:
+        return -1
+    previous = first.start()
+    for term in terms[1:]:
+        match = re.search(rf"\b{re.escape(term)}\b", text[previous + 1 :])
+        if match is None:
+            return -1
+        previous = previous + 1 + match.start()
+    return first.start()
 
 
 def _try_index_rule_chunks(
@@ -3582,12 +3736,24 @@ def _audit_summary(connection: sqlite3.Connection, book_id: str) -> dict[str, An
 
 
 def build_rules_fts_query(text: str) -> str:
-    terms = [
-        term
-        for term in FTS_TOKEN_PATTERN.findall(text.lower())
-        if len(term) > 1 and term not in RULE_QUERY_STOPWORDS
-    ]
+    terms = _rules_query_terms(text)
     return " OR ".join(f'"{term}"' for term in terms)
+
+
+def _rules_query_terms(text: str) -> list[str]:
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in FTS_TOKEN_PATTERN.findall(text.lower()):
+        if len(term) <= 1 or term in RULE_QUERY_STOPWORDS or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
+
+
+def _is_definition_rule_query(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    return bool(re.search(r"\b(?:what\s+(?:is|are)|how\s+(?:does|do)|define|explain)\b", normalized))
 
 
 def split_rule_chunks(text: str) -> list[str]:
@@ -3699,7 +3865,7 @@ def timestamp_now() -> str:
 
 def fts_rank_to_score(rank: float) -> float:
     positive_rank = abs(rank)
-    return 1.0 / (1.0 + positive_rank)
+    return positive_rank / (positive_rank + 8.0)
 
 
 def has_tesseract() -> bool:
