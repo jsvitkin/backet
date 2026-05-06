@@ -19,6 +19,8 @@ DEFAULT_LLAMA_TIMEOUT_SECONDS = 20.0
 DEFAULT_LLAMA_TOKEN_BUDGET = 900
 DEFAULT_MAX_RESPONSE_CHARS = 1900
 DEFAULT_PROMPT_SOURCE_CHARS = 720
+DEFAULT_TEMPLATE_SOURCE_LIMIT = 2
+DEFAULT_PROMPT_SOURCE_LIMIT = 3
 QUERY_TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
 QUERY_STOPWORDS = {
     "a",
@@ -96,11 +98,12 @@ class TemplateAnswerGenerator:
                 mode=self.mode,
                 diagnostics={"source_count": 0},
             )
+        display_sources = _select_answer_sources(question, sources, limit=DEFAULT_TEMPLATE_SOURCE_LIMIT)
         lines = ["Closest permitted sources:"]
-        for source in sources[:3]:
+        for source in display_sources:
             snippet = _source_text_for_question(source, question, limit=DEFAULT_PROMPT_SOURCE_CHARS)
             lines.append(f"[{source['citation']}] {_source_label(source)}\n{snippet}")
-        labels = "; ".join(_source_label(source) for source in sources[:3])
+        labels = "; ".join(_source_label(source) for source in display_sources)
         lines.append(f"Sources: {labels}")
         return GeneratedAnswer(
             text="\n".join(lines),
@@ -224,8 +227,9 @@ def build_llama_prompt(question: str, sources: list[dict[str, Any]], token_budge
     )
     remaining = max(200, char_budget - len(header))
     blocks: list[str] = []
-    for source in sources:
-        source_limit = min(DEFAULT_PROMPT_SOURCE_CHARS, max(240, remaining // max(1, len(sources))))
+    prompt_sources = _select_answer_sources(question, sources, limit=DEFAULT_PROMPT_SOURCE_LIMIT)
+    for source in prompt_sources:
+        source_limit = min(DEFAULT_PROMPT_SOURCE_CHARS, max(240, remaining // max(1, len(prompt_sources))))
         excerpt = _source_text_for_question(source, question, limit=source_limit)
         if not excerpt:
             continue
@@ -363,6 +367,28 @@ def _source_label(source: dict[str, Any]) -> str:
 def _source_text_for_question(source: dict[str, Any], question: str, limit: int) -> str:
     text = str(source.get("content") or source.get("excerpt") or "").strip()
     return _question_window(text, question, limit=limit)
+
+
+def _select_answer_sources(question: str, sources: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if not sources or limit <= 0:
+        return []
+    terms = _question_terms(question)
+    if not terms:
+        return sources[:limit]
+
+    ranked: list[tuple[int, int, float, int, dict[str, Any]]] = []
+    for index, source in enumerate(sources):
+        text = str(source.get("content") or source.get("excerpt") or "").lower()
+        term_hits = sum(1 for term in terms if term in text)
+        exact_match = 1 if "exact" in set(source.get("match_reasons", [])) else 0
+        score = float(source.get("score") or 0.0)
+        ranked.append((term_hits, exact_match, score, -index, source))
+
+    relevant = [item for item in ranked if item[0] > 0 or item[1] > 0]
+    if not relevant:
+        return sources[:limit]
+    relevant.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3]))
+    return [item[4] for item in relevant[:limit]]
 
 
 def _question_window(text: str, question: str, limit: int) -> str:

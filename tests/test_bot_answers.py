@@ -46,7 +46,7 @@ def test_llama_generator_falls_back_on_timeout_and_missing_citations() -> None:
             "title": "Player Primer",
             "relative_path": "Player Primer.md",
             "excerpt": "Court customs are public.",
-        }
+        },
     ]
 
     timeout = LlamaLocalAnswerGenerator(client=_FailingModelClient("bot_llama_timeout")).generate("customs?", sources)
@@ -79,7 +79,19 @@ def test_answer_context_windows_use_full_source_content_near_question_terms() ->
                 "Every time a vampire fails a Rouse Check while at Hunger 5, they must make a hunger frenzy test. "
                 "During a hunger frenzy, the vampire seeks fresh human blood from the closest source."
             ),
-        }
+        },
+        {
+            "source_type": "rules",
+            "citation": "R2",
+            "book_title": "Noisy Supplement",
+            "page_start": 99,
+            "page_end": 99,
+            "section_label": "Unrelated",
+            "excerpt": "A semantic-only source that does not contain the actual query terms.",
+            "content": "A semantic-only source about debts, privacy, and unrelated table fragments.",
+            "match_reasons": ["semantic"],
+            "score": 0.42,
+        },
     ]
 
     template = TemplateAnswerGenerator().generate("What is a hunger frenzy?", sources)
@@ -87,7 +99,9 @@ def test_answer_context_windows_use_full_source_content_near_question_terms() ->
 
     assert "Hunger frenzy: temptation causes hunger frenzy" in template.text
     assert "fresh human blood from the closest source" in template.text
+    assert "Noisy Supplement" not in template.text
     assert "Hunger frenzy: temptation causes hunger frenzy" in prompt
+    assert "Noisy Supplement" not in prompt
     assert "Fury frenzy and unrelated table fragments. Many filler words" not in prompt
 
 
