@@ -133,6 +133,12 @@ The setup wizard runs this review before deployment and can open the visibility 
 backet bot visibility
 ```
 
+From outside the vault, pass the vault explicitly:
+
+```bash
+backet bot visibility --vault /path/to/vault
+```
+
 The editor audits the vault, explains that unmarked notes stay Storyteller-only, then shows numbered choices to mark player-visible notes, mark Storyteller-only notes, exclude notes from export, review unclassified notes, clear metadata, refresh, or finish. For write actions it suggests notes and folders from the scanned vault, lets you pick a number or type a vault-relative path, previews the update, and asks before writing.
 
 The focused audit command is:
@@ -259,16 +265,29 @@ backet bot ask dist/bot-data "What does the court know about Elysium?" --command
 For faster answer debugging, use the playground command. It exports a temporary bundle, runs the same bot runtime locally, uses fast template mode by default, and prints retrieved source scores and match reasons:
 
 ```bash
-backet bot playground /path/to/vault "How does hunger frenzy work?" --command rules.ask --role-id player-role
+backet bot playground /path/to/vault "How does social combat work?" --command rules.ask --role-id player-role --limit 8
 ```
 
 From inside the vault directory, you can omit the path:
 
 ```bash
-backet bot playground "How does hunger frenzy work?" --command rules.ask --role-id player-role
+backet bot playground "Whats the hunting dicepool for an alley cat predator type vampire" --command rules.ask --role-id player-role
+```
+
+Run a small regression set with repeated `--question` options:
+
+```bash
+backet bot playground /path/to/vault \
+  --question "How long does it take to perform rituals in general?" \
+  --question "My character rolled a messy critical on their wits + awareness roll. what are the potential messy consequences?" \
+  --question "Whats a blood hunt?" \
+  --command rules.ask \
+  --limit 8
 ```
 
 Add `--use-model` when you specifically want to test the configured local Llama endpoint. Add `--bundle-output dist/bot-playground --force` when you want to keep the exported bundle for inspection.
+
+Current template answers are tuned for direct, source-grounded replies rather than raw retrieval dumps. Broad rules questions should receive short explanations with the main procedure, consequences, and caveats. Specific lookup questions, such as predator-type dice pools, should answer the requested value first and then cite sources. The answer body should not expose internal source labels such as `[R1]`; those belong in the source detail shown after the answer.
 
 The bundle shape is:
 
@@ -284,6 +303,33 @@ bot-data/
 ```
 
 The bundle does not include source PDFs, model files, tokens, SSH keys, or the full Obsidian vault.
+
+## Answer Diagnostics
+
+When a deployed Discord answer looks too short, too slow, or based on the wrong source, start with the playground and the deployed logs.
+
+Use a broader source limit for explanation questions:
+
+```bash
+backet bot playground /path/to/vault "How does social combat work?" --command rules.ask --limit 8
+```
+
+The playground output shows the chosen sources, retrieval scores, and match reasons. If the local template answer is good but Discord is slow, test the model path with `--use-model`; the Oracle Always Free VM can be slow with CPU-only Llama and should keep template fallback enabled.
+
+The Discord runtime writes one structured log line per command. It includes:
+
+- `command`
+- `access_tier`
+- `source_count`
+- `answer_mode`
+- `fallback_used`
+- `fallback_reason`
+- `question_fingerprint`
+- `response_chars`
+- `response_parts`
+- `elapsed_ms`
+
+By default, logs do not include raw question text, vault note titles, or vault paths. Source references are non-revealing, such as `R1:rules@p307` or `V1:vault`. If you are debugging a private test server and need a short question preview, set `BACKET_BOT_LOG_QUESTION_TEXT=1` in the bot runtime environment, redeploy, reproduce the issue, then turn it off again.
 
 ## Optional Local Llama
 

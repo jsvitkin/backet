@@ -198,6 +198,13 @@ pipx inject backet "sentence-transformers>=3.4.1"
 
 Backet can export a private Discord bot bundle for a single Storyteller-controlled server. The bot is not a public downloadable rules bot: it runs from a private read-only bundle containing access-scoped vault indexes, `access-policy.json`, `manifest.json`, and the shared `.backet/rules/rules.sqlite3` when rules are enabled. Source PDFs, OCR scratch state, model files, deploy credentials, and the full vault workflow stay out of the hosted runtime.
 
+Use the guided setup for the normal path:
+
+```bash
+backet bot setup /path/to/vault
+backet bot
+```
+
 Mark player-visible canon explicitly in note frontmatter:
 
 ```yaml
@@ -212,6 +219,7 @@ backet:
 Unmarked notes default to Storyteller-only for player safety. Use the CLI instead of hand-editing large folders:
 
 ```bash
+backet bot visibility --vault /path/to/vault
 backet bot visibility audit /path/to/vault
 backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --dry-run
 backet bot visibility set /path/to/vault "Player Facing" --visibility player --topic canon --recursive --yes
@@ -221,6 +229,20 @@ backet bot ask dist/bot-data "What are Elysium customs?" --command canon.ask --r
 ```
 
 Hosted deployment targets an Oracle Always Free VM with Docker Compose and outbound Discord Gateway access. Install the optional bot dependency group in the runtime image with `.[bot]`. Local Llama synthesis is optional; template answers remain the deterministic fallback, and GGUF model files stay in a VM-local model cache rather than in Git or bot bundles.
+
+Use the local playground before redeploying answer-quality fixes:
+
+```bash
+backet bot playground /path/to/vault "How does social combat work?" --command rules.ask --limit 8
+backet bot playground /path/to/vault \
+  --question "How long does it take to perform rituals in general?" \
+  --question "Whats a blood hunt?" \
+  --command rules.ask
+```
+
+The playground exports a temporary bundle and uses template-only answers by default. Add `--use-model` only when you specifically want to test the configured local Llama endpoint. Current template answers avoid exposing internal result labels in the answer body and include direct, source-grounded summaries for broad rules explanations, ritual timing, messy-critical consequences, Blood Hunt questions, and predator-type dice pool lookups.
+
+Deployed Discord logs include paste-safe diagnostics such as command route, access tier, source count, answer mode, fallback reason, response size, elapsed time, and a question fingerprint. Raw question text is logged only when `BACKET_BOT_LOG_QUESTION_TEXT=1` is set.
 
 See [docs/private-discord-bot.md](docs/private-discord-bot.md) for Discord Developer Portal setup, role/channel mapping, local Llama configuration, GitHub Actions deploy secrets, Oracle VM layout, rollback, and troubleshooting.
 

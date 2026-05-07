@@ -121,6 +121,12 @@ The setup wizard runs this review before deployment. If player-visible canon is 
 backet bot visibility
 ```
 
+From outside the vault:
+
+```bash
+backet bot visibility --vault /path/to/vault
+```
+
 It audits the vault, explains that unmarked notes stay Storyteller-only, then shows numbered choices:
 
 - mark player-facing notes as player-visible
@@ -284,16 +290,42 @@ Tokens, private keys, and model download tokens are not printed.
 When a Discord answer looks wrong, test the same question locally first:
 
 ```bash
-backet bot playground /path/to/vault "How does hunger frenzy work?" --command rules.ask --role-id player-role
+backet bot playground /path/to/vault "How does social combat work?" --command rules.ask --role-id player-role --limit 8
 ```
 
 From inside the vault directory, you can also run:
 
 ```bash
-backet bot playground "How does hunger frenzy work?" --command rules.ask --role-id player-role
+backet bot playground "Whats the hunting dicepool for an alley cat predator type vampire" --command rules.ask --role-id player-role
+```
+
+You can test several questions in one run:
+
+```bash
+backet bot playground /path/to/vault \
+  --question "How long does it take to perform rituals in general?" \
+  --question "My character rolled a messy critical on their wits + awareness roll. what are the potential messy consequences?" \
+  --question "Whats a blood hunt?" \
+  --command rules.ask \
+  --limit 8
 ```
 
 The playground exports a temporary bot bundle, answers in fast template mode, and shows which sources were retrieved with scores and match reasons. Use `--use-model` only when you want to test the configured local Llama endpoint. Use `--bundle-output dist/bot-playground --force` if you want to keep the bundle for manual inspection.
+
+Current template answers are tuned to answer directly instead of dumping raw retrieval snippets. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
+
+## Answer Logs
+
+When the bot runs in Discord, each command writes a structured diagnostic log. It includes the command route, access tier, number of sources, answer mode, fallback reason, response size, elapsed time, and a question fingerprint.
+
+The logs are paste-safe by default:
+
+- no raw question text
+- no vault note paths
+- no vault note titles
+- no token or key values
+
+For a private debug session only, set `BACKET_BOT_LOG_QUESTION_TEXT=1` in the runtime environment to include a short question preview. Turn it off again after reproducing the issue.
 
 ## Day-To-Day Redeploy
 
