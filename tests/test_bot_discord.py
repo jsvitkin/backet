@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from backet.bot_discord import DiscordRequestContext, _format_health, _format_help, build_discord_health, evaluate_discord_request
@@ -126,6 +127,29 @@ def test_discord_help_includes_registered_bot_help_command() -> None:
 
     assert "/bot help" in text
     assert "/rules ask" in text
+
+
+def test_discord_command_log_includes_answer_diagnostics(caplog, runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    _write_bot_config(vault, guild_id="guild-a")
+    _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nCourt customs.")
+    output = _export_bundle(runner, vault, tmp_path)
+    bundle = BotBundle.load(output)
+
+    with caplog.at_level(logging.INFO, logger="backet.bot.discord"):
+        evaluate_discord_request(
+            bundle,
+            DiscordRequestContext(guild_id="guild-a", user_id="player", role_ids=["player-role"], channel_id="allowed"),
+            command="canon.ask",
+            question="court customs",
+        )
+
+    message = next(record.getMessage() for record in caplog.records if "discord_bot_command" in record.getMessage())
+    assert "answer_mode=template" in message
+    assert "source_count=1" in message
+    assert "response_chars=" in message
+    assert "question_fingerprint=" in message
+    assert "source_refs=[V1:vault]" in message
 
 
 def _make_vault(tmp_path: Path) -> Path:

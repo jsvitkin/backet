@@ -177,6 +177,158 @@ def test_template_answer_extracts_predator_pool_rows_without_source_codes() -> N
     assert "**Core Rulebook p. 309 (Predator Pools)**" in template.text
 
 
+def test_broad_rules_explanation_uses_fuller_answer_shape() -> None:
+    sources = [
+        _rule_source(
+            citation="R1",
+            page=307,
+            content=(
+                "Order of operations seldom matters in social combat. "
+                "Combatants roll their respective dice pools and compare numbers of successes. "
+                "The combatant with more successes applies the result as damage to Willpower."
+            ),
+        ),
+        _rule_source(
+            citation="R2",
+            page=306,
+            content=(
+                "Advanced Conflict: Social Combat can occur anywhere and take many forms. "
+                "These rules operate at a slightly higher degree of abstraction than physical conflict. "
+                "Social combat responds well to the Three Rounds and Out structure or the One-Roll Conflict system."
+            ),
+        ),
+        _rule_source(
+            citation="R3",
+            page=306,
+            content=(
+                "As in One-Roll Conflict, set the stakes ahead of time. "
+                "Social combat requires an opponent: someone who actively does not want you to succeed. "
+                "Social Conflict Pool: depending on the conflict type, arena, and audience, build a dice pool."
+            ),
+        ),
+        _rule_source(
+            citation="R4",
+            page=307,
+            content=(
+                "Winning Social Combat: Social combat ends when one party concedes defeat. "
+                "The winner achieves the stakes agreed to at the beginning of the conflict."
+            ),
+        ),
+    ]
+
+    template = TemplateAnswerGenerator().generate("How does social combat work?", sources)
+    prompt = build_llama_prompt("How does social combat work?", sources, token_budget=256)
+
+    assert template.text.count("- ") >= 4
+    assert "set the stakes" in template.text
+    assert "damage to Willpower" in template.text
+    assert "winner achieves the agreed stakes" in template.text
+    assert "Core Rulebook p. 306" in template.text
+    assert "Core Rulebook p. 307" in template.text
+    assert "4-6 short bullets" in prompt
+    assert prompt.index("Core Rulebook p. 306") < prompt.index("Core Rulebook p. 307")
+
+
+def test_ritual_timing_question_prefers_casting_rule_over_intro_text() -> None:
+    sources = [
+        _rule_source(
+            citation="R1",
+            page=274,
+            content=(
+                "Blood Sorcery unlocks the ability to perform Rituals. "
+                "Learning new Rituals during play requires both experience and time."
+            ),
+            score=1.0,
+        ),
+        _rule_source(
+            citation="R2",
+            page=93,
+            content=(
+                "Ceremonies are Oblivion's equivalent to Blood Sorcery's Rituals. "
+                "Unless otherwise noted, performing a Ceremony requires a Rouse Check, five minutes per level to cast."
+            ),
+            score=1.1,
+        ),
+        _rule_source(
+            citation="R3",
+            page=277,
+            content=(
+                "Rituals Unless otherwise noted, performing a ritual requires a Rouse Check, "
+                "five minutes per level to cast, and a winning Intelligence + Blood Sorcery test."
+            ),
+            score=0.5,
+        ),
+    ]
+
+    template = TemplateAnswerGenerator().generate("How long does it take to perform rituals in general?", sources)
+
+    assert "five minutes per ritual level" in template.text
+    assert "Core Rulebook p. 277" in template.text
+    assert "Core Rulebook p. 274" not in template.text
+    assert "Core Rulebook p. 93" not in template.text
+
+
+def test_blood_hunt_question_prefers_blood_hunt_over_ordinary_hunting() -> None:
+    sources = [
+        _rule_source(
+            citation="R1",
+            page=308,
+            content="Systems of the Blood. Hunting and feeding are central activities for vampires.",
+            score=1.0,
+        ),
+        _rule_source(
+            citation="R2",
+            page=54,
+            content=(
+                "The Blood Hunt is the ultimate punishment in Vampire society. "
+                "Anyone can hunt and kill those named as targets."
+            ),
+            score=0.5,
+        ),
+    ]
+
+    template = TemplateAnswerGenerator().generate("Whats a blood hunt?", sources)
+
+    assert "ultimate punishment" in template.text
+    assert "hunt and kill" in template.text
+    assert "Core Rulebook p. 54" in template.text
+    assert "Core Rulebook p. 308" not in template.text
+
+
+def test_messy_critical_awareness_question_lists_relevant_consequences() -> None:
+    sources = [
+        _rule_source(
+            citation="R1",
+            page=209,
+            content=(
+                "Messy Critical A critical win in which one or more 10s appears on a Hunger die is a messy critical. "
+                "The character succeeds as in a regular critical but the Beast shapes the result. "
+                "The character gains one or more Stains from their monstrous action. "
+                "The character breaches the Masquerade through obvious supernatural violence."
+            ),
+        ),
+        _rule_source(
+            citation="R2",
+            page=209,
+            content=(
+                "The character loses one dot from an Advantage. "
+                "If none of the above conditions fit the narrative, such as on stealth or awareness tests, "
+                "the messy critical turns into a simple mess, and the test fails."
+            ),
+        ),
+    ]
+
+    template = TemplateAnswerGenerator().generate(
+        "My character rolled a messy critical on their wits + awareness roll. what are the potential messy consequences?",
+        sources,
+    )
+
+    assert "simple mess" in template.text
+    assert "Stains" in template.text
+    assert "Masquerade breach" in template.text
+    assert template.text.count("- ") >= 4
+
+
 def test_llama_generator_uses_endpoint_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BACKET_LLAMA_ENDPOINT", "http://llama:8080/completion")
 
@@ -243,6 +395,22 @@ def _write(path: Path, visibility: str, topics: list[str], body: str) -> None:
     topic_lines = "".join(f"    - {topic}\n" for topic in topics)
     topics_block = f"  bot_topics:\n{topic_lines}" if topics else ""
     path.write_text(f"---\nbacket:\n  visibility: {visibility}\n{topics_block}---\n\n{body}\n", encoding="utf-8")
+
+
+def _rule_source(citation: str, page: int, content: str, score: float = 1.0) -> dict[str, object]:
+    return {
+        "source_type": "rules",
+        "citation": citation,
+        "book_id": "core",
+        "book_title": "Core Rulebook",
+        "page_start": page,
+        "page_end": page,
+        "section_label": "Advanced Systems",
+        "content": content,
+        "excerpt": content[:180],
+        "score": score,
+        "match_reasons": ["exact"],
+    }
 
 
 class _FakeModelClient:

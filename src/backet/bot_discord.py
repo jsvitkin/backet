@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,6 +95,7 @@ def evaluate_discord_request(
     if private is False and not bool(policy.get("public_allowed", False)):
         private = True
 
+    started = time.monotonic()
     answer = answer_bot_query(
         bundle,
         command=command,
@@ -102,8 +105,30 @@ def evaluate_discord_request(
         private=private,
         limit=limit,
     )
+    elapsed_ms = round((time.monotonic() - started) * 1000)
+    generation = dict(answer.diagnostics.get("answer_generation", {}) or {})
+    generation_diag = dict(generation.get("diagnostics", {}) or {})
+    log_fields: dict[str, Any] = {
+        "command": answer.command,
+        "access_tier": answer.access_tier,
+        "retrieval_attempted": answer.retrieval_attempted,
+        "denied": answer.denied,
+        "source_count": len(answer.sources),
+        "source_refs": [_log_source_reference(source) for source in answer.sources[:5]],
+        "answer_mode": generation.get("mode"),
+        "fallback_used": generation.get("fallback_used"),
+        "fallback_reason": generation_diag.get("fallback_reason"),
+        "question_fingerprint": generation_diag.get("question_fingerprint") or _fingerprint_question(question),
+        "question_length": len(question),
+        "response_chars": len(answer.text),
+        "response_parts": len(answer.parts),
+        "elapsed_ms": elapsed_ms,
+    }
+    if os.environ.get("BACKET_BOT_LOG_QUESTION_TEXT") == "1":
+        log_fields["question_preview"] = " ".join(question.strip().split())[:120]
     LOGGER.info(
-        "discord_bot_command",
+        "discord_bot_command %s",
+        _format_log_fields(log_fields),
         extra={
             "command": answer.command,
             "access_tier": answer.access_tier,
@@ -358,6 +383,41 @@ def _source_summary(source: dict[str, Any]) -> str:
     if source.get("source_type") == "vault":
         return f"[{source['citation']}] {source['title']} ({source['relative_path']})"
     return f"[{source['citation']}] {source['book_title']} p. {source['page_start']} ({source['section_label']})"
+
+
+def _log_source_reference(source: dict[str, Any]) -> str:
+    if source.get("source_type") == "vault":
+        return f"{source.get('citation')}:vault"
+    page = source.get("page_start")
+    if source.get("page_end") and source.get("page_end") != source.get("page_start"):
+        page = f"{source.get('page_start')}-{source.get('page_end')}"
+    return f"{source.get('citation')}:rules@p{page}"
+
+
+def _fingerprint_question(question: str) -> str:
+    return hashlib.sha256(question.encode("utf-8")).hexdigest()
+
+
+def _format_log_fields(fields: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key, value in fields.items():
+        if value in (None, [], {}):
+            continue
+        parts.append(f"{key}={_format_log_value(value)}")
+    return " ".join(parts)
+
+
+def _format_log_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ",".join(_format_log_value(item) for item in value) + "]"
+    text = str(value).replace("\n", " ")
+    if any(character.isspace() for character in text) or text == "":
+        return repr(text)
+    return text
 
 
 def _format_health(health: dict[str, Any]) -> str:

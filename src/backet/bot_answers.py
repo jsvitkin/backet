@@ -23,6 +23,10 @@ DEFAULT_PROMPT_SOURCE_CHARS = 720
 DEFAULT_TEMPLATE_SOURCE_LIMIT = 1
 DEFAULT_TEMPLATE_DETAIL_CHARS = 420
 DEFAULT_PROMPT_SOURCE_LIMIT = 3
+SYSTEM_EXPLANATION_TEMPLATE_SOURCE_LIMIT = 4
+SYSTEM_EXPLANATION_TEMPLATE_DETAIL_CHARS = 260
+SYSTEM_EXPLANATION_PROMPT_SOURCE_LIMIT = 5
+SYSTEM_EXPLANATION_PROMPT_SOURCE_CHARS = 900
 SOURCE_QUOTE_WIDTH = 90
 QUERY_TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
 QUERY_STOPWORDS = {
@@ -57,6 +61,7 @@ QUERY_STOPWORDS = {
     "the",
     "to",
     "what",
+    "whats",
     "when",
     "where",
     "who",
@@ -65,6 +70,16 @@ QUERY_STOPWORDS = {
     "work",
     "working",
     "works",
+}
+SYSTEM_EXPLANATION_TERMS = {
+    "combat",
+    "conflict",
+    "conflicts",
+    "procedure",
+    "resolution",
+    "rules",
+    "system",
+    "systems",
 }
 
 
@@ -104,7 +119,7 @@ class TemplateAnswerGenerator:
                 mode=self.mode,
                 diagnostics={"source_count": 0},
             )
-        display_sources = _select_answer_sources(question, sources, limit=DEFAULT_TEMPLATE_SOURCE_LIMIT)
+        display_sources = _select_answer_sources(question, sources, limit=_template_source_limit(question))
         lines = _format_short_answer(question, display_sources)
         if lines:
             lines.append("")
@@ -112,7 +127,7 @@ class TemplateAnswerGenerator:
         else:
             lines = ["Relevant permitted rule text:"]
         for source in display_sources:
-            snippet = _source_text_for_question(source, question, limit=DEFAULT_TEMPLATE_DETAIL_CHARS)
+            snippet = _source_text_for_question(source, question, limit=_template_detail_chars(question))
             lines.append(f"**{format_bot_source_label(source)}**\n{_format_source_quote(snippet)}")
         labels = "; ".join(format_bot_source_label(source) for source in display_sources)
         lines.append(f"**Sources:** {labels}")
@@ -235,15 +250,15 @@ def build_llama_prompt(question: str, sources: list[dict[str, Any]], token_budge
         "Start with the direct answer, not a list of sources. "
         "Do not put bracket labels like [R1] in the answer body, do not quote whole source blocks, "
         "do not print a 'closest sources' section, and do not invent beyond the sources. "
-        "Write 2-4 concise Discord-friendly sentences, or 1-3 short bullets when the rule is procedural.\n\n"
+        f"{_answer_shape_instruction(question)}\n\n"
         f"QUESTION:\n{question.strip()}\n\n"
         "SOURCES:\n"
     )
     remaining = max(200, char_budget - len(header))
     blocks: list[str] = []
-    prompt_sources = _select_answer_sources(question, sources, limit=DEFAULT_PROMPT_SOURCE_LIMIT)
+    prompt_sources = _select_answer_sources(question, sources, limit=_prompt_source_limit(question))
     for source in prompt_sources:
-        source_limit = min(DEFAULT_PROMPT_SOURCE_CHARS, max(240, remaining // max(1, len(prompt_sources))))
+        source_limit = min(_prompt_source_chars(question), max(240, remaining // max(1, len(prompt_sources))))
         excerpt = _source_text_for_question(source, question, limit=source_limit)
         if not excerpt:
             continue
@@ -398,24 +413,30 @@ def _format_short_answer(question: str, sources: list[dict[str, Any]]) -> list[s
     if not terms:
         return []
     bullets: list[str] = []
-    for source in sources[:3]:
+    max_bullets = _short_answer_bullet_limit(question)
+    multi_source_answer = _wants_system_explanation(question) or _wants_consequence_list(question)
+    for source in sources[:max(3, max_bullets)]:
         source_text = clean_bot_source_text(str(source.get("content") or source.get("excerpt") or ""))
+        direct_answer_added = False
         for segment in _direct_rule_answer_segments(question, source_text, terms):
             if segment not in bullets:
                 bullets.append(segment)
-            if len(bullets) >= 2:
+                direct_answer_added = True
+            if len(bullets) >= max_bullets:
                 return ["**Short answer:**", *(f"- {bullet}" for bullet in bullets)]
-        if bullets:
+        if direct_answer_added and (_wants_consequence_list(question) or _asks_about_social_combat(question)):
+            continue
+        if bullets and not multi_source_answer:
             break
-        segments = _answer_segments(source_text, terms)
+        segments = _answer_segments(source_text, terms, limit=_short_answer_segment_limit(question))
         if not segments:
             continue
         for segment in segments:
             if segment not in bullets:
                 bullets.append(segment)
-            if len(bullets) >= 2:
+            if len(bullets) >= max_bullets:
                 return ["**Short answer:**", *(f"- {bullet}" for bullet in bullets)]
-        if bullets:
+        if bullets and not multi_source_answer:
             break
     if not bullets:
         return []
@@ -423,6 +444,15 @@ def _format_short_answer(question: str, sources: list[dict[str, Any]]) -> list[s
 
 
 def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> list[str]:
+    direct_segments = [
+        *_direct_social_combat_segments(question, text),
+        *_direct_ritual_timing_segments(question, text),
+        *_direct_blood_hunt_segments(question, text),
+        *_direct_messy_critical_segments(question, text),
+    ]
+    if direct_segments:
+        return direct_segments
+
     lowered_question = question.casefold()
     if not ("dicepool" in lowered_question or "dice pool" in lowered_question or "pool" in lowered_question):
         return []
@@ -447,6 +477,89 @@ def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> 
     return []
 
 
+def _direct_social_combat_segments(question: str, text: str) -> list[str]:
+    if not _asks_about_social_combat(question):
+        return []
+    lower = text.lower()
+    if "social combat" not in lower:
+        return []
+    segments: list[str] = []
+    if "social combat or conflict" in lower:
+        segments.append("Social combat is for contested social conflict, from public humiliation to courtly intrigue.")
+    if "three rounds and out" in lower or "one-roll conflict" in lower:
+        segments.append("It works well as Three Rounds and Out or as a One-Roll Conflict, depending on how much focus the scene needs.")
+    if "set the stakes" in lower or "requires an opponent" in lower:
+        if "set the stakes" in lower and "requires an opponent" in lower:
+            segments.append(
+                "Set the stakes before rolling, and use it only when someone actively opposes the character on the same social ground."
+            )
+        elif "set the stakes" in lower:
+            segments.append("Set the stakes before rolling: decide what the winner gets and what happens to the loser.")
+        else:
+            segments.append("Use social combat when someone actively opposes the character on the same social ground; otherwise use normal resolution.")
+    if "build a dice pool" in lower or "social conflict pool" in lower:
+        segments.append("Build the dice pool from the conflict type, arena, method, and audience.")
+    if "compare numbers of successes" in lower and "damage to willpower" in lower:
+        segments.append("Opposed rolls compare successes; the winner's margin is applied as Willpower damage.")
+    if "concedes defeat" in lower and "achieves the stakes" in lower:
+        segments.append("The conflict ends when someone concedes or breaks, and the winner achieves the agreed stakes.")
+    return segments
+
+
+def _direct_ritual_timing_segments(question: str, text: str) -> list[str]:
+    if not _wants_ritual_timing(question):
+        return []
+    lower = text.lower()
+    if "five minutes per level" not in lower:
+        return []
+    if not ("performing a ritual requires" in lower or "rituals unless otherwise noted" in lower):
+        return []
+    segments = ["Unless a ritual says otherwise, casting takes five minutes per ritual level."]
+    if "rouse check" in lower and "intelligence + blood sorcery" in lower:
+        segments.append("The general ritual procedure also calls for a Rouse Check and an Intelligence + Blood Sorcery test.")
+    return segments
+
+
+def _direct_blood_hunt_segments(question: str, text: str) -> list[str]:
+    if not _asks_about_blood_hunt(question):
+        return []
+    lower = text.lower()
+    if "blood hunt" not in lower:
+        return []
+    segments: list[str] = []
+    if "ultimate punishment" in lower:
+        segments.append(
+            "A Blood Hunt is the ultimate punishment in vampire society: the target is named for lawful retaliation."
+        )
+    if "anyone can hunt and kill" in lower:
+        segments.append("Once called, other Kindred may hunt and kill the named target.")
+    if "anything goes" in lower or "murder party" in lower:
+        segments.append("The sources frame it as a sanctioned free-for-all against the target, even involving diablerie in some cases.")
+    return segments
+
+
+def _direct_messy_critical_segments(question: str, text: str) -> list[str]:
+    if not _wants_messy_critical_consequences(question):
+        return []
+    lower = text.lower()
+    if "messy critical" not in lower and "simple mess" not in lower:
+        return []
+    segments: list[str] = []
+    if "critical win" in lower and "hunger die" in lower:
+        segments.append("A messy critical still succeeds, but the Beast shapes the success and makes the result uncontrolled.")
+    if "stains" in lower:
+        segments.append("One possible consequence is gaining one or more Stains from a monstrous action.")
+    if "masquerade" in lower:
+        segments.append("Another possible consequence is a Masquerade breach, such as obvious supernatural violence or visible feeding evidence.")
+    if "loses one dot from an advantage" in lower:
+        segments.append("The character can also lose a dot from an Advantage if the mess damages status, allies, resources, or similar assets.")
+    if "simple mess" in lower and ("awareness" in question.casefold() or "stealth" in question.casefold()):
+        segments.append(
+            "For awareness or stealth tests, if the bigger messes do not fit, the result can become a simple mess: the test fails because the Beast ruins the quiet approach."
+        )
+    return segments
+
+
 def _question_key_aliases(terms: list[str]) -> set[str]:
     aliases: set[str] = set()
     for term in terms:
@@ -469,7 +582,7 @@ def _display_rule_key(text: str) -> str:
     return overrides.get(compact, _title_answer_heading(text))
 
 
-def _answer_segments(snippet: str, terms: list[str]) -> list[str]:
+def _answer_segments(snippet: str, terms: list[str], limit: int = 2) -> list[str]:
     prepared = _prepare_sentence_boundaries(snippet)
     raw_segments = [segment.strip(" -") for segment in re.split(r"(?<=[.!?])\s+", prepared) if segment.strip(" -")]
     if not raw_segments:
@@ -489,7 +602,7 @@ def _answer_segments(snippet: str, terms: list[str]) -> list[str]:
         cue = 1 if any(value in lower for value in ("system:", "cost:", "dice pool", "dice pools", "on a success", "on a failure", "to make")) else 0
         scored.append((phrase_hit, term_hits, cue, ordered, index, cleaned))
     scored.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], item[4]))
-    selected = sorted(scored[:2], key=lambda item: item[4])
+    selected = sorted(scored[:limit], key=lambda item: item[4])
     segments = [_limit_sentence(_merge_following_rule_outcomes(item[5], raw_segments, item[4], terms)) for item in selected]
     if segments and _looks_like_complete_definition(segments[0]):
         return [segments[0]]
@@ -509,7 +622,7 @@ def _clean_answer_segment(segment: str, terms: list[str]) -> str:
     cleaned = re.sub(r"^(?:\.\s*)+", "", cleaned).strip()
     cleaned = re.sub(r"^\([^)]{0,220}\)\s*", "", cleaned).strip()
     start = _first_ordered_term_start(cleaned.lower(), terms)
-    if 0 < start < 300 and _looks_like_leading_table_noise(cleaned[:start]):
+    if 0 < start < 900 and _looks_like_leading_table_noise(cleaned[:start]):
         cleaned = cleaned[start:].lstrip(" :;-")
         start = _first_ordered_term_start(cleaned.lower(), terms)
     if 0 < start < 120 and re.match(r"^(Cost|Dice Pools?|System|Duration|Prerequisite):", cleaned, flags=re.IGNORECASE):
@@ -590,6 +703,8 @@ def _looks_like_bad_answer_segment(segment: str) -> bool:
     lower = segment.lower()
     if "..." in segment:
         return True
+    if lower.startswith(("in social combat than", "in social combats than")):
+        return True
     if re.search(r"[\ue000-\uf8ff]", segment):
         return True
     if lower.startswith(("for example, this represents", "for example, this tracker")):
@@ -641,22 +756,160 @@ def _select_answer_sources(question: str, sources: list[dict[str, Any]], limit: 
         return sources[:limit]
     phrase = _question_phrase(terms)
 
-    ranked: list[tuple[int, int, int, float, int, dict[str, Any]]] = []
+    ranked: list[tuple[int, int, int, int, float, int, dict[str, Any]]] = []
     for index, source in enumerate(sources):
         text = str(source.get("content") or source.get("excerpt") or "").lower()
         phrase_hit = 1 if phrase and phrase in text else 0
         term_hits = sum(1 for term in terms if term in text)
         exact_match = 1 if "exact" in set(source.get("match_reasons", [])) else 0
+        bonus = _source_question_bonus(question, text)
         score = float(source.get("score") or 0.0)
-        ranked.append((phrase_hit, term_hits, exact_match, score, -index, source))
+        ranked.append((bonus, phrase_hit, term_hits, exact_match, score, -index, source))
 
-    relevant = [item for item in ranked if item[0] > 0 or item[1] > 0 or item[2] > 0]
+    relevant = [item for item in ranked if item[0] > 0 or item[1] > 0 or item[2] > 0 or item[3] > 0]
     if not relevant:
         return sources[:limit]
-    if any(item[0] > 0 for item in relevant):
-        relevant = [item for item in relevant if item[0] > 0]
-    relevant.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], -item[4]))
-    return [item[5] for item in relevant[:limit]]
+    if any(item[1] > 0 for item in relevant):
+        relevant = [item for item in relevant if item[1] > 0 or item[0] > 0]
+    relevant.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], -item[4], -item[5]))
+    selected = [item[6] for item in relevant[:limit]]
+    if _wants_system_explanation(question):
+        return _source_narrative_order(selected)
+    return selected
+
+
+def _source_narrative_order(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def key(source: dict[str, Any]) -> tuple[str, int, int, str, str]:
+        return (
+            str(source.get("book_title") or source.get("title") or ""),
+            int(source.get("page_start") or 0),
+            int(source.get("page_end") or source.get("page_start") or 0),
+            str(source.get("relative_path") or ""),
+            str(source.get("citation") or ""),
+        )
+
+    return sorted(sources, key=key)
+
+
+def _answer_shape_instruction(question: str) -> str:
+    if _wants_consequence_list(question):
+        return (
+            "This is asking for possible consequences. Write 3-5 concise bullets. Start with the "
+            "most directly applicable consequence, then include other source-supported options."
+        )
+    if _wants_system_explanation(question):
+        return (
+            "This is a broad rules explanation request. Write a compact but complete overview in "
+            "4-6 short bullets. Cover what the situation is, when to use the rule, how pools or "
+            "resolution work, what consequences apply, and how the conflict ends when the sources "
+            "support those points."
+        )
+    return "Write 2-4 concise Discord-friendly sentences, or 1-3 short bullets when the rule is procedural."
+
+
+def _template_source_limit(question: str) -> int:
+    if _wants_consequence_list(question):
+        return 2
+    if _wants_system_explanation(question):
+        return SYSTEM_EXPLANATION_TEMPLATE_SOURCE_LIMIT
+    return DEFAULT_TEMPLATE_SOURCE_LIMIT
+
+
+def _template_detail_chars(question: str) -> int:
+    if _wants_system_explanation(question):
+        return SYSTEM_EXPLANATION_TEMPLATE_DETAIL_CHARS
+    return DEFAULT_TEMPLATE_DETAIL_CHARS
+
+
+def _prompt_source_limit(question: str) -> int:
+    if _wants_consequence_list(question):
+        return 4
+    if _wants_system_explanation(question):
+        return SYSTEM_EXPLANATION_PROMPT_SOURCE_LIMIT
+    return DEFAULT_PROMPT_SOURCE_LIMIT
+
+
+def _prompt_source_chars(question: str) -> int:
+    if _wants_system_explanation(question):
+        return SYSTEM_EXPLANATION_PROMPT_SOURCE_CHARS
+    return DEFAULT_PROMPT_SOURCE_CHARS
+
+
+def _short_answer_bullet_limit(question: str) -> int:
+    if _wants_consequence_list(question):
+        return 5
+    if _wants_system_explanation(question):
+        return 6
+    return 2
+
+
+def _short_answer_segment_limit(question: str) -> int:
+    if _wants_consequence_list(question):
+        return 2
+    if _wants_system_explanation(question):
+        return 3
+    return _short_answer_bullet_limit(question)
+
+
+def _source_question_bonus(question: str, lower_text: str) -> int:
+    bonus = 0
+    if _wants_ritual_timing(question):
+        if "five minutes per level" in lower_text and (
+            "performing a ritual requires" in lower_text or "rituals unless otherwise noted" in lower_text
+        ):
+            bonus += 8
+        if "performing a ritual requires" in lower_text:
+            bonus += 3
+    if _asks_about_blood_hunt(question):
+        if "blood hunt is the ultimate punishment" in lower_text:
+            bonus += 8
+        elif "blood hunt" in lower_text:
+            bonus += 4
+        if "hunting vampires hunt" in lower_text or "hunting and feeding" in lower_text:
+            bonus -= 2
+    if _wants_messy_critical_consequences(question):
+        if "messy critical a critical win" in lower_text:
+            bonus += 6
+        if "stains" in lower_text and "masquerade" in lower_text:
+            bonus += 3
+        if "simple mess" in lower_text and ("awareness" in question.casefold() or "stealth" in question.casefold()):
+            bonus += 4
+    return bonus
+
+
+def _wants_ritual_timing(question: str) -> bool:
+    lower = question.casefold()
+    return "ritual" in lower and any(term in lower for term in ("how long", "take", "time", "cast", "perform"))
+
+
+def _asks_about_blood_hunt(question: str) -> bool:
+    terms = _question_terms(question)
+    return _question_phrase(terms) == "blood hunt" or "blood hunt" in question.casefold()
+
+
+def _asks_about_social_combat(question: str) -> bool:
+    return "social combat" in question.casefold()
+
+
+def _wants_messy_critical_consequences(question: str) -> bool:
+    lower = question.casefold()
+    if "messy critical" not in lower:
+        return False
+    return any(term in lower for term in ("consequence", "consequences", "what happens", "potential", "result"))
+
+
+def _wants_consequence_list(question: str) -> bool:
+    return _wants_messy_critical_consequences(question)
+
+
+def _wants_system_explanation(question: str) -> bool:
+    normalized = " ".join(QUERY_TOKEN_PATTERN.findall(question.lower()))
+    terms = set(_question_terms(question))
+    if not terms.intersection(SYSTEM_EXPLANATION_TERMS):
+        return False
+    if re.search(r"\b(?:explain|overview|summarize|walk\s+me\s+through)\b", normalized):
+        return True
+    return bool(re.search(r"\bhow\s+(?:does|do|would|should)\b.+\b(?:work|works|run|resolve|resolved|handled)\b", normalized))
 
 
 def _question_window(text: str, question: str, limit: int) -> str:
