@@ -171,7 +171,32 @@ def test_github_setup_uses_secrets_via_adapter_and_variables_from_state(tmp_path
     assert adapter.secrets["ORACLE_VM_SSH_KEY"] == "PRIVATE-KEY-VALUE"
     assert adapter.variables["DISCORD_GUILD_ID"] == "guild-a"
     assert adapter.variables["ORACLE_VM_HOST"] == "203.0.113.10"
+    assert adapter.variables["BOT_COMPOSE_PROFILES"] == "none"
     assert "PRIVATE-KEY-VALUE" not in (vault / ".backet" / "state" / "bot-setup.yaml").read_text(encoding="utf-8")
+
+
+def test_github_setup_enables_llama_profile_for_llama_answer_mode(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    state = load_or_initialize_setup_state(vault)
+    state["discord"]["guild_id"] = "guild-a"
+    state["oracle"]["host"] = "203.0.113.10"
+    state["oracle"]["user"] = "ubuntu"
+    state["answers"] = {
+        "mode": "llama-local",
+        "model": {
+            "path": "qwen/model.gguf",
+            "url": "https://example.test/qwen.gguf",
+        },
+    }
+    save_bot_setup_state(vault, state)
+    adapter = FakeGitHubAdapter(existing_secrets={"DISCORD_TOKEN", "ORACLE_VM_SSH_KEY"})
+
+    result = run_github_setup(vault, repo="owner/private-vault", adapter=adapter)
+
+    assert result.data["last_phase_result"]["status"] == "done"
+    assert adapter.variables["BOT_COMPOSE_PROFILES"] == "llama"
+    assert adapter.variables["LLAMA_MODEL_RELATIVE_PATH"] == "qwen/model.gguf"
+    assert adapter.variables["LLAMA_MODEL_URL"] == "https://example.test/qwen.gguf"
 
 
 def test_github_setup_reports_public_repo_until_confirmed(tmp_path: Path) -> None:
@@ -282,8 +307,8 @@ def test_setup_files_installs_private_deploy_workflow_and_assets(runner, tmp_pat
     assert (repo_root / "deploy/bot/activate-release.sh").exists()
     workflow = (repo_root / ".github/workflows/deploy-backet-bot.yml").read_text(encoding="utf-8")
     dockerfile = (repo_root / "deploy/bot/Dockerfile").read_text(encoding="utf-8")
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl" in workflow
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl" in dockerfile
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl" in workflow
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl" in dockerfile
     state = load_or_initialize_setup_state(vault)
     assert state["setup"]["phases"]["prerequisites"]["status"] == "done"
     assert "Deployment Files" in result.output

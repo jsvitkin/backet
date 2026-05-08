@@ -25,7 +25,7 @@ Optional:
 
 ## Current Release
 
-The current release is `v0.1.26`.
+The current release is `v0.1.27`.
 
 Use the release installer for normal macOS/Linux installs. Use direct `pipx` installs on Windows or when you already have `pipx` set up. Use the source install path only when you want the current `main` branch instead of the latest release.
 
@@ -57,7 +57,7 @@ bash install-backet.sh
 To install the current release explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash -s -- --version 0.1.26
+curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash -s -- --version 0.1.27
 ```
 
 If your default `python3` is not Python 3.11 or newer, point the installer at the right interpreter:
@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/instal
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on `PATH` yet:
@@ -79,13 +79,13 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on `PATH` yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl
 ```
 
 If you need to choose a specific Python interpreter for `pipx`:
 
 ```bash
-pipx install --python /path/to/python3.11 https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl
+pipx install --python /path/to/python3.11 https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl
 ```
 
 After installation, open a new terminal if `backet` is not found immediately.

@@ -11,6 +11,11 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
+COMPOSE_PROFILES=",${COMPOSE_PROFILES:-},"
+if [[ "${COMPOSE_PROFILES}" != *",llama,"* ]]; then
+  exit 0
+fi
+
 MODEL_RELATIVE_PATH="${LLAMA_MODEL_RELATIVE_PATH:-}"
 MODEL_SHA256="${LLAMA_MODEL_SHA256:-}"
 MODEL_URL="${LLAMA_MODEL_URL:-}"

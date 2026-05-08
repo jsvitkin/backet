@@ -1272,7 +1272,7 @@ def _github_variables_from_state(state: dict[str, Any]) -> dict[str, str]:
     if answers.get("mode") == "llama-local":
         variables["BOT_COMPOSE_PROFILES"] = "llama"
     else:
-        variables["BOT_COMPOSE_PROFILES"] = ""
+        variables["BOT_COMPOSE_PROFILES"] = "none"
     model = dict(answers.get("model", {}) or {})
     for source_key, variable_name in [
         ("path", "LLAMA_MODEL_RELATIVE_PATH"),

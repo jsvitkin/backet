@@ -31,6 +31,8 @@ def test_oracle_vm_deploy_assets_are_present_and_private_by_default() -> None:
     assert "docker compose" in activate
     assert "sha256sum --check" in bootstrap
     assert "--progress-bar" in bootstrap
+    assert 'COMPOSE_PROFILES=",${COMPOSE_PROFILES:-},"' in bootstrap
+    assert '!= *",llama,"*' in bootstrap
     assert "workflow_dispatch" in workflow
     assert "ServerAliveInterval=30" in workflow
     assert "deploy/bot/Dockerfile" in workflow
