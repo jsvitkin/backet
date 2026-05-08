@@ -90,6 +90,7 @@ Backet tells you to open the Discord Developer Portal and:
 - keep Message Content Intent off
 - use Guild Install
 - use the `applications.commands` and `bot` scopes
+- grant the bot minimal server permissions for `View Channels` and `Send Messages`
 - install the bot only into your private server
 
 In the interactive wizard, paste the bot token into the hidden prompt. For the focused command, pass it through stdin:
@@ -112,6 +113,8 @@ backet bot setup discord /path/to/vault \
 ```
 
 Backet validates the bot token and discovers guilds, roles, and channels through Discord's bot APIs. It does not ask for your Discord password, user token, cookies, or browser session.
+
+If you use private Discord channels, add the Backet bot/app to each bot-enabled channel with `View Channel` and `Send Messages` allowed. This is separate from the Backet player role mapping. For example, a channel may allow the `Kindred` role but deny `@everyone`; in that case the bot also needs its own channel overwrite or it cannot answer normal players there. Make sure the player role also has Discord's `Use Application Commands` permission in that channel. The Discord setup phase warns when a selected player role is missing that slash-command permission.
 
 ## 3. Review Player Visibility
 
@@ -318,14 +321,13 @@ Current template answers are tuned to answer directly instead of dumping raw ret
 
 When the bot runs in Discord, each command writes a structured diagnostic log. It includes the command route, access tier, number of sources, answer mode, fallback reason, response size, elapsed time, and a question fingerprint.
 
-The logs are paste-safe by default:
+The logs include a short sanitized question preview by default so bad answers can be traced back to the prompt that produced them. They remain paste-safe for vault content and secrets:
 
-- no raw question text
 - no vault note paths
 - no vault note titles
 - no token or key values
 
-For a private debug session only, set `BACKET_BOT_LOG_QUESTION_TEXT=1` in the runtime environment to include a short question preview. Turn it off again after reproducing the issue.
+Set `BACKET_BOT_LOG_QUESTION_TEXT=0` in the runtime environment if you need to suppress question previews.
 
 ## Day-To-Day Redeploy
 

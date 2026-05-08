@@ -31,7 +31,12 @@ DEFAULT_DEPLOY_PATH = "/srv/backet-bot"
 DEFAULT_WORKFLOW_FILE = "deploy-backet-bot.yml"
 DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_PORTAL_URL = "https://discord.com/developers/applications"
-DISCORD_INSTALL_PERMISSIONS = "0"
+DISCORD_PERMISSION_VIEW_CHANNEL = 1 << 10
+DISCORD_PERMISSION_SEND_MESSAGES = 1 << 11
+DISCORD_PERMISSION_USE_APPLICATION_COMMANDS = 1 << 31
+# View Channels + Send Messages. Slash commands come from the applications.commands
+# scope, but private campaign channels still need the bot/app to be visible there.
+DISCORD_INSTALL_PERMISSIONS = str(DISCORD_PERMISSION_VIEW_CHANNEL | DISCORD_PERMISSION_SEND_MESSAGES)
 
 SETUP_PHASES = ("prerequisites", "discord", "visibility", "github", "oracle", "deploy")
 PHASE_DONE = "done"
@@ -216,7 +221,7 @@ class DiscordSetupClient:
         payload = self.transport.get(f"/guilds/{guild_id}/roles", normalized)
         if not isinstance(payload, list):
             return []
-        return [_safe_discord_object(item, ("id", "name")) for item in payload if isinstance(item, dict)]
+        return [_safe_discord_object(item, ("id", "name", "permissions")) for item in payload if isinstance(item, dict)]
 
 
 class UrllibDiscordTransport:
@@ -533,6 +538,8 @@ def run_discord_setup(
         selected_roles["storyteller"] = _dedupe_strings(storyteller_role_ids)
     if selected_roles:
         discord_state["selected_role_ids"] = selected_roles
+    if phase_data.get("roles"):
+        warnings.extend(_discord_role_permission_warnings(selected_roles, list(phase_data["roles"])))
 
     selected_channels = dict(discord_state.get("selected_channel_ids", {}) or {})
     if canon_channel_ids:
@@ -1413,6 +1420,32 @@ def _select_discord_object(items: list[dict[str, Any]], selected_id: str | None)
 
 def _safe_discord_object(item: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     return {key: str(item[key]) for key in keys if key in item and item[key] is not None}
+
+
+def _discord_role_permission_warnings(selected_roles: dict[str, list[str]], roles: list[dict[str, Any]]) -> list[str]:
+    warnings: list[str] = []
+    roles_by_id = {str(role.get("id")): role for role in roles}
+    for role_id in selected_roles.get("player", []):
+        role = roles_by_id.get(str(role_id))
+        if not role:
+            continue
+        permissions = _parse_discord_permissions(role.get("permissions"))
+        if permissions is None:
+            continue
+        if not permissions & DISCORD_PERMISSION_USE_APPLICATION_COMMANDS:
+            name = str(role.get("name") or role_id)
+            warnings.append(
+                f"Discord role `{name}` is mapped as a player role but lacks `Use Application Commands`; "
+                "players with only that role may not see or run slash commands until that Discord permission is enabled."
+            )
+    return warnings
+
+
+def _parse_discord_permissions(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _coerce_discord_id(value: Any) -> str | None:

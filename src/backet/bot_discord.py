@@ -124,8 +124,8 @@ def evaluate_discord_request(
         "response_parts": len(answer.parts),
         "elapsed_ms": elapsed_ms,
     }
-    if os.environ.get("BACKET_BOT_LOG_QUESTION_TEXT") == "1":
-        log_fields["question_preview"] = " ".join(question.strip().split())[:120]
+    if os.environ.get("BACKET_BOT_LOG_QUESTION_TEXT", "1") != "0":
+        log_fields["question_preview"] = _question_preview(question)
     LOGGER.info(
         "discord_bot_command %s",
         _format_log_fields(log_fields),
@@ -264,7 +264,8 @@ class _BacketDiscordClient:
             )
             if context.user_id:
                 self.recent_answers[str(context.user_id)] = answer
-            for part in answer.parts:
+            display_parts = split_discord_response(_format_discord_answer(question, answer.text))
+            for part in display_parts:
                 await interaction.followup.send(
                     part,
                     ephemeral=answer.response_private,
@@ -396,6 +397,17 @@ def _log_source_reference(source: dict[str, Any]) -> str:
 
 def _fingerprint_question(question: str) -> str:
     return hashlib.sha256(question.encode("utf-8")).hexdigest()
+
+
+def _question_preview(question: str, limit: int = 240) -> str:
+    return sanitize_discord_mentions(" ".join(question.strip().split()))[:limit]
+
+
+def _format_discord_answer(question: str, answer_text: str) -> str:
+    question_text = _question_preview(question, limit=500)
+    if not question_text:
+        return answer_text
+    return f"**Question:** {question_text}\n\n{answer_text.strip()}"
 
 
 def _format_log_fields(fields: dict[str, Any]) -> str:

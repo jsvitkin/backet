@@ -113,12 +113,30 @@ def test_discord_setup_refuses_user_token(tmp_path: Path) -> None:
     assert error.value.code == "bot_setup_discord_user_token_refused"
 
 
+def test_discord_setup_warns_when_player_role_cannot_use_slash_commands(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    client = DiscordSetupClient(transport=FakeDiscordTransport(player_permissions="1024"))
+
+    result = run_discord_setup(
+        vault,
+        token="bot-token",
+        guild_id="guild-a",
+        player_role_ids=["role-player"],
+        storyteller_role_ids=["role-st"],
+        client=client,
+    )
+
+    warnings = result.data["last_phase_result"]["warnings"]
+    assert any("Use Application Commands" in warning for warning in warnings)
+    assert any("Players" in warning for warning in warnings)
+
+
 def test_install_url_uses_bot_and_application_command_scopes() -> None:
     url = generate_discord_install_url("123", guild_id="456")
 
     assert "client_id=123" in url
     assert "applications.commands+bot" in url
-    assert "permissions=0" in url
+    assert "permissions=3072" in url
     assert "guild_id=456" in url
 
 
@@ -264,8 +282,8 @@ def test_setup_files_installs_private_deploy_workflow_and_assets(runner, tmp_pat
     assert (repo_root / "deploy/bot/activate-release.sh").exists()
     workflow = (repo_root / ".github/workflows/deploy-backet-bot.yml").read_text(encoding="utf-8")
     dockerfile = (repo_root / "deploy/bot/Dockerfile").read_text(encoding="utf-8")
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.25/backet-0.1.25-py3-none-any.whl" in workflow
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.25/backet-0.1.25-py3-none-any.whl" in dockerfile
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl" in workflow
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl" in dockerfile
     state = load_or_initialize_setup_state(vault)
     assert state["setup"]["phases"]["prerequisites"]["status"] == "done"
     assert "Deployment Files" in result.output
@@ -309,6 +327,9 @@ def test_setup_files_refuses_to_overwrite_changed_files_without_force(tmp_path: 
 
 
 class FakeDiscordTransport:
+    def __init__(self, player_permissions: str = "2147483648") -> None:
+        self.player_permissions = player_permissions
+
     def get(self, path: str, token: str) -> Any:
         assert token == "bot-token"
         if path == "/oauth2/applications/@me":
@@ -318,7 +339,10 @@ class FakeDiscordTransport:
         if path == "/users/@me/guilds":
             return [{"id": "guild-a", "name": "Prague by Night"}]
         if path == "/guilds/guild-a/roles":
-            return [{"id": "role-player", "name": "Players"}, {"id": "role-st", "name": "Storyteller"}]
+            return [
+                {"id": "role-player", "name": "Players", "permissions": self.player_permissions},
+                {"id": "role-st", "name": "Storyteller", "permissions": "2147483656"},
+            ]
         if path == "/guilds/guild-a/channels":
             return [{"id": "channel-canon", "name": "canon", "type": 0}]
         raise AssertionError(path)

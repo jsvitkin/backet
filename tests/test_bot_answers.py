@@ -295,6 +295,70 @@ def test_blood_hunt_question_prefers_blood_hunt_over_ordinary_hunting() -> None:
     assert "Core Rulebook p. 308" not in template.text
 
 
+def test_werewolf_feeding_question_answers_mechanics_not_lore() -> None:
+    sources = [
+        _rule_source(
+            citation="R1",
+            page=378,
+            content=(
+                "Werewolf: Lupines are enemies of vampires and dangerous in the wild. "
+                "A werewolf's blood is so rich that every drink from its veins slakes twice the normal amount of Hunger. "
+                "Draining a werewolf dry can reduce Hunger to 0. "
+                "Every point of Hunger slaked with werewolf blood increases the Difficulty to resist frenzy by one. "
+                "Even if the vampire resists, they become paranoid and short-tempered while the blood remains in their system."
+            ),
+            score=0.6,
+        ),
+        _rule_source(
+            citation="R2",
+            page=203,
+            content="A quote about eating blood uses the word eat but says nothing about werewolves.",
+            score=0.9,
+        ),
+    ]
+
+    template = TemplateAnswerGenerator().generate("can I eat a werewolf", sources)
+
+    assert "can feed on werewolf blood" in template.text
+    assert "slakes twice" in template.text
+    assert "Difficulty to resist frenzy" in template.text
+    assert "Core Rulebook p. 378" in template.text
+    assert "Core Rulebook p. 203" not in template.text
+    assert "Lupines are enemies" not in template.text
+
+
+def test_day_awake_question_answers_humanity_roll_procedure() -> None:
+    sources = [
+        _rule_source(
+            citation="R1",
+            page=221,
+            content=(
+                "Awakening during the day requires a Humanity roll at a Difficulty depending on the level of crisis. "
+                "A fire or other life-threatening situation is Difficulty 3; an urgent message or decision is Difficulty 4; "
+                "an inconvenience to deal with is Difficulty 5 or higher. "
+                "Once awakened from day-sleep, a vampire can only act for a single scene. "
+                "At the end of that period, to remain awake longer, they must make a Humanity roll at Difficulty 3; "
+                "a win permits an additional scene. A critical win lets them stay awake for as long as needed."
+            ),
+        ),
+        _rule_source(
+            citation="R2",
+            page=249,
+            content="An animal possession power mentions staying awake during the day but does not give the base procedure.",
+            score=1.2,
+        ),
+    ]
+
+    template = TemplateAnswerGenerator().generate("can a vampire stay awake during the day", sources)
+
+    assert "requires a Humanity roll" in template.text
+    assert "Difficulty 3 for life-threatening danger" in template.text
+    assert "one scene" in template.text
+    assert "stay awake as long as needed" in template.text
+    assert "Core Rulebook p. 221" in template.text
+    assert "Core Rulebook p. 249" not in template.text
+
+
 def test_messy_critical_awareness_question_lists_relevant_consequences() -> None:
     sources = [
         _rule_source(

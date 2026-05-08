@@ -445,6 +445,8 @@ def _format_short_answer(question: str, sources: list[dict[str, Any]]) -> list[s
 
 def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> list[str]:
     direct_segments = [
+        *_direct_werewolf_feeding_segments(question, text),
+        *_direct_day_awake_segments(question, text),
         *_direct_social_combat_segments(question, text),
         *_direct_ritual_timing_segments(question, text),
         *_direct_blood_hunt_segments(question, text),
@@ -475,6 +477,44 @@ def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> 
         pool = re.sub(r"\s*\+\s*", " + ", match.group("pool").strip())
         return [f"{_display_rule_key(key)} hunting dice pool: {pool}."]
     return []
+
+
+def _direct_werewolf_feeding_segments(question: str, text: str) -> list[str]:
+    if not _asks_about_werewolf_feeding(question):
+        return []
+    lower = text.lower()
+    if not ("werewolf" in lower or "lupine" in lower):
+        return []
+    if "blood" not in lower or "slakes" not in lower:
+        return []
+    segments = [
+        "Yes, a vampire can feed on werewolf blood; it is unusually potent and slakes twice the normal amount of Hunger.",
+    ]
+    if "draining a werewolf dry" in lower and "hunger to 0" in lower:
+        segments.append("Draining a werewolf dry can reduce Hunger to 0, even for two vampires sharing the kill.")
+    if "increases the difficulty to resist frenzy" in lower:
+        segments.append("The danger is frenzy: each Hunger slaked with werewolf blood increases the Difficulty to resist frenzy by 1 while it remains in the vampire's system.")
+    if "paranoid" in lower and "short-tempered" in lower:
+        segments.append("Even if the vampire resists frenzy, the blood can leave them paranoid and short-tempered while it remains in their system.")
+    return segments
+
+
+def _direct_day_awake_segments(question: str, text: str) -> list[str]:
+    if not _asks_about_day_awake(question):
+        return []
+    lower = text.lower()
+    if "awakening during the day requires a humanity roll" not in lower:
+        return []
+    segments = [
+        "Yes, but it is limited: awakening during the day requires a Humanity roll, with the Difficulty set by the crisis.",
+    ]
+    if "difficulty 3" in lower and "difficulty 4" in lower and "difficulty 5" in lower:
+        segments.append("Examples from the rule are Difficulty 3 for life-threatening danger, Difficulty 4 for an urgent message or decision, and Difficulty 5 or higher for an inconvenience.")
+    if "only act for a single scene" in lower:
+        segments.append("Once awake, the vampire can act for one scene.")
+    if "to remain awake longer" in lower and "difficulty 3" in lower:
+        segments.append("To stay awake longer, they roll Humanity at Difficulty 3; a win grants another scene, and a critical win lets them stay awake as long as needed.")
+    return segments
 
 
 def _direct_social_combat_segments(question: str, text: str) -> list[str]:
@@ -840,6 +880,8 @@ def _short_answer_bullet_limit(question: str) -> int:
         return 5
     if _wants_system_explanation(question):
         return 6
+    if _asks_about_werewolf_feeding(question) or _asks_about_day_awake(question):
+        return 4
     return 2
 
 
@@ -874,7 +916,31 @@ def _source_question_bonus(question: str, lower_text: str) -> int:
             bonus += 3
         if "simple mess" in lower_text and ("awareness" in question.casefold() or "stealth" in question.casefold()):
             bonus += 4
+    if _asks_about_werewolf_feeding(question):
+        if ("werewolf's blood" in lower_text or "werewolf’s blood" in lower_text or "lupine blood" in lower_text) and "slakes" in lower_text:
+            bonus += 8
+        if "difficulty to resist frenzy" in lower_text:
+            bonus += 3
+    if _asks_about_day_awake(question):
+        if "awakening during the day requires a humanity roll" in lower_text:
+            bonus += 8
+        if "only act for a single scene" in lower_text and "to remain awake longer" in lower_text:
+            bonus += 4
     return bonus
+
+
+def _asks_about_werewolf_feeding(question: str) -> bool:
+    lower = question.casefold()
+    if not any(term in lower for term in ("werewolf", "werewolves", "lupine", "lupines", "garou", "werebeast")):
+        return False
+    return any(term in lower for term in ("eat", "feed", "drink", "blood", "bite", "drain", "slake"))
+
+
+def _asks_about_day_awake(question: str) -> bool:
+    lower = question.casefold()
+    if "day" not in lower:
+        return False
+    return any(term in lower for term in ("awake", "awaken", "wake", "stay up", "day-sleep", "daysleep"))
 
 
 def _wants_ritual_timing(question: str) -> bool:
@@ -941,6 +1007,19 @@ def _best_window_start(lower_text: str, terms: list[str], limit: int) -> int:
     if not terms:
         return 0
     phrase = _question_phrase(terms)
+    joined = " ".join(terms)
+    if any(term in joined for term in ("werewolf", "werewolves", "lupine", "lupines", "garou", "werebeast")) and any(
+        term in joined for term in ("eat", "feed", "drink", "blood", "bite", "drain", "slake")
+    ):
+        for anchor_text in ("werewolf's blood", "werewolf’s blood", "lupine blood", "werewolf blood"):
+            anchor_index = lower_text.find(anchor_text)
+            if anchor_index >= 0:
+                return anchor_index
+    if "day" in joined and any(term in joined for term in ("awake", "awaken", "wake", "day-sleep", "daysleep")):
+        for anchor_text in ("awakening during the day", "once awakened from day", "remain awake longer"):
+            anchor_index = lower_text.find(anchor_text)
+            if anchor_index >= 0:
+                return anchor_index
     anchors: list[int] = []
     for alias in _question_key_aliases(terms):
         alias_match = re.search(rf"\b{re.escape(alias)}\s*:", lower_text)

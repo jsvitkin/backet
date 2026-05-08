@@ -91,6 +91,7 @@ It will point you to the Discord Developer Portal and tell you to:
 - keep Message Content Intent disabled
 - use Guild Install
 - use the `applications.commands` and `bot` scopes
+- grant the bot minimal server permissions for `View Channels` and `Send Messages`
 - install the bot only into your private server
 
 In the interactive wizard, paste the bot token into the hidden prompt. For the focused command, pass it through stdin so it does not land in shell history:
@@ -113,6 +114,8 @@ backet bot setup discord /path/to/vault \
 ```
 
 Backet refuses Discord user tokens, passwords, cookies, and OAuth bearer tokens. It only uses bot-token plus browser-consent flows.
+
+If commands work for server admins but not for a player role in a private channel, check Discord channel permissions before changing Backet access policy. Private channels commonly deny `@everyone` and allow only player roles such as `Kindred`; the Backet bot/app also needs an explicit channel overwrite or role that allows `View Channel` and `Send Messages`. Players also need Discord's `Use Application Commands` permission in that channel. The Discord setup phase warns when a selected player role is missing that slash-command permission.
 
 ## Visibility Phase
 
@@ -329,7 +332,7 @@ The Discord runtime writes one structured log line per command. It includes:
 - `response_parts`
 - `elapsed_ms`
 
-By default, logs do not include raw question text, vault note titles, or vault paths. Source references are non-revealing, such as `R1:rules@p307` or `V1:vault`. If you are debugging a private test server and need a short question preview, set `BACKET_BOT_LOG_QUESTION_TEXT=1` in the bot runtime environment, redeploy, reproduce the issue, then turn it off again.
+By default, logs include a short sanitized question preview so bad answers can be traced back to the prompt that produced them. Logs still avoid vault note titles, vault paths, and secret values. Source references are non-revealing, such as `R1:rules@p307` or `V1:vault`. Set `BACKET_BOT_LOG_QUESTION_TEXT=0` in the bot runtime environment if you need to suppress question previews.
 
 ## Optional Local Llama
 

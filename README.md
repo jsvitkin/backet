@@ -22,7 +22,7 @@ Run the installer from any terminal location. It does not need to run inside an 
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.25/backet-0.1.25-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
@@ -30,7 +30,7 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.25/backet-0.1.25-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl
 ```
 
 After the first install, update the CLI through Backet itself:
@@ -230,6 +230,8 @@ backet bot ask dist/bot-data "What are Elysium customs?" --command canon.ask --r
 
 Hosted deployment targets an Oracle Always Free VM with Docker Compose and outbound Discord Gateway access. Install the optional bot dependency group in the runtime image with `.[bot]`. Local Llama synthesis is optional; template answers remain the deterministic fallback, and GGUF model files stay in a VM-local model cache rather than in Git or bot bundles.
 
+For private Discord channels, Discord permissions still apply before Backet receives a question. The player role needs `Use Application Commands`, and the Backet bot/app also needs channel access, usually `View Channel` and `Send Messages`, in each channel where players should use the bot.
+
 Use the local playground before redeploying answer-quality fixes:
 
 ```bash
@@ -242,7 +244,7 @@ backet bot playground /path/to/vault \
 
 The playground exports a temporary bundle and uses template-only answers by default. Add `--use-model` only when you specifically want to test the configured local Llama endpoint. Current template answers avoid exposing internal result labels in the answer body and include direct, source-grounded summaries for broad rules explanations, ritual timing, messy-critical consequences, Blood Hunt questions, and predator-type dice pool lookups.
 
-Deployed Discord logs include paste-safe diagnostics such as command route, access tier, source count, answer mode, fallback reason, response size, elapsed time, and a question fingerprint. Raw question text is logged only when `BACKET_BOT_LOG_QUESTION_TEXT=1` is set.
+Deployed Discord logs include paste-safe diagnostics such as command route, access tier, source count, answer mode, fallback reason, response size, elapsed time, a question fingerprint, and a short sanitized question preview. Set `BACKET_BOT_LOG_QUESTION_TEXT=0` to suppress the preview.
 
 See [docs/private-discord-bot.md](docs/private-discord-bot.md) for Discord Developer Portal setup, role/channel mapping, local Llama configuration, GitHub Actions deploy secrets, Oracle VM layout, rollback, and troubleshooting.
 
@@ -295,13 +297,13 @@ python -m build --wheel
 Run the install smoke test against a built wheel on macOS, Linux, WSL, or Git Bash:
 
 ```bash
-scripts/smoke-install.sh dist/backet-0.1.25-py3-none-any.whl "$PWD"
+scripts/smoke-install.sh dist/backet-0.1.26-py3-none-any.whl "$PWD"
 ```
 
 On native Windows PowerShell, validate the built wheel with `pipx`:
 
 ```powershell
-py -3 -m pipx install --force .\dist\backet-0.1.25-py3-none-any.whl
+py -3 -m pipx install --force .\dist\backet-0.1.26-py3-none-any.whl
 backet --version
 py -3 -m pipx uninstall backet
 ```

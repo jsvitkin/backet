@@ -4,7 +4,14 @@ import json
 import logging
 from pathlib import Path
 
-from backet.bot_discord import DiscordRequestContext, _format_health, _format_help, build_discord_health, evaluate_discord_request
+from backet.bot_discord import (
+    DiscordRequestContext,
+    _format_discord_answer,
+    _format_health,
+    _format_help,
+    build_discord_health,
+    evaluate_discord_request,
+)
 from backet.bot_runtime import BotBundle, open_index_readonly
 from backet.cli import app
 from backet.vault import initialize_vault
@@ -149,7 +156,14 @@ def test_discord_command_log_includes_answer_diagnostics(caplog, runner, tmp_pat
     assert "source_count=1" in message
     assert "response_chars=" in message
     assert "question_fingerprint=" in message
+    assert "question_preview='court customs'" in message
     assert "source_refs=[V1:vault]" in message
+
+
+def test_discord_answer_echoes_question_without_mentions() -> None:
+    text = _format_discord_answer("Can I ping @everyone?", "No.")
+
+    assert text.startswith("**Question:** Can I ping @\u200beveryone?\n\nNo.")
 
 
 def _make_vault(tmp_path: Path) -> Path:

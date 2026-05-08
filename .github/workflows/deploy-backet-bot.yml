@@ -30,7 +30,7 @@ jobs:
           BACKET_INSTALL_SPEC: ${{ vars.BACKET_INSTALL_SPEC }}
         run: |
           set -euo pipefail
-          install_spec="${BACKET_INSTALL_SPEC:-backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.25/backet-0.1.25-py3-none-any.whl}"
+          install_spec="${BACKET_INSTALL_SPEC:-backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.26/backet-0.1.26-py3-none-any.whl}"
           python -m pip install "${install_spec}"
 
       - name: Export private bot bundle
@@ -71,6 +71,7 @@ jobs:
           DISCORD_GUILD_ID=${{ vars.DISCORD_GUILD_ID }}
           BACKET_BOT_BUNDLE=/srv/backet-bot/data/current
           BACKET_SKIP_UPDATE_CHECK=1
+          BACKET_BOT_LOG_QUESTION_TEXT=1
           BACKET_INSTALL_SPEC=${{ vars.BACKET_INSTALL_SPEC }}
           COMPOSE_PROFILES=${{ vars.BOT_COMPOSE_PROFILES }}
           LLAMA_MODEL_RELATIVE_PATH=${{ vars.LLAMA_MODEL_RELATIVE_PATH }}
