@@ -149,10 +149,11 @@ def test_bot_cli_contracts_and_openspec_validation(runner, tmp_path: Path) -> No
     assert ask.exit_code == 0
     assert json.loads(ask.stdout)["data"]["sources"][0]["relative_path"] == "Public Court.md"
 
-    if shutil.which("openspec") is None:
+    openspec = shutil.which("openspec")
+    if openspec is None:
         pytest.skip("openspec CLI is not installed on this runner")
     validation = subprocess.run(
-        ["openspec", "validate", "--specs"],
+        [openspec, "validate", "--specs"],
         cwd=Path(__file__).resolve().parents[1],
         text=True,
         capture_output=True,

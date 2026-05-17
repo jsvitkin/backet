@@ -27,17 +27,17 @@ Optional:
 
 The current release is `v0.1.28`.
 
-Use the release installer for normal macOS/Linux installs. Use direct `pipx` installs on Windows or when you already have `pipx` set up. Use the source install path only when you want the current `main` branch instead of the latest release.
+Use the macOS/Linux installer script on macOS or Linux. Use the Windows PowerShell commands on Windows. Use the source install path only when you want the current `main` branch instead of the latest release.
 
 ## Recommended Install on macOS or Linux
 
-The supported release install path is the installer script:
+The supported macOS/Linux release install path is the installer script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash
 ```
 
-Run this command from any terminal location. It does not need to run inside your Obsidian vault.
+Run this command from any macOS or Linux terminal location. It does not need to run inside your Obsidian vault.
 
 The script:
 
@@ -66,20 +66,34 @@ If your default `python3` is not Python 3.11 or newer, point the installer at th
 curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash -s -- --python /path/to/python3.11
 ```
 
-## Direct `pipx` Install
+## Recommended Install on Windows PowerShell
 
-On any platform with `pipx` already available, install the release wheel directly:
-
-```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
-```
-
-On Windows PowerShell, use the Python launcher if `pipx` is not on `PATH` yet:
+Install `pipx` with the Python launcher, refresh your user PATH, then install the current release wheel:
 
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
 py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
+```
+
+Open a new PowerShell window after `ensurepath` if `backet` is not found immediately.
+
+Check the install:
+
+```powershell
+backet --version
+backet --help
+backet setup check
+```
+
+The Windows install path does not use the macOS/Linux `curl ... | bash` installer.
+
+## Direct `pipx` Install
+
+On any platform with `pipx` already available, install the release wheel directly. This is also the shortest Windows command if `pipx` is already on `PATH`:
+
+```bash
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
 ```
 
 If you need to choose a specific Python interpreter for `pipx`:
@@ -92,7 +106,7 @@ After installation, open a new terminal if `backet` is not found immediately.
 
 The installer and direct `pipx` commands install only the CLI. They do not initialize a vault. Vault files are created later by `backet init /path/to/vault`.
 
-Check the CLI:
+Check the CLI on macOS or Linux:
 
 ```bash
 backet --version
@@ -259,7 +273,7 @@ and then retry the original command.
 
 CLI update checks are cached in Backet's machine-level config directory, not in any vault. Declining an interactive update prompt snoozes that specific latest version for a short period, while newer future versions will still be offered.
 
-The older macOS/Linux upgrade script remains useful for repair or reinstall flows:
+The older macOS/Linux upgrade script remains useful for repair or reinstall flows on macOS or Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/upgrade.sh | bash
