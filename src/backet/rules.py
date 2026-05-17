@@ -61,6 +61,7 @@ RULES_SCHEMA_VERSION = 5
 RULES_RAG_V2_METADATA_SCHEMA_VERSION = 2
 RULES_RAG_V2_RETRIEVAL_SCHEMA_VERSION = 1
 RULE_BLOCK_STRUCTURE_SCHEMA_VERSION = 1
+RULE_UNIT_SCHEMA_VERSION = 1
 RULES_ENTITY_CATALOG_SCHEMA_VERSION = 1
 DEFAULT_PAGE_MIN_CHARS = 80
 DEFAULT_CHUNK_WORDS = 220
@@ -150,6 +151,8 @@ RETRIEVAL_FLAG_PENALTIES = {
     "navigational": 0.25,
     "art_heavy": 0.2,
 }
+RULE_UNIT_CHANNEL_CAP = 40
+RULE_UNIT_LOW_CONFIDENCE_THRESHOLD = 0.65
 
 
 @dataclass(slots=True)
@@ -315,6 +318,7 @@ class RuleSearchCandidate:
     aliases: list[str] = field(default_factory=list)
     entity_locations: list[dict[str, Any]] = field(default_factory=list)
     evidence_cues: list[str] = field(default_factory=list)
+    rule_units: list[dict[str, Any]] = field(default_factory=list)
     retrieval_channels: list[str] = field(default_factory=list)
     rejection_reasons: list[str] = field(default_factory=list)
     exact_score: float = 0.0
@@ -367,6 +371,50 @@ class RuleBlockStructure:
     source_window: str
     structure_flags: list[str]
     schema_version: int = RULE_BLOCK_STRUCTURE_SCHEMA_VERSION
+
+
+@dataclass(slots=True)
+class RuleUnit:
+    unit_id: str
+    book_id: str
+    page_start: int
+    page_end: int
+    heading_path: list[str]
+    source_chunk_ids: list[int]
+    source_content_hash: str
+    unit_kind: str
+    authority_role: str
+    entity_tags: list[str]
+    mechanic_tags: list[str]
+    answer_facets: list[str]
+    confidence: float
+    warnings: list[str]
+    source_window: str
+    extractor_backend: str = "deterministic"
+    extractor_model: str = "rules-rule-units-v1"
+    schema_version: int = RULE_UNIT_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "unit_id": self.unit_id,
+            "book_id": self.book_id,
+            "page_start": self.page_start,
+            "page_end": self.page_end,
+            "heading_path": self.heading_path,
+            "source_chunk_ids": self.source_chunk_ids,
+            "source_content_hash": self.source_content_hash,
+            "unit_kind": self.unit_kind,
+            "authority_role": self.authority_role,
+            "entity_tags": self.entity_tags,
+            "mechanic_tags": self.mechanic_tags,
+            "answer_facets": self.answer_facets,
+            "confidence": self.confidence,
+            "warnings": self.warnings,
+            "source_window": self.source_window,
+            "extractor_backend": self.extractor_backend,
+            "extractor_model": self.extractor_model,
+            "schema_version": self.schema_version,
+        }
 
 
 @dataclass(slots=True)
@@ -620,6 +668,35 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS rule_units (
+            unit_id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+            page_start INTEGER NOT NULL,
+            page_end INTEGER NOT NULL,
+            heading_path_json TEXT NOT NULL,
+            source_chunk_ids_json TEXT NOT NULL,
+            primary_chunk_id INTEGER REFERENCES rule_chunks(id) ON DELETE CASCADE,
+            source_content_hash TEXT NOT NULL,
+            unit_kind TEXT NOT NULL,
+            authority_role TEXT NOT NULL,
+            entity_tags_json TEXT NOT NULL,
+            mechanic_tags_json TEXT NOT NULL,
+            answer_facets_json TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            warnings_json TEXT NOT NULL,
+            source_window TEXT NOT NULL,
+            extractor_backend TEXT NOT NULL,
+            extractor_model TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rule_units_book
+        ON rule_units(book_id, unit_kind, authority_role);
+
+        CREATE INDEX IF NOT EXISTS idx_rule_units_primary_chunk
+        ON rule_units(primary_chunk_id);
+
         CREATE TABLE IF NOT EXISTS rule_entities (
             entity_id TEXT PRIMARY KEY,
             book_id TEXT,
@@ -685,6 +762,7 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
     )
     _ensure_rule_chunk_structure_schema(connection)
     _ensure_rule_chunk_retrieval_metadata_schema(connection)
+    _ensure_rule_units_schema(connection)
     _ensure_seed_rule_entities(connection)
     connection.execute(
         """
@@ -726,6 +804,30 @@ def _ensure_rule_chunk_retrieval_metadata_schema(connection: sqlite3.Connection)
     for column, column_type in additions.items():
         if column not in existing:
             connection.execute(f"ALTER TABLE rule_chunk_retrieval_metadata ADD COLUMN {column} {column_type}")
+
+
+def _ensure_rule_units_schema(connection: sqlite3.Connection) -> None:
+    existing = _table_columns(connection, "rule_units")
+    additions = {
+        "primary_chunk_id": "INTEGER REFERENCES rule_chunks(id) ON DELETE CASCADE",
+        "extractor_backend": "TEXT NOT NULL DEFAULT 'deterministic'",
+        "extractor_model": "TEXT NOT NULL DEFAULT 'rules-rule-units-v1'",
+    }
+    for column, column_type in additions.items():
+        if column not in existing:
+            connection.execute(f"ALTER TABLE rule_units ADD COLUMN {column} {column_type}")
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_rule_units_book
+        ON rule_units(book_id, unit_kind, authority_role)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_rule_units_primary_chunk
+        ON rule_units(primary_chunk_id)
+        """
+    )
 
 
 def _ensure_seed_rule_entities(connection: sqlite3.Connection) -> None:
@@ -895,6 +997,7 @@ def ingest_rulebook(
         _emit_progress(progress, phase="scope", message="Generated rule scopes", current=1, total=1)
         _rebuild_rule_chunks_fts(connection, book_id, progress=progress)
         semantic_index = _try_index_rule_chunks(connection, book_id=book_id, full=False, progress=progress)
+        rule_units = _refresh_rule_units(connection, book_id=book_id, full=False)
         _emit_progress(progress, phase="audit", message="Summarizing ingest quality", current=0, total=1)
         audit_summary = _audit_summary(connection, book_id)
         _emit_progress(progress, phase="audit", message="Summarized ingest quality", current=1, total=1)
@@ -918,6 +1021,7 @@ def ingest_rulebook(
             "suspect_pages": audit_summary["suspect_pages"],
             "chunk_count": audit_summary["chunk_count"],
             "semantic_index": semantic_index,
+            "rule_units": rule_units,
         },
     )
 
@@ -991,6 +1095,7 @@ def query_rules_connection(
         definition_query=INTENT_DEFINITION in query_plan.intents or _is_definition_rule_query(query),
         channel_matches=channel_matches,
     )
+    _attach_rule_units_to_candidates(connection, rows)
     rows = _rerank_rag_v2_candidates(rows, query_plan=query_plan)
     neighbor_rows = _expand_rag_v2_neighbor_rows(
         connection,
@@ -1015,6 +1120,7 @@ def query_rules_connection(
             channel_matches=neighbor_channel_matches,
         )
         rows = _merge_candidate_lists(rows, neighbor_candidates)
+        _attach_rule_units_to_candidates(connection, rows)
         rows = _rerank_rag_v2_candidates(rows, query_plan=query_plan)
     if not rows:
         raise AppError(
@@ -1187,6 +1293,71 @@ def audit_rule_scopes(vault_root: Path, book_id: str | None = None) -> CommandRe
     return CommandResult(
         message="Audited rule scope assertions",
         data={"vault": str(vault_root), "book_id": book_id, "books": summaries},
+    )
+
+
+def inspect_rule_units(vault_root: Path, book_id: str | None = None, unit_id: str | None = None) -> CommandResult:
+    ensure_bootstrapped_vault(vault_root)
+    with closing(open_rules_connection(vault_root)) as connection:
+        if unit_id:
+            row = connection.execute(
+                """
+                SELECT
+                    ru.*,
+                    b.book_title,
+                    rc.section_label,
+                    rc.excerpt AS chunk_excerpt
+                FROM rule_units ru
+                JOIN books b ON b.book_id = ru.book_id
+                LEFT JOIN rule_chunks rc ON rc.id = ru.primary_chunk_id
+                WHERE ru.unit_id = ?
+                """,
+                (unit_id,),
+            ).fetchone()
+            if row is None:
+                raise AppError(
+                    code="rule_unit_missing",
+                    message="No derived rule unit matches the requested ID.",
+                    hint="Run `backet rules units <vault>` to list available units.",
+                    details={"unit_id": unit_id},
+                    exit_code=2,
+                )
+            return CommandResult(
+                message="Inspected derived rule unit",
+                data={"vault": str(vault_root), "unit": _rule_unit_row_to_dict(row)},
+            )
+
+        summary = _rule_units_summary(connection, book_id=book_id)
+        parameters: list[Any] = []
+        where_clause = ""
+        if book_id:
+            where_clause = "WHERE ru.book_id = ?"
+            parameters.append(book_id)
+        rows = connection.execute(
+            f"""
+            SELECT
+                ru.*,
+                b.book_title,
+                rc.section_label,
+                rc.excerpt AS chunk_excerpt
+            FROM rule_units ru
+            JOIN books b ON b.book_id = ru.book_id
+            LEFT JOIN rule_chunks rc ON rc.id = ru.primary_chunk_id
+            {where_clause}
+            ORDER BY ru.book_id, ru.page_start, ru.unit_kind, ru.unit_id
+            LIMIT 25
+            """,
+            parameters,
+        ).fetchall()
+    return CommandResult(
+        message="Inspected derived rule units",
+        data={
+            "vault": str(vault_root),
+            "book_id": book_id,
+            "summary": summary,
+            "units": [_rule_unit_row_to_dict(row, include_window=False) for row in rows],
+            "next_command": "backet rules index <vault> --full" if summary["missing_rule_units"] or summary["stale_rule_units"] else None,
+        },
     )
 
 
@@ -1523,6 +1694,7 @@ def _query_corpus_blockers(connection: sqlite3.Connection, *, book_id: str | Non
             "semantic_error": _semantic_error(error),
         }
     summary = _semantic_index_summary(_fetch_rule_chunks_for_index(connection, book_id=book_id), backend=backend)
+    rule_units = _rule_units_summary(connection, book_id=book_id)
     blockers: list[str] = []
     if summary["missing_embeddings"] or summary["missing_metadata"]:
         blockers.append("missing_retrieval_index")
@@ -1532,17 +1704,31 @@ def _query_corpus_blockers(connection: sqlite3.Connection, *, book_id: str | Non
         blockers.append("missing_rule_block_structure")
     if summary["stale_structure"]:
         blockers.append("stale_rule_block_structure")
+    if rule_units["missing_rule_units"]:
+        blockers.append("missing_rule_units")
+    if rule_units["stale_rule_units"]:
+        blockers.append("stale_rule_units")
     return {
         "action": "reindex" if blockers else "none",
         "blockers": blockers,
         "repair_hint": _rules_index_hint(book_id) if blockers else None,
-        "missing": int(summary["missing_embeddings"]) + int(summary["missing_metadata"]) + int(summary["missing_structure"]),
-        "stale": int(summary["stale_embeddings"]) + int(summary["stale_metadata"]) + int(summary["stale_structure"]),
+        "missing": int(summary["missing_embeddings"])
+        + int(summary["missing_metadata"])
+        + int(summary["missing_structure"])
+        + int(rule_units["missing_rule_units"]),
+        "stale": int(summary["stale_embeddings"])
+        + int(summary["stale_metadata"])
+        + int(summary["stale_structure"])
+        + int(rule_units["stale_rule_units"]),
         "structure": {
             "schema_version": RULE_BLOCK_STRUCTURE_SCHEMA_VERSION,
             "structured_blocks": int(summary["structure_chunks"]),
             "missing": int(summary["missing_structure"]),
             "stale": int(summary["stale_structure"]),
+        },
+        "rule_units": {
+            "schema_version": RULE_UNIT_SCHEMA_VERSION,
+            **rule_units,
         },
     }
 
@@ -2146,15 +2332,18 @@ def _audit_category_counts(findings: list[RuleAuditFinding]) -> dict[str, int]:
 def _rules_audit_maintenance_findings(semantic_index: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     if not semantic_index.get("available", False) or semantic_index.get("repair_hint"):
+        rule_units = semantic_index.get("rule_units") if isinstance(semantic_index.get("rule_units"), dict) else {}
         missing = (
             int(semantic_index.get("missing_embeddings") or 0)
             + int(semantic_index.get("missing_metadata") or 0)
             + int(semantic_index.get("missing_structure") or 0)
+            + int(rule_units.get("missing_rule_units") or 0)
         )
         stale = (
             int(semantic_index.get("stale_embeddings") or 0)
             + int(semantic_index.get("stale_metadata") or 0)
             + int(semantic_index.get("stale_structure") or 0)
+            + int(rule_units.get("stale_rule_units") or 0)
         )
         if missing or stale or not semantic_index.get("available", False):
             findings.append(
@@ -3874,6 +4063,21 @@ def _generate_rag_v2_candidates(
             ),
         )
 
+    rule_unit_terms = _rag_v2_rule_unit_terms(query_plan)
+    if rule_unit_terms:
+        run_channel(
+            "rule_unit",
+            RULE_UNIT_CHANNEL_CAP,
+            " ".join(rule_unit_terms),
+            lambda: _search_rule_chunks_by_rule_units(
+                connection,
+                terms=rule_unit_terms,
+                book_id=book_id,
+                scope_tags=scope_tags,
+                limit=RULE_UNIT_CHANNEL_CAP,
+            ),
+        )
+
     raw_fallback = next((query for query in query_plan.retrieval_queries if query.role == "raw_fallback"), None)
     if raw_fallback is not None:
         raw_fts = build_rules_fts_query(raw_fallback.text)
@@ -3923,6 +4127,7 @@ def _generate_rag_v2_candidates(
             "phrase": RAG_V2_PHRASE_CHANNEL_CAP,
             "alias": RAG_V2_ALIAS_CHANNEL_CAP,
             "metadata": RAG_V2_METADATA_CHANNEL_CAP,
+            "rule_unit": RULE_UNIT_CHANNEL_CAP,
             "raw_fallback": RAG_V2_RAW_FALLBACK_CHANNEL_CAP,
             "semantic": semantic_limit,
         },
@@ -3963,6 +4168,24 @@ def _rag_v2_metadata_terms(query_plan: RulesQueryPlan) -> list[str]:
     _extend_unique(terms, query_plan.required_evidence)
     _extend_unique(terms, _intent_evidence_cues(query_plan.intents))
     return _dedupe_text_values(terms)[:24]
+
+
+def _rag_v2_rule_unit_terms(query_plan: RulesQueryPlan) -> list[str]:
+    terms: list[str] = []
+    _extend_unique(terms, query_plan.canonical_terms)
+    _extend_unique(terms, query_plan.expanded_terms)
+    _extend_unique(terms, query_plan.required_evidence)
+    _extend_unique(terms, _intent_evidence_cues(query_plan.intents))
+    for intent in query_plan.intents:
+        if intent == INTENT_DEFINITION:
+            _extend_unique(terms, ["base_rule", "definition", "effect"])
+        elif intent == INTENT_ADVANCEMENT:
+            _extend_unique(terms, ["advancement", "prerequisite", "cost"])
+        elif intent == INTENT_TARGETING:
+            _extend_unique(terms, ["target", "system", "restriction"])
+        elif intent == INTENT_COST:
+            _extend_unique(terms, ["cost", "prerequisite"])
+    return _dedupe_text_values(terms)[:28]
 
 
 def _search_rule_chunks_by_entity_anchors(
@@ -4161,6 +4384,102 @@ def _search_rule_chunks_by_metadata(
     return filtered
 
 
+def _search_rule_chunks_by_rule_units(
+    connection: sqlite3.Connection,
+    *,
+    terms: list[str],
+    book_id: str | None,
+    scope_tags: list[str],
+    limit: int,
+) -> list[sqlite3.Row]:
+    patterns = [f"%{term.casefold()}%" for term in terms if term]
+    if not patterns:
+        return []
+    where_parts: list[str] = []
+    parameters: list[Any] = []
+    for pattern in patterns:
+        where_parts.append(
+            "("
+            "ru.unit_id LIKE ? OR ru.unit_kind LIKE ? OR ru.authority_role LIKE ? "
+            "OR ru.heading_path_json LIKE ? OR ru.entity_tags_json LIKE ? OR ru.mechanic_tags_json LIKE ? "
+            "OR ru.answer_facets_json LIKE ? OR ru.source_window LIKE ?"
+            ")"
+        )
+        parameters.extend([pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern])
+    rows = connection.execute(
+        f"""
+        SELECT
+            rc.id AS chunk_id,
+            rc.book_id,
+            b.book_title,
+            b.tier,
+            b.scope_tags_json AS book_scope_tags_json,
+            rc.scope_tags_json AS chunk_scope_tags_json,
+            rc.page_start,
+            rc.page_end,
+            rc.chunk_index,
+            rc.section_label,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
+            COALESCE(NULLIF(rc.source_window, ''), rc.excerpt) AS excerpt,
+            rc.word_count,
+            rc.content_hash,
+            rc.confidence,
+            rc.extraction_method,
+            rc.rule_block_id,
+            rc.heading_path_json AS block_heading_path_json,
+            rc.block_kind,
+            rc.source_window,
+            rc.structure_flags_json,
+            rc.structure_schema_version,
+            m.section_kind,
+            m.retrieval_flags_json,
+            m.content_hash AS metadata_content_hash,
+            m.rag_schema_version,
+            m.heading_path_json,
+            m.aliases_json,
+            m.entity_locations_json,
+            m.evidence_cues_json,
+            COALESCE((
+                SELECT json_group_array(json_object(
+                    'id', rsa.id,
+                    'tag', rsa.tag,
+                    'role', rsa.role,
+                    'status', rsa.status,
+                    'confidence', rsa.confidence
+                ))
+                FROM rule_chunk_scope_assertions csa
+                JOIN rule_scope_assertions rsa ON rsa.id = csa.assertion_id
+                WHERE csa.chunk_id = rc.id
+                  AND rsa.status = 'applied'
+            ), '[]') AS scope_assertions_json,
+            0.0 AS rank
+        FROM rule_units ru
+        JOIN rule_chunks rc ON rc.id = ru.primary_chunk_id
+        JOIN books b ON b.book_id = rc.book_id
+        LEFT JOIN rule_chunk_retrieval_metadata m ON m.chunk_id = rc.id
+        LEFT JOIN rule_retrieval_exclusions rex
+          ON rex.chunk_id = rc.id
+         AND rex.content_hash = rc.content_hash
+        WHERE rex.id IS NULL
+          AND ru.source_content_hash = rc.content_hash
+          AND ru.schema_version = ?
+          AND ({' OR '.join(where_parts)})
+        GROUP BY rc.id
+        ORDER BY MAX(ru.confidence) DESC, rc.book_id, rc.page_start, rc.chunk_index
+        LIMIT ?
+        """,
+        [RULE_UNIT_SCHEMA_VERSION, *parameters, limit],
+    ).fetchall()
+    filtered: list[sqlite3.Row] = []
+    for row in rows:
+        if book_id and row["book_id"] != book_id:
+            continue
+        if row["tier"] == "supplement" and scope_tags and not _row_matches_scope(row, scope_tags):
+            continue
+        filtered.append(row)
+    return filtered
+
+
 def _semantic_quality(semantic: SemanticRulesSearch) -> dict[str, Any]:
     if semantic.retrieval_mode == "semantic_unavailable":
         return {
@@ -4296,6 +4615,16 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
         "aliases": row.aliases,
         "entity_locations": row.entity_locations,
         "evidence_cues": row.evidence_cues,
+        "rule_units": row.rule_units,
+        "rule_unit_kinds": sorted({str(unit.get("unit_kind")) for unit in row.rule_units if unit.get("unit_kind")}),
+        "rule_unit_authority_roles": sorted({str(unit.get("authority_role")) for unit in row.rule_units if unit.get("authority_role")}),
+        "rule_unit_answer_facets": sorted(
+            {
+                str(facet)
+                for unit in row.rule_units
+                for facet in (unit.get("answer_facets") if isinstance(unit.get("answer_facets"), list) else [])
+            }
+        ),
         "retrieval_channels": sorted(set(row.retrieval_channels)),
         "rejection_reasons": sorted(set(row.rejection_reasons)),
     }
@@ -4533,6 +4862,35 @@ def _merge_rule_candidates(
     return sorted(candidates.values(), key=_candidate_sort_key)
 
 
+def _attach_rule_units_to_candidates(connection: sqlite3.Connection, candidates: list[RuleSearchCandidate]) -> None:
+    chunk_ids = sorted({candidate.chunk_id for candidate in candidates})
+    if not chunk_ids:
+        return
+    placeholders = ", ".join("?" for _ in chunk_ids)
+    rows = connection.execute(
+        f"""
+        SELECT
+            ru.*,
+            b.book_title,
+            rc.section_label
+        FROM rule_units ru
+        JOIN books b ON b.book_id = ru.book_id
+        LEFT JOIN rule_chunks rc ON rc.id = ru.primary_chunk_id
+        WHERE ru.primary_chunk_id IN ({placeholders})
+          AND ru.schema_version = ?
+          AND ru.source_content_hash = rc.content_hash
+        ORDER BY ru.confidence DESC, ru.unit_id
+        """,
+        [*chunk_ids, RULE_UNIT_SCHEMA_VERSION],
+    ).fetchall()
+    by_chunk_id: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        primary_chunk_id = int(row["primary_chunk_id"])
+        by_chunk_id.setdefault(primary_chunk_id, []).append(_rule_unit_row_to_dict(row, include_window=False))
+    for candidate in candidates:
+        candidate.rule_units = by_chunk_id.get(candidate.chunk_id, [])
+
+
 def _expand_rag_v2_neighbor_rows(
     connection: sqlite3.Connection,
     *,
@@ -4765,6 +5123,9 @@ def _score_rule_candidate(
 
     if candidate.section_kind != "unknown" or candidate.retrieval_flags:
         reasons.add("retrieval-metadata")
+    if candidate.rule_units:
+        reasons.add("rule-unit")
+        score += _rule_unit_base_score(candidate)
 
     if candidate.tier == "supplement":
         authoritative_overlap = _scope_assertion_overlap(candidate, scope_tags, authoritative=True)
@@ -4798,6 +5159,19 @@ def _score_rule_candidate(
     candidate.match_reasons = sorted(reasons)
 
 
+def _rule_unit_base_score(candidate: RuleSearchCandidate) -> float:
+    score = 0.0
+    roles = {str(unit.get("authority_role") or "") for unit in candidate.rule_units}
+    kinds = {str(unit.get("unit_kind") or "") for unit in candidate.rule_units}
+    if roles & {"base", "specific", "exception"}:
+        score += 0.2
+    if kinds & {"base_rule", "discipline_power", "ritual", "formula", "ceremony", "merit", "flaw", "table_row"}:
+        score += 0.15
+    if roles <= {"example", "flavor"}:
+        score -= 0.25
+    return score
+
+
 def _rerank_rag_v2_candidates(
     candidates: list[RuleSearchCandidate],
     *,
@@ -4825,6 +5199,7 @@ def _rerank_rag_v2_candidates(
 def _rag_v2_evidence_score(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> float:
     score = 0.0
     cues = set(candidate.evidence_cues)
+    score += _rule_unit_query_score(candidate, query_plan)
     for intent in query_plan.intents:
         required = set(_intent_evidence_cues([intent]))
         if not required:
@@ -4853,6 +5228,53 @@ def _rag_v2_evidence_score(candidate: RuleSearchCandidate, query_plan: RulesQuer
     if INTENT_DEFINITION in query_plan.intents and "cost" in cues and not cues.intersection({"definition", "system"}):
         score -= 0.25
     return score
+
+
+def _rule_unit_query_score(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> float:
+    if not candidate.rule_units:
+        return 0.0
+    score = 0.0
+    required_facets = set(_rule_unit_required_facets(query_plan))
+    unit_facets = {
+        str(facet)
+        for unit in candidate.rule_units
+        for facet in (unit.get("answer_facets") if isinstance(unit.get("answer_facets"), list) else [])
+    }
+    roles = {str(unit.get("authority_role") or "") for unit in candidate.rule_units}
+    kinds = {str(unit.get("unit_kind") or "") for unit in candidate.rule_units}
+    if required_facets and unit_facets & required_facets:
+        score += 0.45 + (0.08 * len(unit_facets & required_facets))
+    if roles & {"base", "specific", "exception"}:
+        score += 0.2
+    if roles <= {"example", "flavor"}:
+        score -= 0.5
+    if INTENT_DEFINITION in query_plan.intents and "base_rule" in kinds and "effect" in unit_facets:
+        score += 0.35
+    if INTENT_TARGETING in query_plan.intents and "target" in unit_facets:
+        score += 0.4
+    if INTENT_ADVANCEMENT in query_plan.intents and "prerequisite" in unit_facets:
+        score += 0.25
+    return score
+
+
+def _rule_unit_required_facets(query_plan: RulesQueryPlan) -> list[str]:
+    facets: list[str] = []
+    for intent in query_plan.intents:
+        _extend_unique(facets, _rule_unit_required_facets_for_intent(intent))
+    return facets
+
+
+def _rule_unit_required_facets_for_intent(intent: str) -> list[str]:
+    mapping = {
+        INTENT_DEFINITION: ["effect"],
+        INTENT_ADVANCEMENT: ["cost", "prerequisite"],
+        INTENT_TARGETING: ["target", "effect", "limit"],
+        INTENT_COST: ["cost"],
+        INTENT_TIMING: ["duration"],
+        INTENT_DICE_POOL: ["dice_pool"],
+        INTENT_CONSEQUENCE: ["consequence"],
+    }
+    return mapping.get(intent, [])
 
 
 def _candidate_has_definition_anchor(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> bool:
@@ -4949,6 +5371,8 @@ def _rag_v2_channel_score(candidate: RuleSearchCandidate) -> float:
         score += 0.12
     if "metadata" in channels:
         score += 0.22
+    if "rule_unit" in channels:
+        score += 0.28
     if "raw_fallback" in channels and len(channels) == 1:
         score -= 0.2
     return score
@@ -4957,6 +5381,10 @@ def _rag_v2_channel_score(candidate: RuleSearchCandidate) -> float:
 def _rag_v2_section_penalty(candidate: RuleSearchCandidate) -> float:
     if candidate.section_kind in {"toc", "index", "sheet", "art", "furniture"}:
         return 0.9
+    if candidate.rule_units:
+        roles = {str(unit.get("authority_role") or "") for unit in candidate.rule_units}
+        if roles and roles <= {"example", "flavor"}:
+            return 0.45
     if candidate.section_kind == "lore" and candidate.evidence_cues == ["lore"]:
         return 0.35
     return 0.0
@@ -5013,6 +5441,9 @@ def _intent_evidence_cues(intents: list[str]) -> list[str]:
 def _candidate_satisfies_any_requirement(candidate: RuleSearchCandidate, requirements: dict[str, set[str]]) -> bool:
     cues = set(candidate.evidence_cues)
     for intent, required in requirements.items():
+        required_facets = set(_rule_unit_required_facets_for_intent(intent))
+        if required_facets and _candidate_rule_unit_facets(candidate) & required_facets:
+            return True
         if intent == INTENT_TIMING:
             if _candidate_has_timing_answer(candidate):
                 return True
@@ -5102,6 +5533,14 @@ def _candidate_anchor_haystack(candidate: RuleSearchCandidate) -> str:
     entity_text: list[str] = []
     for entity in candidate.entity_locations:
         entity_text.extend([str(entity.get("alias") or ""), str(entity.get("canonical") or ""), str(entity.get("scope_tag") or "")])
+    rule_unit_text: list[str] = []
+    for unit in candidate.rule_units:
+        for key in ("unit_kind", "authority_role", "section_label"):
+            rule_unit_text.append(str(unit.get(key) or ""))
+        for key in ("heading_path", "entity_tags", "mechanic_tags", "answer_facets"):
+            values = unit.get(key)
+            if isinstance(values, list):
+                rule_unit_text.extend(str(value) for value in values)
     return _normalize_rule_alias(
         " ".join(
             [
@@ -5110,6 +5549,7 @@ def _candidate_anchor_haystack(candidate: RuleSearchCandidate) -> str:
                 " ".join(candidate.aliases),
                 " ".join(candidate.scope_tags),
                 " ".join(entity_text),
+                " ".join(rule_unit_text),
             ]
         )
     )
@@ -5228,6 +5668,10 @@ def _satisfied_evidence_types(
 ) -> set[str]:
     satisfied: set[str] = set()
     for intent, cues in requirements.items():
+        required_facets = set(_rule_unit_required_facets_for_intent(intent))
+        if required_facets and any(_candidate_rule_unit_facets(candidate) & required_facets for candidate in candidates):
+            satisfied.add(intent)
+            continue
         if intent == INTENT_TIMING:
             if any(_candidate_has_timing_answer(candidate) for candidate in candidates):
                 satisfied.add(intent)
@@ -5235,6 +5679,14 @@ def _satisfied_evidence_types(
         if any(set(candidate.evidence_cues) & cues for candidate in candidates):
             satisfied.add(intent)
     return satisfied
+
+
+def _candidate_rule_unit_facets(candidate: RuleSearchCandidate) -> set[str]:
+    return {
+        str(facet)
+        for unit in candidate.rule_units
+        for facet in (unit.get("answer_facets") if isinstance(unit.get("answer_facets"), list) else [])
+    }
 
 
 def _candidate_answerability_rejections(
@@ -5326,6 +5778,11 @@ def _rag_v2_candidate_summary(candidate: RuleSearchCandidate, *, reasons: list[s
         "evidence_score": round(candidate.evidence_score, 6),
         "section_kind": candidate.section_kind,
         "evidence_cues": candidate.evidence_cues,
+        "rule_unit_kinds": sorted({str(unit.get("unit_kind")) for unit in candidate.rule_units if unit.get("unit_kind")}),
+        "rule_unit_authority_roles": sorted(
+            {str(unit.get("authority_role")) for unit in candidate.rule_units if unit.get("authority_role")}
+        ),
+        "rule_unit_answer_facets": sorted(_candidate_rule_unit_facets(candidate)),
         "retrieval_channels": sorted(set(candidate.retrieval_channels)),
         "rejection_reasons": sorted(set(reasons)),
         "excerpt": candidate.excerpt,
@@ -5614,6 +6071,7 @@ def _index_rule_chunks(
         )
 
     catalog_summary = _refresh_rules_entity_catalog(connection, book_id=book_id, full=full)
+    rule_units_summary = _refresh_rule_units(connection, book_id=book_id, full=full)
     refreshed_rows = _fetch_rule_chunks_for_index(connection, book_id=book_id)
     summary = _semantic_index_summary(refreshed_rows, backend=backend)
     summary.update(
@@ -5631,6 +6089,7 @@ def _index_rule_chunks(
             "refreshed_metadata": len(metadata_rows),
             "refreshed_structure": len(structure_rows),
             "entity_catalog": catalog_summary,
+            "rule_units": rule_units_summary,
             "full_reindex": full,
             "source_pdf_required": False,
             "source_operation": "stored_chunk_text",
@@ -5655,6 +6114,7 @@ def _inspect_rule_semantic_index_for_current_backend(
 
     rows = _fetch_rule_chunks_for_index(connection, book_id=book_id)
     summary = _semantic_index_summary(rows, backend=backend)
+    rule_units = _rule_units_summary(connection, book_id=book_id)
     needs_repair = (
         summary["missing_embeddings"] > 0
         or summary["stale_embeddings"] > 0
@@ -5662,6 +6122,8 @@ def _inspect_rule_semantic_index_for_current_backend(
         or summary["stale_metadata"] > 0
         or summary["missing_structure"] > 0
         or summary["stale_structure"] > 0
+        or rule_units["missing_rule_units"] > 0
+        or rule_units["stale_rule_units"] > 0
     )
     summary.update(
         {
@@ -5678,6 +6140,10 @@ def _inspect_rule_semantic_index_for_current_backend(
                 "available_chunks": summary["structure_chunks"],
                 "missing_chunks": summary["missing_structure"],
                 "stale_chunks": summary["stale_structure"],
+            },
+            "rule_units": {
+                "schema_version": RULE_UNIT_SCHEMA_VERSION,
+                **rule_units,
             },
             "repair_hint": _rules_index_hint(book_id) if needs_repair else None,
         }
@@ -6001,6 +6467,437 @@ def _rules_entity_catalog_summary(connection: sqlite3.Connection, *, book_id: st
     }
 
 
+def _refresh_rule_units(connection: sqlite3.Connection, *, book_id: str | None, full: bool) -> dict[str, Any]:
+    rows = _fetch_rule_chunks_for_index(connection, book_id=book_id)
+    before = _rule_units_summary(connection, book_id=book_id)
+    refresh_rows = [row for row in rows if full or _rule_units_need_refresh(connection, row)]
+    refreshed = 0
+    skipped = 0
+    for row in refresh_rows:
+        connection.execute("DELETE FROM rule_units WHERE primary_chunk_id = ?", (int(row["chunk_id"]),))
+        units = derive_rule_units_from_chunk(row)
+        if not units:
+            skipped += 1
+            continue
+        for unit in units:
+            _upsert_rule_unit(connection, unit)
+            refreshed += 1
+    after = _rule_units_summary(connection, book_id=book_id)
+    return {
+        **after,
+        "rule_unit_schema_version": RULE_UNIT_SCHEMA_VERSION,
+        "rule_units_before": before["rule_units"],
+        "missing_rule_units_before": before["missing_rule_units"],
+        "stale_rule_units_before": before["stale_rule_units"],
+        "low_confidence_rule_units_before": before["low_confidence_rule_units"],
+        "refreshed_rule_units": refreshed,
+        "skipped_rule_unit_chunks": skipped,
+        "source_pdf_required": False,
+        "source_operation": "stored_chunk_text",
+    }
+
+
+def _rule_units_summary(connection: sqlite3.Connection, *, book_id: str | None) -> dict[str, Any]:
+    parameters: list[Any] = []
+    book_filter = ""
+    if book_id:
+        book_filter = "WHERE rc.book_id = ?"
+        parameters.append(book_id)
+    rows = connection.execute(
+        f"""
+        SELECT
+            rc.id AS chunk_id,
+            rc.book_id,
+            rc.content_hash,
+            ru.unit_id,
+            ru.source_content_hash,
+            ru.schema_version,
+            ru.confidence,
+            ru.warnings_json
+        FROM rule_chunks rc
+        LEFT JOIN rule_units ru ON ru.primary_chunk_id = rc.id
+        {book_filter}
+        ORDER BY rc.book_id, rc.page_start, rc.chunk_index
+        """,
+        parameters,
+    ).fetchall()
+    chunk_ids = {int(row["chunk_id"]) for row in rows}
+    unit_count = 0
+    stale_unit_ids: list[str] = []
+    low_confidence_unit_ids: list[str] = []
+    warned_unit_ids: list[str] = []
+    chunks_with_units: set[int] = set()
+    for row in rows:
+        unit_id = row["unit_id"]
+        if unit_id is None:
+            continue
+        unit_count += 1
+        chunks_with_units.add(int(row["chunk_id"]))
+        if row["source_content_hash"] != row["content_hash"] or int(row["schema_version"] or 0) != RULE_UNIT_SCHEMA_VERSION:
+            stale_unit_ids.append(str(unit_id))
+        if float(row["confidence"] or 0.0) < RULE_UNIT_LOW_CONFIDENCE_THRESHOLD:
+            low_confidence_unit_ids.append(str(unit_id))
+        if _json_list(row["warnings_json"]):
+            warned_unit_ids.append(str(unit_id))
+    return {
+        "rule_units": unit_count,
+        "rule_unit_chunks": len(chunks_with_units),
+        "missing_rule_units": len(chunk_ids - chunks_with_units),
+        "stale_rule_units": len(set(stale_unit_ids)),
+        "low_confidence_rule_units": len(set(low_confidence_unit_ids)),
+        "warned_rule_units": len(set(warned_unit_ids)),
+        "stale_unit_ids": sorted(set(stale_unit_ids))[:20],
+        "low_confidence_unit_ids": sorted(set(low_confidence_unit_ids))[:20],
+        "warned_unit_ids": sorted(set(warned_unit_ids))[:20],
+    }
+
+
+def _rule_units_need_refresh(connection: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    units = connection.execute(
+        """
+        SELECT source_content_hash, schema_version
+        FROM rule_units
+        WHERE primary_chunk_id = ?
+        """,
+        (int(row["chunk_id"]),),
+    ).fetchall()
+    if not units:
+        return True
+    return any(
+        unit["source_content_hash"] != row["content_hash"]
+        or int(unit["schema_version"] or 0) != RULE_UNIT_SCHEMA_VERSION
+        for unit in units
+    )
+
+
+def derive_rule_units_from_chunk(row: sqlite3.Row | dict[str, Any]) -> list[RuleUnit]:
+    content = str(_row_or_dict(row, "content") or "")
+    if not content.strip():
+        return []
+    metadata = _rule_unit_chunk_metadata(row)
+    heading_path = metadata["heading_path"]
+    section_label = str(_row_or_dict(row, "section_label") or "")
+    unit_kind = _infer_rule_unit_kind(
+        section_label=section_label,
+        content=content,
+        block_kind=str(_row_or_dict(row, "block_kind") or ""),
+        section_kind=metadata["section_kind"],
+        evidence_cues=metadata["evidence_cues"],
+    )
+    authority_role = _infer_rule_unit_authority_role(
+        unit_kind=unit_kind,
+        section_kind=metadata["section_kind"],
+        evidence_cues=metadata["evidence_cues"],
+        content=content,
+    )
+    answer_facets = _rule_unit_answer_facets(metadata["evidence_cues"], content)
+    entity_tags = _rule_unit_entity_tags(metadata["entity_locations"], _json_list(_row_or_dict(row, "chunk_scope_tags_json")))
+    mechanic_tags = _rule_unit_mechanic_tags(entity_tags, metadata["aliases"], content)
+    confidence, warnings = _rule_unit_confidence_and_warnings(
+        row=row,
+        unit_kind=unit_kind,
+        authority_role=authority_role,
+        answer_facets=answer_facets,
+        content=content,
+    )
+    chunk_id = int(_row_or_dict(row, "chunk_id") or 0)
+    page_start = int(_row_or_dict(row, "page_start") or 0)
+    page_end = int(_row_or_dict(row, "page_end") or page_start)
+    chunk_index = int(_row_or_dict(row, "chunk_index") or 0)
+    book_id = str(_row_or_dict(row, "book_id") or "")
+    unit_id = _rule_unit_id(
+        book_id=book_id,
+        page_start=page_start,
+        chunk_index=chunk_index,
+        heading_path=heading_path,
+        unit_kind=unit_kind,
+        content_hash=str(_row_or_dict(row, "content_hash") or fingerprint_text(content)),
+    )
+    return [
+        RuleUnit(
+            unit_id=unit_id,
+            book_id=book_id,
+            page_start=page_start,
+            page_end=page_end,
+            heading_path=heading_path,
+            source_chunk_ids=[chunk_id],
+            source_content_hash=str(_row_or_dict(row, "content_hash") or fingerprint_text(content)),
+            unit_kind=unit_kind,
+            authority_role=authority_role,
+            entity_tags=entity_tags,
+            mechanic_tags=mechanic_tags,
+            answer_facets=answer_facets,
+            confidence=confidence,
+            warnings=warnings,
+            source_window=summarize_text(str(_row_or_dict(row, "source_window") or _row_or_dict(row, "excerpt") or content), 520),
+        )
+    ]
+
+
+def _rule_unit_chunk_metadata(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    section_kind = str(_row_or_dict(row, "section_kind") or "")
+    rag_schema_version = int(_row_or_dict(row, "rag_schema_version") or 0)
+    metadata_hash = _row_or_dict(row, "metadata_content_hash")
+    if not section_kind or metadata_hash != _row_or_dict(row, "content_hash") or rag_schema_version != RULES_RAG_V2_METADATA_SCHEMA_VERSION:
+        metadata = classify_rule_chunk_rag_metadata(
+            section_label=str(_row_or_dict(row, "section_label") or ""),
+            content=str(_row_or_dict(row, "content") or ""),
+            word_count=int(_row_or_dict(row, "word_count") or 0),
+            confidence=float(_row_or_dict(row, "confidence") or 0.0),
+            extraction_method=str(_row_or_dict(row, "extraction_method") or ""),
+        )
+        heading_path = metadata.heading_path
+        aliases = metadata.aliases
+        entity_locations = metadata.entity_locations
+        evidence_cues = metadata.evidence_cues
+        section_kind = metadata.section_kind
+    else:
+        heading_path = _json_text_list(_row_or_dict(row, "heading_path_json"))
+        aliases = _json_text_list(_row_or_dict(row, "aliases_json"))
+        entity_locations = _json_dict_list(_row_or_dict(row, "entity_locations_json"))
+        evidence_cues = _json_text_list(_row_or_dict(row, "evidence_cues_json"))
+    block_heading_path = _json_text_list(_row_or_dict(row, "block_heading_path_json"))
+    if block_heading_path:
+        heading_path = block_heading_path
+    if not heading_path:
+        heading_path = _infer_heading_path(str(_row_or_dict(row, "section_label") or ""), str(_row_or_dict(row, "content") or ""))
+    return {
+        "section_kind": section_kind,
+        "heading_path": heading_path,
+        "aliases": aliases,
+        "entity_locations": entity_locations,
+        "evidence_cues": evidence_cues,
+    }
+
+
+def _infer_rule_unit_kind(
+    *,
+    section_label: str,
+    content: str,
+    block_kind: str,
+    section_kind: str,
+    evidence_cues: list[str],
+) -> str:
+    text = _normalize_rule_alias(f"{section_label} {content}")
+    if section_kind == "lore" or ("lore" in evidence_cues and not {"system", "cost", "dice_pool"} & set(evidence_cues)):
+        return "flavor_lore"
+    if "example" in evidence_cues and not {"system", "cost", "dice_pool", "targeting", "duration"} & set(evidence_cues):
+        return "example"
+    if re.search(r"\b(?:except|exception|unless|cannot|can't|may not)\b", text):
+        return "exception"
+    if block_kind == "table" or _looks_like_structured_table(content):
+        return "table_row"
+    if re.search(r"\bformula\b", text):
+        return "formula"
+    if re.search(r"\bceremony\b", text):
+        return "ceremony"
+    if re.search(r"\britual\b", text):
+        return "ritual"
+    if re.search(r"\bmerit\b", text):
+        return "merit"
+    if re.search(r"\bflaw\b", text):
+        return "flaw"
+    if block_kind == "power" or re.search(r"\b(?:discipline|power|amalgam|level\s+\d)\b", text):
+        return "discipline_power"
+    if section_kind in {"toc", "index", "sheet", "art", "furniture"}:
+        return section_kind
+    return "base_rule"
+
+
+def _infer_rule_unit_authority_role(*, unit_kind: str, section_kind: str, evidence_cues: list[str], content: str) -> str:
+    text = _normalize_rule_alias(content)
+    if unit_kind == "exception":
+        return "exception"
+    if unit_kind == "example" or "example" in evidence_cues:
+        return "example"
+    if unit_kind == "flavor_lore" or section_kind == "lore":
+        return "flavor"
+    if re.search(r"\b(?:optional|storyteller may|at the storyteller s discretion)\b", text):
+        return "optional"
+    if unit_kind in {"discipline_power", "ritual", "formula", "ceremony", "merit", "flaw", "table_row"}:
+        return "specific"
+    return "base"
+
+
+def _rule_unit_answer_facets(evidence_cues: list[str], content: str) -> list[str]:
+    facets: list[str] = []
+    cue_map = {
+        "cost": "cost",
+        "dice_pool": "dice_pool",
+        "targeting": "target",
+        "duration": "duration",
+        "prerequisite": "prerequisite",
+        "consequence": "consequence",
+        "definition": "effect",
+        "system": "effect",
+        "advancement": "prerequisite",
+    }
+    for cue in evidence_cues:
+        mapped = cue_map.get(cue)
+        if mapped:
+            _add_unique(facets, mapped)
+    text = _normalize_rule_alias(content)
+    if re.search(r"\b(?:limit|maximum|minimum|only|cannot|may not|unless|except)\b", text):
+        _add_unique(facets, "limit")
+    if re.search(r"\b(?:see|refer to|as described on|p\s*\d+|page\s+\d+)\b", text):
+        _add_unique(facets, "source_reference")
+    return facets
+
+
+def _rule_unit_entity_tags(entity_locations: list[dict[str, Any]], scope_tags: list[str]) -> list[str]:
+    tags: list[str] = []
+    _extend_unique(tags, scope_tags)
+    for entity in entity_locations:
+        tag = str(entity.get("scope_tag") or "")
+        if tag:
+            _add_unique(tags, tag)
+    return sorted(set(tags))
+
+
+def _rule_unit_mechanic_tags(entity_tags: list[str], aliases: list[str], content: str) -> list[str]:
+    tags = [tag for tag in entity_tags if tag.startswith(("mechanic:", "discipline:", "power:", "topic:", "content:"))]
+    for alias in aliases:
+        normalized = _slugify(alias)
+        if normalized:
+            _add_unique(tags, f"alias:{normalized}")
+    text = _normalize_rule_alias(content)
+    for label, pattern in {
+        "mechanic:cost": r"\bcost\b",
+        "mechanic:dice-pool": r"\bdice pool\b",
+        "mechanic:duration": r"\bduration\b",
+        "mechanic:targeting": r"\btarget",
+    }.items():
+        if re.search(pattern, text):
+            _add_unique(tags, label)
+    return sorted(set(tags))
+
+
+def _rule_unit_confidence_and_warnings(
+    *,
+    row: sqlite3.Row | dict[str, Any],
+    unit_kind: str,
+    authority_role: str,
+    answer_facets: list[str],
+    content: str,
+) -> tuple[float, list[str]]:
+    confidence = float(_row_or_dict(row, "confidence") or 0.0)
+    warnings: list[str] = []
+    if confidence < SUSPECT_CONFIDENCE_THRESHOLD:
+        _add_unique(warnings, "low_source_confidence")
+    if not answer_facets and authority_role in {"base", "specific", "exception"}:
+        confidence = min(confidence, 0.62)
+        _add_unique(warnings, "no_answer_facets_detected")
+    if unit_kind in {"toc", "index", "sheet", "art", "furniture"}:
+        confidence = min(confidence, 0.5)
+        _add_unique(warnings, "non_answer_section")
+    if len(content.split()) < 18:
+        confidence = min(confidence, 0.6)
+        _add_unique(warnings, "very_short_unit")
+    for flag in _json_list(_row_or_dict(row, "structure_flags_json")):
+        if flag in {"possible_mixed_topic", "page_furniture_removed"}:
+            _add_unique(warnings, flag)
+    return round(max(min(confidence, 1.0), 0.0), 4), sorted(set(warnings))
+
+
+def _rule_unit_id(
+    *,
+    book_id: str,
+    page_start: int,
+    chunk_index: int,
+    heading_path: list[str],
+    unit_kind: str,
+    content_hash: str,
+) -> str:
+    heading = heading_path[-1] if heading_path else f"chunk-{chunk_index}"
+    slug = _slugify(f"{unit_kind}-{heading}")[:48] or f"{unit_kind}-chunk-{chunk_index}"
+    return f"{book_id}:unit:p{page_start}:c{chunk_index}:{slug}:{content_hash[:10]}"
+
+
+def _upsert_rule_unit(connection: sqlite3.Connection, unit: RuleUnit) -> None:
+    now = timestamp_now()
+    connection.execute(
+        """
+        INSERT INTO rule_units (
+            unit_id, book_id, page_start, page_end, heading_path_json, source_chunk_ids_json,
+            primary_chunk_id, source_content_hash, unit_kind, authority_role, entity_tags_json,
+            mechanic_tags_json, answer_facets_json, confidence, warnings_json, source_window,
+            extractor_backend, extractor_model, schema_version, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(unit_id) DO UPDATE SET
+            book_id = excluded.book_id,
+            page_start = excluded.page_start,
+            page_end = excluded.page_end,
+            heading_path_json = excluded.heading_path_json,
+            source_chunk_ids_json = excluded.source_chunk_ids_json,
+            primary_chunk_id = excluded.primary_chunk_id,
+            source_content_hash = excluded.source_content_hash,
+            unit_kind = excluded.unit_kind,
+            authority_role = excluded.authority_role,
+            entity_tags_json = excluded.entity_tags_json,
+            mechanic_tags_json = excluded.mechanic_tags_json,
+            answer_facets_json = excluded.answer_facets_json,
+            confidence = excluded.confidence,
+            warnings_json = excluded.warnings_json,
+            source_window = excluded.source_window,
+            extractor_backend = excluded.extractor_backend,
+            extractor_model = excluded.extractor_model,
+            schema_version = excluded.schema_version,
+            updated_at = excluded.updated_at
+        """,
+        (
+            unit.unit_id,
+            unit.book_id,
+            unit.page_start,
+            unit.page_end,
+            json.dumps(unit.heading_path),
+            json.dumps(unit.source_chunk_ids),
+            unit.source_chunk_ids[0] if unit.source_chunk_ids else None,
+            unit.source_content_hash,
+            unit.unit_kind,
+            unit.authority_role,
+            json.dumps(unit.entity_tags),
+            json.dumps(unit.mechanic_tags),
+            json.dumps(unit.answer_facets),
+            unit.confidence,
+            json.dumps(unit.warnings),
+            unit.source_window,
+            unit.extractor_backend,
+            unit.extractor_model,
+            unit.schema_version,
+            now,
+        ),
+    )
+
+
+def _rule_unit_row_to_dict(row: sqlite3.Row, *, include_window: bool = True) -> dict[str, Any]:
+    data = {
+        "unit_id": row["unit_id"],
+        "book_id": row["book_id"],
+        "book_title": _row_optional(row, "book_title"),
+        "page_start": int(row["page_start"]),
+        "page_end": int(row["page_end"]),
+        "heading_path": _json_text_list(row["heading_path_json"]),
+        "source_chunk_ids": [int(value) for value in _json_text_list(row["source_chunk_ids_json"]) if str(value).isdigit()],
+        "primary_chunk_id": int(row["primary_chunk_id"]) if row["primary_chunk_id"] is not None else None,
+        "source_content_hash": row["source_content_hash"],
+        "unit_kind": row["unit_kind"],
+        "authority_role": row["authority_role"],
+        "entity_tags": _json_text_list(row["entity_tags_json"]),
+        "mechanic_tags": _json_text_list(row["mechanic_tags_json"]),
+        "answer_facets": _json_text_list(row["answer_facets_json"]),
+        "confidence": float(row["confidence"]),
+        "warnings": _json_text_list(row["warnings_json"]),
+        "extractor_backend": row["extractor_backend"],
+        "extractor_model": row["extractor_model"],
+        "schema_version": int(row["schema_version"]),
+        "section_label": _row_optional(row, "section_label"),
+    }
+    if include_window:
+        data["source_window"] = summarize_text(str(row["source_window"] or ""), 520)
+    return data
+
+
 def _fetch_rule_chunks_for_index(connection: sqlite3.Connection, book_id: str | None) -> list[sqlite3.Row]:
     parameters: list[Any] = []
     where_clause = ""
@@ -6020,6 +6917,7 @@ def _fetch_rule_chunks_for_index(connection: sqlite3.Connection, book_id: str | 
             rc.excerpt AS raw_excerpt,
             COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
             COALESCE(NULLIF(rc.source_window, ''), rc.excerpt) AS excerpt,
+            rc.scope_tags_json AS chunk_scope_tags_json,
             rc.word_count,
             rc.confidence,
             rc.extraction_method,
@@ -6425,6 +7323,12 @@ def _looks_art_heavy(content: str, word_count: int) -> bool:
 
 def _row_optional(row: sqlite3.Row, key: str) -> Any | None:
     return row[key] if key in row.keys() else None
+
+
+def _row_or_dict(row: sqlite3.Row | dict[str, Any], key: str) -> Any | None:
+    if isinstance(row, dict):
+        return row.get(key)
+    return _row_optional(row, key)
 
 
 def _json_list(payload: Any) -> list[str]:

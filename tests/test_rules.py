@@ -13,10 +13,12 @@ from backet.embeddings import EmbeddingResult
 from backet.errors import AppError
 from backet.rules import (
     RULE_BLOCK_STRUCTURE_SCHEMA_VERSION,
+    RULE_UNIT_SCHEMA_VERSION,
     _rules_corpus_action_for_book,
     build_rules_fts_query,
     classify_rule_chunk,
     classify_rule_chunk_rag_metadata,
+    derive_rule_units_from_chunk,
     derive_rule_block_structure,
     ingest_rulebook,
     normalize_scope_tags,
@@ -68,6 +70,53 @@ def test_rule_block_structure_cleans_page_furniture_and_preserves_stat_block_fie
     assert "System: Add dice" in structure.clean_content
     assert not structure.source_window.startswith("V A M P I R E")
     assert "page_furniture_removed" in structure.structure_flags
+
+
+def test_rule_unit_derivation_classifies_specific_mechanics_and_facets() -> None:
+    units = derive_rule_units_from_chunk(
+        {
+            "chunk_id": 7,
+            "book_id": "core-v5",
+            "page_start": 214,
+            "page_end": 214,
+            "chunk_index": 2,
+            "section_label": "Blood Sorcery Ritual",
+            "content": (
+                "Ward Against Kindred\n"
+                "Cost: One Rouse Check. Dice Pool: Intelligence + Blood Sorcery. "
+                "System: The vampire marks a ward that affects Kindred who cross it. "
+                "Duration: Until the next sunset."
+            ),
+            "excerpt": "Ward Against Kindred. Cost: One Rouse Check.",
+            "source_window": "Ward Against Kindred. Cost: One Rouse Check. System: The vampire marks a ward.",
+            "word_count": 36,
+            "confidence": 0.93,
+            "extraction_method": "direct",
+            "content_hash": "abc123",
+            "block_kind": "ritual",
+            "block_heading_path_json": json.dumps(["Blood Sorcery Ritual", "Ward Against Kindred"]),
+            "structure_flags_json": "[]",
+            "chunk_scope_tags_json": json.dumps(["discipline:blood-sorcery"]),
+            "metadata_content_hash": "abc123",
+            "rag_schema_version": 2,
+            "section_kind": "rules",
+            "heading_path_json": json.dumps(["Blood Sorcery Ritual", "Ward Against Kindred"]),
+            "aliases_json": json.dumps(["blood sorcery"]),
+            "entity_locations_json": json.dumps(
+                [{"alias": "blood sorcery", "canonical": "blood sorcery", "scope_tag": "discipline:blood-sorcery"}]
+            ),
+            "evidence_cues_json": json.dumps(["system", "cost", "dice_pool", "duration", "targeting"]),
+        }
+    )
+
+    assert len(units) == 1
+    unit = units[0]
+    assert unit.schema_version == RULE_UNIT_SCHEMA_VERSION
+    assert unit.unit_kind == "ritual"
+    assert unit.authority_role == "specific"
+    assert {"cost", "dice_pool", "duration", "target", "effect"}.issubset(set(unit.answer_facets))
+    assert "discipline:blood-sorcery" in unit.entity_tags
+    assert unit.source_chunk_ids == [7]
 
 
 def test_rules_ingest_clean_pdf_and_query_metadata(runner, tmp_path: Path) -> None:
@@ -124,6 +173,58 @@ def test_rules_ingest_clean_pdf_and_query_metadata(runner, tmp_path: Path) -> No
 
     assert row is not None
     assert row["section_label"] == "Feeding Rights"
+
+
+def test_rules_ingest_derives_rule_units_and_query_uses_rule_unit_channel(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "rule-units.pdf",
+        [
+            _rule_page(
+                "Blood Surge",
+                "Cost: One Rouse Check. System: A vampire can add dice to a test using Blood Surge. Duration: One test.",
+            ),
+            _rule_page(
+                "Example Chronicle",
+                "For example, an elder might brag about Blood Surge at court without explaining the rules.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    with closing(open_rules_connection(vault)) as connection:
+        units = connection.execute("SELECT * FROM rule_units ORDER BY page_start").fetchall()
+
+    assert units
+    assert units[0]["schema_version"] == RULE_UNIT_SCHEMA_VERSION
+    assert units[0]["source_content_hash"]
+    assert "cost" in json.loads(units[0]["answer_facets_json"])
+
+    query_result = runner.invoke(app, ["--json", "rules", "query", str(vault), "what is the cost of blood surge", "--limit", "1"])
+    assert query_result.exit_code == 0, query_result.stdout
+    payload = json.loads(query_result.stdout)
+    first = payload["data"]["primary_results"][0]
+    assert "rule_unit" in first["retrieval_channels"]
+    assert first["rule_units"]
+    assert "cost" in first["rule_unit_answer_facets"]
+    assert payload["data"]["evidence_packet"]["candidate_counts"]["rule_unit"] >= 1
+
+
+def test_rules_units_human_output_is_concise(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "units-human.pdf",
+        [_rule_page("Rouse Checks", "A Rouse Check is a single die roll. System: On a failure, Hunger increases by one.")],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(app, ["rules", "units", str(vault)])
+
+    assert result.exit_code == 0, result.stdout
+    assert "Derived rule units" in result.stdout
+    assert "Units:" in result.stdout
+    assert "{" not in result.stdout
+    assert "source_content_hash" not in result.stdout
 
 
 def test_rules_index_reports_semantic_schema_and_refreshes_stale_chunks(runner, tmp_path: Path) -> None:

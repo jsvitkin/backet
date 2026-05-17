@@ -170,11 +170,25 @@ When a supplement matches the requested scope, `backet` returns supplement resul
 
 In v0.2.0, rules queries run through the RAG v2 retrieval path. Backet plans the query, resolves common rule entities and aliases, combines exact search with semantic matches when embeddings are available, reranks bounded candidates, and builds an evidence packet before answer synthesis. JSON output includes the query plan, resolved entities, unresolved terms, target groups, retrieval mode, embedding backend/model, candidate counts, evidence status, selected evidence, fallback context, and corpus blockers. If semantic retrieval or evidence checks are unavailable, Backet falls back explicitly instead of silently pretending the stronger path ran.
 
+The rules store also derives rule units from chunks. A rule unit is a rebuildable mechanics record that keeps source book/page/chunk links but classifies the passage as a base rule, specific power, ritual, table row, exception, example, or flavor/lore and records facets such as cost, dice pool, target, duration, prerequisite, consequence, and effect. Queries use these units as an additional bounded retrieval channel so an example or nearby lore paragraph is less likely to outrank an actual rule.
+
+Inspect rule-unit coverage with:
+
+```bash
+backet rules units /path/to/vault
+```
+
+Inspect one unit:
+
+```bash
+backet rules units /path/to/vault --unit-id core-v5:unit:p214:c2:ritual-ward-against-kindred:abc123def4
+```
+
 The evidence packet is also used by the Discord bot. The bot now composes final text from validated answer claims over selected evidence, not from arbitrary fallback snippets. If the retrieved chunks are merely related but do not contain answer evidence, the bot should refuse with a missing-evidence answer instead of summarizing the wrong passage.
 
 ## Refresh semantic indexes
 
-Run `backet rules index` after installing or changing the optional Sentence Transformers backend, after restoring an older rules store, or when `backet rules audit` reports stale semantic coverage, stale rule-block structure, or stale entity catalog data.
+Run `backet rules index` after installing or changing the optional Sentence Transformers backend, after restoring an older rules store, or when `backet rules audit` reports stale semantic coverage, stale rule-block structure, stale entity catalog data, or stale rule units.
 
 ```bash
 backet rules index /path/to/vault
@@ -186,7 +200,7 @@ Refresh one book:
 backet rules index /path/to/vault --book-id core-v5
 ```
 
-Rebuild all rule embeddings, rule-block structure, entity catalog entries, and derived retrieval-quality metadata:
+Rebuild all rule embeddings, rule-block structure, entity catalog entries, derived retrieval-quality metadata, and rule units:
 
 ```bash
 backet rules index /path/to/vault --full

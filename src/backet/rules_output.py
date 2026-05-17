@@ -19,6 +19,7 @@ PHASE_LABELS = {
     "scope": "Generating scopes",
     "index": "Building search index",
     "semantic-index": "Building semantic index",
+    "rule-units": "Deriving rule units",
     "audit": "Summarizing quality",
 }
 
@@ -204,6 +205,81 @@ def emit_rules_ingest_report(result: CommandResult) -> None:
         output.console.print("[bold yellow]Semantic rules retrieval unavailable[/bold yellow]")
         output.console.print("Rules queries will use exact search until the semantic index is refreshed.")
         output.console.print(f"Run: {rules_index_command(data)}")
+    rule_units = data.get("rule_units")
+    if isinstance(rule_units, dict):
+        output.console.print("")
+        output.console.print(
+            f"Rule units: {int(rule_units.get('rule_units') or 0):,} derived "
+            f"({int(rule_units.get('low_confidence_rule_units') or 0):,} low confidence)"
+        )
+        if int(rule_units.get("missing_rule_units") or 0) or int(rule_units.get("stale_rule_units") or 0):
+            output.console.print(f"Run: {rules_index_command(data)} --full")
+
+
+def emit_rules_index_report(result: CommandResult) -> None:
+    data = result.data
+    output.console.print("[bold green]Indexed ingested rule chunks[/bold green]")
+    output.console.print("")
+    output.console.print(f"Chunks:      {int(data.get('indexed_chunks') or 0):,}/{int(data.get('total_chunks') or 0):,} embedded")
+    output.console.print(f"Metadata:    {int(data.get('metadata_chunks') or 0):,} current")
+    output.console.print(f"Structure:   {int(data.get('structure_chunks') or 0):,} current")
+    rule_units = data.get("rule_units") if isinstance(data.get("rule_units"), dict) else {}
+    if rule_units:
+        output.console.print(f"Rule units:  {int(rule_units.get('rule_units') or 0):,} derived")
+        refreshed = int(rule_units.get("refreshed_rule_units") or 0)
+        if refreshed:
+            output.console.print(f"Refreshed:   {refreshed:,} rule unit(s)")
+        low_confidence = int(rule_units.get("low_confidence_rule_units") or 0)
+        if low_confidence:
+            output.console.print(f"Review:      {low_confidence:,} low-confidence rule unit(s)")
+    output.console.print(f"Backend:     {data.get('embedding_backend')} ({data.get('embedding_model')})")
+    output.console.print(f"Source:      {data.get('source_operation') or 'stored_chunk_text'}")
+    output.console.print("")
+    output.console.print(f"Stored:      {data.get('rules_db')}")
+
+
+def emit_rules_units_report(result: CommandResult) -> None:
+    data = result.data
+    unit = data.get("unit") if isinstance(data.get("unit"), dict) else None
+    if unit:
+        output.console.print("[bold green]Derived rule unit[/bold green]")
+        output.console.print("")
+        output.console.print(f"ID:        {unit.get('unit_id')}")
+        output.console.print(f"Source:    {unit.get('book_title') or unit.get('book_id')} p. {unit.get('page_start')}")
+        output.console.print(f"Kind:      {unit.get('unit_kind')} ({unit.get('authority_role')})")
+        output.console.print(f"Facets:    {', '.join(_list_values(unit.get('answer_facets'))) or 'none'}")
+        output.console.print(f"Tags:      {', '.join(_list_values(unit.get('mechanic_tags'))) or 'none'}")
+        warnings = _list_values(unit.get("warnings"))
+        if warnings:
+            output.console.print(f"Warnings:  {', '.join(warnings)}")
+        source_window = str(unit.get("source_window") or "")
+        if source_window:
+            output.console.print("")
+            output.console.print(source_window, markup=False, highlight=False)
+        return
+
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    units = data.get("units") if isinstance(data.get("units"), list) else []
+    output.console.print("[bold green]Derived rule units[/bold green]")
+    output.console.print("")
+    output.console.print(f"Units:       {int(summary.get('rule_units') or 0):,}")
+    output.console.print(f"Chunks:      {int(summary.get('rule_unit_chunks') or 0):,} covered")
+    output.console.print(f"Missing:     {int(summary.get('missing_rule_units') or 0):,}")
+    output.console.print(f"Stale:       {int(summary.get('stale_rule_units') or 0):,}")
+    output.console.print(f"Low conf.:   {int(summary.get('low_confidence_rule_units') or 0):,}")
+    if units:
+        output.console.print("")
+        output.console.print("Preview:")
+        for item in units[:10]:
+            heading = " > ".join(_list_values(item.get("heading_path"))) or str(item.get("section_label") or "")
+            output.console.print(
+                f"  - {item.get('unit_id')}: {item.get('unit_kind')} "
+                f"({item.get('authority_role')}), p. {item.get('page_start')} - {heading}"
+            )
+    next_command = data.get("next_command")
+    if next_command:
+        output.console.print("")
+        output.console.print(f"Run: {next_command}")
 
 
 def emit_rules_audit_report(result: CommandResult, *, show_cards: bool = False) -> None:

@@ -88,6 +88,7 @@ from backet.rules import (
     export_rule_scopes,
     index_rules,
     ingest_rulebook,
+    inspect_rule_units,
     query_rules,
     relink_rule_source,
     replace_rule_page_text,
@@ -99,7 +100,9 @@ from backet.rules_output import (
     emit_rules_audit_report,
     emit_rules_audit_review_card,
     emit_rules_ingest_report,
+    emit_rules_index_report,
     emit_rules_scope_audit_report,
+    emit_rules_units_report,
 )
 from backet.skills import install_skills, skills_status, update_skills
 from backet.system_dependencies import check_system_dependencies, install_system_dependencies
@@ -1285,7 +1288,28 @@ def rules_index_command(
     state = ensure_state(ctx)
     try:
         result = index_rules(vault.resolve(), book_id=book_id, full=full)
-        emit_success(state, result)
+        if state.json_output:
+            emit_success(state, result)
+            return
+        emit_rules_index_report(result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@rules_app.command("units")
+def rules_units_command(
+    ctx: typer.Context,
+    vault: Annotated[Path, typer.Argument(help="Path to the target vault.", file_okay=False, dir_okay=True)] = Path("."),
+    book_id: Annotated[str | None, typer.Option("--book-id", help="Optional book identifier to inspect.")] = None,
+    unit_id: Annotated[str | None, typer.Option("--unit-id", help="Inspect one derived rule unit by ID.")] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = inspect_rule_units(vault.resolve(), book_id=book_id, unit_id=unit_id)
+        if state.json_output:
+            emit_success(state, result)
+            return
+        emit_rules_units_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
