@@ -4,6 +4,7 @@ import hashlib
 import math
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -134,6 +135,34 @@ class OllamaEmbeddingBackend(EmbeddingBackend):
 def resolve_embedding_backend() -> EmbeddingBackend:
     requested = os.environ.get("BACKET_EMBEDDING_BACKEND", "auto").strip().lower()
     return _resolve_backend(requested)
+
+
+def resolve_embedding_backend_from_config(config: Mapping[str, object] | None) -> EmbeddingBackend:
+    raw = dict(config or {})
+    provider = str(raw.get("provider") or raw.get("backend") or "").strip().lower()
+    if not provider or provider == "auto":
+        return resolve_embedding_backend()
+    if provider in {"hash", "hash-v1"}:
+        dimensions = int(raw.get("dimensions") or 64)
+        return HashEmbeddingBackend(dimensions=dimensions)
+    if provider in {"ollama", "ollama-local", "ollama_local"}:
+        endpoint_env = str(raw.get("endpoint_env") or raw.get("endpoint_role") or "").strip()
+        endpoint = str(raw.get("endpoint") or os.environ.get(endpoint_env, "") or "").strip() or None
+        timeout = float(raw.get("timeout_seconds") or raw.get("timeout") or DEFAULT_OLLAMA_TIMEOUT_SECONDS)
+        return OllamaEmbeddingBackend(
+            model_name=str(raw.get("model") or raw.get("model_id") or raw.get("name") or DEFAULT_OLLAMA_EMBEDDING_MODEL),
+            endpoint=endpoint,
+            timeout_seconds=timeout,
+        )
+    if provider in {"sentence-transformers", "sentence_transformers"}:
+        return SentenceTransformerEmbeddingBackend(model_name=str(raw.get("model") or raw.get("model_id") or DEFAULT_SENTENCE_MODEL))
+    raise AppError(
+        code="embedding_backend_unknown",
+        message=f"Unknown embedding backend: {provider}",
+        hint="Use provider/backend hash, ollama, sentence-transformers, or auto.",
+        details={"requested_backend": provider},
+        exit_code=2,
+    )
 
 
 @lru_cache(maxsize=4)

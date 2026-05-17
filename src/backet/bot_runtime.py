@@ -22,6 +22,7 @@ from backet.bot_answers import (
 from backet.bot_access import ACCESS_TIER_PLAYER, ACCESS_TIER_STORYTELLER
 from backet.bot_export import BOT_BUNDLE_SCHEMA_VERSION
 from backet.bot_profiles import doctor_runtime_profile
+from backet.embeddings import EmbeddingBackend, resolve_embedding_backend_from_config
 from backet.errors import AppError
 from backet.indexing import INDEX_SCHEMA_VERSION
 from backet.models import CommandResult
@@ -523,13 +524,15 @@ def retrieve_vault_sources(bundle: BotBundle, route: BotCommandRoute, question: 
 
 
 def retrieve_rule_sources(bundle: BotBundle, question: str, limit: int) -> list[dict[str, Any]]:
+    embedding_backend = _configured_rules_embedding_backend(bundle.manifest)
     with closing(bundle.open_rules()) as connection:
         result = query_rules_connection(
             connection,
             query=question,
             limit=limit,
             db_label=str(bundle.root / str(bundle.manifest["rules"]["path"])),
-    )
+            embedding_backend=embedding_backend,
+        )
     evidence_packet = result.data.get("evidence_packet") if isinstance(result.data.get("evidence_packet"), dict) else {}
     if evidence_packet and evidence_packet.get("evidence_status") != "answerable":
         raise AppError(
@@ -579,6 +582,22 @@ def retrieve_rule_sources(bundle: BotBundle, question: str, limit: int) -> list[
             }
         )
     return sources
+
+
+def _configured_rules_embedding_backend(manifest: dict[str, Any]) -> EmbeddingBackend | None:
+    runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
+    runtime_services = runtime.get("services") if isinstance(runtime.get("services"), dict) else {}
+    service = runtime_services.get("embedding") if isinstance(runtime_services.get("embedding"), dict) else None
+    if service is None:
+        bot = manifest.get("bot") if isinstance(manifest.get("bot"), dict) else {}
+        model_services = bot.get("model_services") if isinstance(bot.get("model_services"), dict) else {}
+        service = model_services.get("embedding") if isinstance(model_services.get("embedding"), dict) else None
+    if not service:
+        return None
+    provider = str(service.get("provider") or service.get("backend") or "").strip().lower()
+    if not provider or provider == "disabled":
+        return None
+    return resolve_embedding_backend_from_config(service)
 
 
 def resolve_access_tier(bot_config: dict[str, Any], user_id: str | None, role_ids: list[str]) -> ResolvedBotAccess:

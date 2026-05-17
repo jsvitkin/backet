@@ -4,6 +4,8 @@ from backet.rules_query_planner import (
     INTENT_ADVANCEMENT,
     INTENT_BROAD_EXPLANATION,
     INTENT_DEFINITION,
+    INTENT_DICE_POOL,
+    INTENT_COST,
     INTENT_TARGETING,
     plan_rules_query,
 )
@@ -68,3 +70,31 @@ def test_rules_query_plan_resolves_common_entity_first_targets() -> None:
     assert any(entity["canonical_name"] == "Dominate" for entity in dominate.resolved_entities)
     assert "hunger_5" in hunger.situational_constraints
     assert any(entity["canonical_name"] == "hunger" for entity in hunger.resolved_entities)
+
+
+def test_rules_query_plan_treats_rouse_check_definition_as_definition() -> None:
+    plan = plan_rules_query("What does a Rouse Check do in play?")
+
+    assert INTENT_DEFINITION in plan.intents
+    assert INTENT_COST not in plan.intents
+    assert INTENT_DICE_POOL not in plan.intents
+    assert "rouse check" in plan.canonical_terms
+
+
+def test_rules_query_plan_keeps_raw_terms_when_entities_are_present() -> None:
+    plan = plan_rules_query("Can I use Auspex Sense the Unseen to spot someone using Obfuscate, and what roll is involved?")
+    raw_terms = next(query for query in plan.retrieval_queries if query.role == "raw_terms").terms
+
+    assert "auspex" in raw_terms
+    assert "obfuscate" in raw_terms
+    assert "sense" in raw_terms
+    assert "unseen" in raw_terms
+
+
+def test_rules_query_plan_adds_base_mending_damage_query() -> None:
+    plan = plan_rules_query("How does a vampire mend superficial Health damage?")
+
+    query = next(item for item in plan.retrieval_queries if item.role == "mending_damage_evidence")
+
+    assert "mending damage" in query.terms
+    assert "rouse check" in query.terms

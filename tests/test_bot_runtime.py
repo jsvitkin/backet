@@ -7,8 +7,9 @@ from pathlib import Path
 
 import fitz
 
-from backet.bot_runtime import BotBundle, answer_bot_query, open_index_readonly
+from backet.bot_runtime import BotBundle, answer_bot_query, open_index_readonly, retrieve_rule_sources
 from backet.cli import app
+from backet.models import CommandResult
 from backet.vault import initialize_vault
 
 
@@ -212,6 +213,56 @@ def test_bot_runtime_refuses_insufficient_rules_evidence(runner, tmp_path: Path)
     assert answer.answer_trace["stages"]["answerability"]["evidence_status"] == "insufficient"
 
 
+def test_bot_runtime_uses_bundle_embedding_service_for_rule_queries(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+
+    def fake_query_rules_connection(connection, **kwargs):
+        backend = kwargs["embedding_backend"]
+        captured["backend_name"] = backend.name
+        captured["model_name"] = backend.model_name
+        source = {
+            "book_id": "core",
+            "book_title": "Core Rulebook",
+            "page_start": 1,
+            "page_end": 1,
+            "section_label": "Rules",
+            "excerpt": "A Rouse Check can increase Hunger.",
+            "content": "A Rouse Check can increase Hunger.",
+            "score": 1.0,
+            "match_reasons": ["exact"],
+            "evidence_cues": ["definition"],
+            "retrieval_channels": ["semantic"],
+        }
+        return CommandResult(
+            message="fake",
+            data={
+                "retrieval_mode": "hybrid",
+                "embedding_backend": backend.name,
+                "embedding_model": backend.model_name,
+                "query_plan": {},
+                "planned_retrieval": {},
+                "rag_v2": {},
+                "evidence_packet": {"evidence_status": "answerable", "selected_evidence": [source]},
+            },
+        )
+
+    monkeypatch.setenv("BACKET_EMBEDDING_BACKEND", "mystery")
+    monkeypatch.setattr("backet.bot_runtime.query_rules_connection", fake_query_rules_connection)
+    bundle = _FakeRulesBundle(
+        tmp_path,
+        {
+            "rules": {"path": "rules.sqlite3"},
+            "runtime": {"services": {"embedding": {"provider": "hash", "dimensions": 32, "enabled": True}}},
+        },
+    )
+
+    sources = retrieve_rule_sources(bundle, "What is a Rouse Check?", limit=1)
+
+    assert captured == {"backend_name": "hash", "model_name": "hash-v1-32"}
+    assert sources[0]["embedding_backend"] == "hash"
+    assert sources[0]["embedding_model"] == "hash-v1-32"
+
+
 def test_bot_playground_exports_fake_vault_and_prints_source_diagnostics(runner, tmp_path: Path) -> None:
     vault = _make_vault(tmp_path)
     _write_bot_config(vault)
@@ -317,6 +368,15 @@ def _write(path: Path, visibility: str, topics: list[str], body: str) -> None:
     topic_lines = "".join(f"    - {topic}\n" for topic in topics)
     topics_block = f"  bot_topics:\n{topic_lines}" if topics else ""
     path.write_text(f"---\nbacket:\n  visibility: {visibility}\n{topics_block}---\n\n{body}\n", encoding="utf-8")
+
+
+class _FakeRulesBundle:
+    def __init__(self, root: Path, manifest: dict) -> None:
+        self.root = root
+        self.manifest = manifest
+
+    def open_rules(self):
+        return sqlite3.connect(":memory:")
 
 
 def _ingest_book(runner, vault: Path, pdf_path: Path, book_id: str, title: str, tier: str) -> None:

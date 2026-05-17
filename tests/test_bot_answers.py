@@ -358,6 +358,203 @@ def test_answer_outline_abstains_when_selected_evidence_lacks_required_anchor() 
     assert "dementation" in outline.missing_evidence
 
 
+def test_answer_outline_answers_rouse_check_definition_not_random_roll_fragment() -> None:
+    outline = build_answer_outline(
+        AnswerPacket(
+            question="What does a Rouse Check do in play?",
+            response_class="answer",
+            evidence_status="answerable",
+            selected_evidence=[
+                _rule_source(
+                    citation="R1",
+                    page=213,
+                    content=(
+                        "Some conditions allow the player to roll two dice on some Rouse Checks and pick the highest. "
+                        "One success (6+) on either die prevents Hunger from increasing. "
+                        "If the Rouse Check fails, Hunger increases by 1."
+                    ),
+                )
+            ],
+            answer_shape="definition",
+        )
+    )
+
+    claims = " ".join(claim.text for claim in outline.claims)
+
+    assert outline.response_class == ANSWER_CLASS_ANSWER
+    assert "prevents Hunger from increasing" in claims
+    assert "failure increases Hunger by 1" in claims
+
+
+def test_answer_outline_prefers_blood_surge_pool_bonus_over_nearby_rouse_bonus() -> None:
+    answer = TemplateAnswerGenerator().generate(
+        "How does Blood Surge help a roll?",
+        [
+            _rule_source(
+                citation="R1",
+                page=219,
+                content=(
+                    "Add one Attribute die to your dice pool when performing a Blood Surge. "
+                    "Roll two dice and pick the highest when rolling a Rouse Check for discipline powers of level 3 and below."
+                ),
+            )
+        ],
+    )
+
+    assert "adding one Attribute die" in answer.text
+    assert "discipline powers" not in answer.text.split("**Evidence:**", 1)[0]
+
+
+def test_answer_outline_prefers_base_mending_damage_over_power_specific_heal() -> None:
+    answer = TemplateAnswerGenerator().generate(
+        "How does a vampire mend superficial Health damage?",
+        [
+            _rule_source(
+                citation="R1",
+                page=77,
+                content=(
+                    "Intelligence + Fortitude System: The vampire rolls Intelligence + Fortitude against Difficulty 2 "
+                    "and mends a number of superficial Health damage levels equal to the margin on the roll. "
+                    "Use of this power takes a whole turn."
+                ),
+                score=1.2,
+            ),
+            _rule_source(
+                citation="R2",
+                page=219,
+                content=(
+                    "When Mending Damage, you can remove 1 point of Superficial damage per Rouse Check. "
+                    "Blood Potency 1."
+                ),
+            ),
+        ],
+    )
+
+    assert "Mending Damage" in answer.text
+    assert "Rouse Check" in answer.text
+    assert "Intelligence + Fortitude" not in answer.text.split("**Evidence:**", 1)[0]
+
+
+def test_answer_outline_rejects_irrelevant_rule_fragments_with_incidental_terms() -> None:
+    outline = build_answer_outline(
+        AnswerPacket(
+            question="Can I spend Willpower to reroll Hunger dice?",
+            response_class="answer",
+            evidence_status="answerable",
+            selected_evidence=[
+                _rule_source(
+                    citation="R1",
+                    page=61,
+                    content="Tzimisce using this Bane cannot take the corresponding Folkloric Block.",
+                )
+            ],
+            answer_shape="yes_no",
+        )
+    )
+
+    assert outline.response_class == ANSWER_CLASS_INSUFFICIENT
+    assert "question_anchor" in outline.missing_evidence
+
+
+def test_answer_outline_rejects_generic_hunger_text_for_vampire_feeding_question() -> None:
+    outline = build_answer_outline(
+        AnswerPacket(
+            question="If my vampire feeds from another vampire, how much Hunger can they slake and what risks come with repeated feeding?",
+            response_class="answer",
+            evidence_status="answerable",
+            selected_evidence=[
+                _rule_source(
+                    citation="R1",
+                    page=293,
+                    content=(
+                        "If the roll led to a failed Rouse Check or otherwise increased their Hunger, "
+                        "they play up their hunger and its consequences."
+                    ),
+                )
+            ],
+            answer_shape="concise",
+        )
+    )
+
+    assert outline.response_class == ANSWER_CLASS_INSUFFICIENT
+    assert "question_anchor" in outline.missing_evidence
+
+
+def test_answer_outline_prefers_predator_type_build_rule_over_example_flavor() -> None:
+    answer = TemplateAnswerGenerator().generate(
+        "How do Predator Types change starting character choices?",
+        [
+            _rule_source(
+                citation="R1",
+                page=109,
+                content=(
+                    "PREDATOR DISCIPLINE NOTES Remember, your Predator type can grant an out-of-clan Discipline dot. "
+                    "Hunger can be stronger than bloodline. "
+                    "Extortionist The extortionist acquires blood in exchange for services such as security or surveillance."
+                ),
+            )
+        ],
+    )
+
+    assert "out-of-clan Discipline dot" in answer.text
+    assert "security or surveillance" not in answer.text.split("**Evidence:**", 1)[0]
+
+
+def test_model_validation_requires_all_short_outline_claims() -> None:
+    source = _rule_source(
+        citation="R1",
+        page=307,
+        content=(
+            "Social combat uses opposed pressure to settle agreed stakes. "
+            "Combatants roll their respective dice pools and compare numbers of successes. "
+            "The combatant with more successes applies the result as damage to Willpower."
+        ),
+    )
+    packet = AnswerPacket(
+        question="How does social combat work?",
+        response_class="answer",
+        evidence_status="answerable",
+        selected_evidence=[source],
+        answer_shape="system_overview",
+    )
+
+    assert (
+        validate_generated_answer(
+            "Combatants roll their dice pools.\n\nSources: Core Rulebook p. 307 (Advanced Systems)",
+            [source],
+            answer_packet=packet,
+        )
+        == "bot_llama_output_missing_outline_support"
+    )
+
+
+def test_model_validation_rejects_blood_surge_adjacent_rule_leakage() -> None:
+    source = _rule_source(
+        citation="R1",
+        page=219,
+        content=(
+            "Add one Attribute die to your dice pool when performing a Blood Surge. "
+            "Roll two dice and pick the highest when rolling a Rouse Check for discipline powers of level 3 and below."
+        ),
+    )
+    packet = AnswerPacket(
+        question="How does Blood Surge help a roll?",
+        response_class="answer",
+        evidence_status="answerable",
+        selected_evidence=[source],
+        answer_shape="procedure",
+    )
+
+    assert (
+        validate_generated_answer(
+            "To perform a Blood Surge, roll two dice and pick the highest result. Sources: Core Rulebook p. 219 (Advanced Systems)",
+            [source],
+            answer_packet=packet,
+        )
+        == "bot_llama_output_adjacent_rule_leakage"
+    )
+
+
 def test_template_advancement_answer_uses_trait_costs_table() -> None:
     answer = TemplateAnswerGenerator().generate(
         "how do I learn obfuscate",

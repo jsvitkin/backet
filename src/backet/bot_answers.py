@@ -808,6 +808,9 @@ def _looks_like_substantive_answer(text: str) -> bool:
 
 def _answer_shape_name(question: str) -> str:
     lower = question.casefold()
+    rouse_check_definition = "rouse check" in lower and bool(
+        re.search(r"\b(?:what\s+(?:is|are|does)|define|definition|meaning|do\s+in\s+play)\b", lower)
+    )
     if _wants_consequence_list(question):
         return "consequence_bullets"
     if _wants_system_explanation(question):
@@ -816,7 +819,9 @@ def _answer_shape_name(question: str) -> str:
         return "yes_no"
     if any(term in lower for term in ("how long", "take to", "duration", "time to")):
         return "timing"
-    if "cost" in lower or "rouse" in lower or "experience" in lower or re.search(r"\bxp\b", lower):
+    if not rouse_check_definition and (
+        "cost" in lower or "experience" in lower or re.search(r"\b(?:xp|spend|spent|pay)\b", lower)
+    ):
         return "cost"
     if re.search(r"\b(?:what happens|consequence|consequences|cause|result)\b", lower):
         return "consequence"
@@ -1004,7 +1009,9 @@ def _outline_coverage(packet: AnswerPacket, selected: list[dict[str, Any]]) -> d
     terms = _important_question_terms(packet.question)
     hit_count = sum(1 for term in terms if term in lower)
     advancement_covered = "advancement" not in missing and any(term in question for term in ("learn", "acquire", "buy", "purchase"))
-    if terms and hit_count == 0 and not advancement_covered:
+    required_hits = _required_question_anchor_hits(packet.question, terms)
+    rules_only = bool(selected) and all(str(source.get("source_type") or "rules") == "rules" for source in selected)
+    if rules_only and terms and hit_count < required_hits and not advancement_covered:
         missing.append("question_anchor")
     return {
         "missing": _dedupe(missing),
@@ -1068,13 +1075,26 @@ def _validate_supported_answer_claim(
         errors.append("missing_source_id")
     if any(source_id not in source_ids for source_id in claim.source_ids):
         errors.append("source_not_selected_evidence")
+    if _looks_like_bad_answer_segment(claim.text):
+        errors.append("bad_answer_fragment")
     source_text = clean_bot_source_text(str(source.get("content") or source.get("excerpt") or ""))
+    general_advancement = _claim_is_general_advancement_supported(packet.question, claim.text, source_text)
+    if _generic_mending_question_rejected_power_claim(packet.question, claim.text, source_text):
+        errors.append("power_specific_mending_for_generic_question")
     normalized_source = _normalize_answer_terms(source_text)
     terms = _claim_support_terms(claim.text)
-    if terms:
+    if terms and not general_advancement:
         required_hits = 1 if len(terms) <= 2 else 2
         if sum(1 for term in terms if term in normalized_source) < required_hits:
             errors.append("missing_normalized_support_terms")
+    if str(source.get("source_type") or "rules") == "rules" and not _claim_covers_question_anchor(
+        claim.text,
+        packet.question,
+        source_text=source_text,
+        stance=claim.stance,
+        general_advancement=general_advancement,
+    ):
+        errors.append("missing_question_anchor")
     if query_plan.get("resolved_entities") and not claim.covered_entities:
         errors.append("missing_resolved_entity_coverage")
     target_groups = [str(item) for item in query_plan.get("target_groups") or []]
@@ -1085,6 +1105,85 @@ def _validate_supported_answer_claim(
     if _answer_shape_name(packet.question) == "yes_no" and claim.stance == "unknown":
         errors.append("missing_yes_no_stance")
     return _dedupe(errors)
+
+
+def _claim_covers_question_anchor(
+    claim_text: str,
+    question: str,
+    *,
+    source_text: str,
+    stance: str,
+    general_advancement: bool = False,
+) -> bool:
+    if general_advancement:
+        return True
+    terms = _important_question_terms(question)
+    if not terms:
+        return True
+    normalized_claim = _normalize_answer_terms(claim_text)
+    normalized_source = _normalize_answer_terms(source_text)
+    claim_hits = sum(1 for term in terms if _normalize_answer_terms(term) in normalized_claim)
+    source_hits = sum(1 for term in terms if _normalize_answer_terms(term) in normalized_source)
+    required_hits = _required_question_anchor_hits(question, terms)
+    if source_hits < required_hits:
+        return False
+    if claim_hits >= 1:
+        return True
+    if "rouse check" in question.casefold() and "hunger" in normalized_claim:
+        return True
+    if _answer_shape_name(question) == "yes_no" and stance in {"yes", "no"} and (
+        claim_hits >= 1 or _claim_has_shape_answer_cue(claim_text, question)
+    ):
+        return True
+    return _claim_has_shape_answer_cue(claim_text, question)
+
+
+def _claim_has_shape_answer_cue(claim_text: str, question: str) -> bool:
+    normalized = _normalize_answer_terms(claim_text)
+    shape = _answer_shape_name(question)
+    if shape == "cost":
+        return any(term in normalized for term in ("cost", "rouse check", "experience", "spend"))
+    if shape in {"procedure", "timing"}:
+        return any(term in normalized for term in ("system", "roll", "requires", "difficulty", "minutes", "duration"))
+    if shape in {"consequence", "consequence_bullets"}:
+        return any(term in normalized for term in ("stains", "masquerade", "simple mess", "failure", "success", "consequence"))
+    if shape == "system_overview":
+        return any(term in normalized for term in ("stakes", "dice pool", "roll", "damage", "willpower", "concede", "winner"))
+    lower_question = question.casefold()
+    if _asks_about_werewolf_feeding(lower_question):
+        return any(term in normalized for term in ("blood", "hunger", "frenzy", "paranoid"))
+    if _asks_about_day_awake(lower_question):
+        return any(term in normalized for term in ("humanity", "difficulty", "scene", "awake"))
+    return False
+
+
+def _claim_is_general_advancement_supported(question: str, claim_text: str, source_text: str) -> bool:
+    lower_question = question.casefold()
+    if not any(term in lower_question for term in ("learn", "acquire", "buy", "purchase", "gain")):
+        return False
+    lower_source = source_text.casefold()
+    lower_claim = claim_text.casefold()
+    return "trait costs" in lower_source and "experience" in lower_source and "discipline" in lower_source and "discipline" in lower_claim
+
+
+def _generic_mending_question_rejected_power_claim(question: str, claim_text: str, source_text: str) -> bool:
+    lower_question = question.casefold()
+    if not ("mend" in lower_question and "superficial" in lower_question and "damage" in lower_question):
+        return False
+    lower_claim = claim_text.casefold()
+    lower_source = source_text.casefold()
+    if "when mending damage" in lower_source:
+        return False
+    return "fortitude" in lower_claim or "use of this power" in lower_source
+
+
+def _required_question_anchor_hits(question: str, terms: list[str]) -> int:
+    lower = question.casefold()
+    if any(phrase in lower for phrase in ("sense the unseen", "blood bond", "hunger dice", "superficial health")):
+        return 2
+    if len(terms) >= 4:
+        return 2
+    return 1
 
 
 def _claim_covered_entities(claim_text: str, source: dict[str, Any], query_plan: dict[str, Any]) -> list[str]:
@@ -1209,15 +1308,22 @@ def _add_claim_value(values: list[str], value: str) -> None:
 def _important_question_terms(question: str) -> list[str]:
     low_value = {
         "answer",
+        "another",
         "breach",
         "cast",
         "cause",
+        "come",
+        "if",
         "learn",
         "long",
         "make",
+        "much",
         "other",
+        "power",
         "roll",
         "take",
+        "they",
+        "this",
         "use",
         "vampire",
         "vampires",
@@ -1458,9 +1564,21 @@ def validate_generated_answer(
         first_sentence = re.split(r"(?<=[.!?])\s+", text.strip(), maxsplit=1)[0].casefold()
         if not any(term in first_sentence for term in stance_terms):
             return "bot_llama_output_missing_required_stance"
+    if _model_output_has_adjacent_rule_leakage(text, outline):
+        return "bot_llama_output_adjacent_rule_leakage"
     if not _model_output_covers_outline(text, outline):
         return "bot_llama_output_missing_outline_support"
     return None
+
+
+def _model_output_has_adjacent_rule_leakage(text: str, outline: AnswerOutline) -> bool:
+    lower_question = outline.question.casefold()
+    normalized = _normalize_answer_terms(text)
+    if "blood surge" in lower_question and "roll two dice" in normalized and "pick the highest" in normalized:
+        claim_text = " ".join(claim.text for claim in outline.claims).casefold()
+        if "roll two dice" not in claim_text and "pick the highest" not in claim_text:
+            return True
+    return False
 
 
 def _model_output_covers_outline(text: str, outline: AnswerOutline) -> bool:
@@ -1469,14 +1587,19 @@ def _model_output_covers_outline(text: str, outline: AnswerOutline) -> bool:
     normalized = _normalize_answer_terms(text)
     if not normalized:
         return False
+    covered = 0
     for claim in outline.claims:
         terms = _claim_support_terms(claim.text)
         if not terms:
             continue
         required_hits = 1 if len(terms) <= 2 else 2
         if sum(1 for term in terms if term in normalized) >= required_hits:
-            return True
-    return False
+            covered += 1
+    claim_count = len([claim for claim in outline.claims if _claim_support_terms(claim.text)])
+    if claim_count == 0:
+        return True
+    required_claims = claim_count if claim_count <= 2 else max(2, (claim_count + 1) // 2)
+    return covered >= required_claims
 
 
 def _claim_support_terms(text: str) -> list[str]:
@@ -1684,6 +1807,10 @@ def _format_short_answer(question: str, sources: list[dict[str, Any]]) -> list[s
 
 def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> list[str]:
     direct_segments = [
+        *_direct_rouse_check_segments(question, text),
+        *_direct_blood_surge_segments(question, text),
+        *_direct_mending_damage_segments(question, text),
+        *_direct_predator_type_segments(question, text),
         *_direct_advancement_segments(question, text),
         *_direct_werewolf_feeding_segments(question, text),
         *_direct_day_awake_segments(question, text),
@@ -1716,6 +1843,68 @@ def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> 
             continue
         pool = re.sub(r"\s*\+\s*", " + ", match.group("pool").strip())
         return [f"{_display_rule_key(key)} hunting dice pool: {pool}."]
+    return []
+
+
+def _direct_mending_damage_segments(question: str, text: str) -> list[str]:
+    lower_question = question.casefold()
+    if not ("mend" in lower_question and "superficial" in lower_question and "damage" in lower_question):
+        return []
+    lower = text.casefold()
+    if "when mending damage" in lower and "superficial" in lower and "rouse" in lower:
+        if "remove 1 point of superficial" in lower:
+            return [
+                "A vampire mends superficial damage by using Mending Damage; at Blood Potency 1, each Rouse Check removes 1 point of Superficial damage."
+            ]
+        return ["A vampire mends superficial damage with Mending Damage, which costs Rouse Checks and removes Superficial damage based on Blood Potency."]
+    return []
+
+
+def _direct_blood_surge_segments(question: str, text: str) -> list[str]:
+    lower_question = question.casefold()
+    if "blood surge" not in lower_question:
+        return []
+    if not any(term in lower_question for term in ("help", "roll", "dice", "pool", "add")):
+        return []
+    lower = text.casefold()
+    if "blood surge" in lower and "add one attribute die" in lower:
+        return ["Blood Surge helps a roll by adding one Attribute die to the dice pool at Blood Potency 1."]
+    match = re.search(r"add\s+(?P<count>\w+)\s+attribute\s+dice?\s+to\s+your\s+dice\s+pool\s+when\s+performing\s+a\s+blood\s+surge", lower)
+    if match:
+        return [f"Blood Surge helps a roll by adding {match.group('count')} Attribute dice to the dice pool."]
+    return []
+
+
+def _direct_predator_type_segments(question: str, text: str) -> list[str]:
+    lower_question = question.casefold()
+    if "predator" not in lower_question:
+        return []
+    if not any(term in lower_question for term in ("starting", "character", "choice", "choices", "change", "grant")):
+        return []
+    lower = text.casefold()
+    segments: list[str] = []
+    if "predator type can grant an out-of-clan discipline dot" in lower:
+        segments.append("Predator types can change starting choices by granting an out-of-clan Discipline dot when the type says so.")
+    if "pick skills that match your predator type" in lower:
+        segments.append("The rules also advise picking Skills that match the Predator type and complement the character's Disciplines.")
+    return segments
+
+
+def _direct_rouse_check_segments(question: str, text: str) -> list[str]:
+    lower_question = question.casefold()
+    if "rouse check" not in lower_question:
+        return []
+    if not re.search(r"\b(?:what\s+(?:is|does)|define|meaning|do\s+in\s+play)\b", lower_question):
+        return []
+    lower = text.casefold()
+    if "hunger" not in lower or "rouse check" not in lower:
+        return []
+    if "one success" in lower and "prevents hunger from increasing" in lower:
+        return [
+            "A Rouse Check is the roll made when a vampire rouses the Blood; one success (6+) prevents Hunger from increasing, while failure increases Hunger by 1."
+        ]
+    if "hunger increases by 1" in lower:
+        return ["A Rouse Check tests whether using vampiric Blood increases Hunger by 1."]
     return []
 
 
@@ -2008,8 +2197,6 @@ def _title_answer_heading(text: str) -> str:
 
 def _looks_like_bad_answer_segment(segment: str) -> bool:
     lower = segment.lower()
-    if "..." in segment:
-        return True
     if lower.startswith(("in social combat than", "in social combats than")):
         return True
     if re.search(r"[\ue000-\uf8ff]", segment):
@@ -2216,6 +2403,11 @@ def _source_question_bonus(question: str, lower_text: str) -> int:
             bonus += 8
         if "only act for a single scene" in lower_text and "to remain awake longer" in lower_text:
             bonus += 4
+    if _asks_about_base_mending_damage(question):
+        if "when mending damage" in lower_text and "rouse check" in lower_text:
+            bonus += 10
+        if "use of this power" in lower_text or "intelligence + fortitude" in lower_text:
+            bonus -= 4
     return bonus
 
 
@@ -2231,6 +2423,11 @@ def _asks_about_day_awake(question: str) -> bool:
     if "day" not in lower:
         return False
     return any(term in lower for term in ("awake", "awaken", "wake", "stay up", "day-sleep", "daysleep"))
+
+
+def _asks_about_base_mending_damage(question: str) -> bool:
+    lower = question.casefold()
+    return "mend" in lower and "superficial" in lower and "damage" in lower
 
 
 def _wants_ritual_timing(question: str) -> bool:

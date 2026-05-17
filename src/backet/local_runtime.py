@@ -29,6 +29,7 @@ DEFAULT_OLLAMA_EMBEDDING_MODEL = "nomic-embed-text"
 DEFAULT_OLLAMA_ANSWER_MODEL = "llama3.2:3b"
 DEFAULT_OLLAMA_TIMEOUT_SECONDS = 60.0
 DEFAULT_MODEL_CACHE_WINDOWS = "H:/OllamaModels"
+LOCAL_RUNTIME_RETRY_DELAYS = (0.15, 0.4)
 LLAMA_CPP_ENDPOINT = "http://127.0.0.1:8080/completion"
 
 
@@ -542,26 +543,49 @@ def _post_json(url: str, payload: dict[str, Any], *, timeout_seconds: float) -> 
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise AppError(
-            code="local_runtime_http_error",
-            message="Local model runtime rejected the request.",
-            hint=body[:500] or str(exc),
-            details={"url": url, "status": exc.code, "body": body[:1000]},
-            exit_code=2,
-        ) from exc
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise AppError(
-            code="local_runtime_http_unavailable",
-            message="Local model runtime API is unavailable or returned invalid JSON.",
-            hint=f"Check {url}.",
-            details={"url": url, "error": str(exc)},
-            exit_code=2,
-        ) from exc
+    for attempt in range(len(LOCAL_RUNTIME_RETRY_DELAYS) + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            if attempt < len(LOCAL_RUNTIME_RETRY_DELAYS) and _is_transient_local_runtime_error(body):
+                time.sleep(LOCAL_RUNTIME_RETRY_DELAYS[attempt])
+                continue
+            raise AppError(
+                code="local_runtime_http_error",
+                message="Local model runtime rejected the request.",
+                hint=body[:500] or str(exc),
+                details={"url": url, "status": exc.code, "body": body[:1000]},
+                exit_code=2,
+            ) from exc
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            if attempt < len(LOCAL_RUNTIME_RETRY_DELAYS) and _is_transient_local_runtime_error(str(exc)):
+                time.sleep(LOCAL_RUNTIME_RETRY_DELAYS[attempt])
+                continue
+            raise AppError(
+                code="local_runtime_http_unavailable",
+                message="Local model runtime API is unavailable or returned invalid JSON.",
+                hint=f"Check {url}.",
+                details={"url": url, "error": str(exc)},
+                exit_code=2,
+            ) from exc
+    raise AssertionError("unreachable")
+
+
+def _is_transient_local_runtime_error(text: str) -> bool:
+    lowered = str(text or "").casefold()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "forcibly closed",
+            "connection reset",
+            "connection aborted",
+            "unexpected eof",
+            "wsarecv",
+            "broken pipe",
+        )
+    )
 
 
 def _post_json_stream(url: str, payload: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:

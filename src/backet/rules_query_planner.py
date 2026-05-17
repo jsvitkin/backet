@@ -436,12 +436,15 @@ def _unresolved_high_value_terms(
 def _detect_intents(normalized: str, entities: dict[str, list[str]]) -> list[str]:
     intents: list[str] = []
     has_named_rule_entity = any(entities[key] for key in ("disciplines", "mechanics", "powers"))
+    rouse_check_definition = "rouse check" in normalized and bool(
+        re.search(r"\b(?:what\s+(?:is|are|does)|define|definition|meaning|do\s+in\s+play)\b", normalized)
+    )
     timing_or_casting_query = bool(
         re.search(r"\bhow\s+long\b.*\b(?:take|cast|perform)\b", normalized)
         or re.search(r"\b(?:time|duration)\b.*\b(?:cast|perform)\b", normalized)
     )
 
-    if re.search(r"\b(?:what\s+(?:is|are)|define|definition|meaning)\b", normalized):
+    if re.search(r"\b(?:what\s+(?:is|are)|define|definition|meaning)\b", normalized) or rouse_check_definition:
         _add(intents, INTENT_DEFINITION)
     if not timing_or_casting_query and re.search(r"\b(?:learn|acquire|buy|purchase|take|get|gain)\b", normalized) and (
         has_named_rule_entity or re.search(r"\b(?:discipline|power)\b", normalized)
@@ -454,9 +457,9 @@ def _detect_intents(normalized: str, entities: dict[str, list[str]]) -> list[str
         normalized,
     ) or re.search(r"\b(?:target|targets|affect|affects|applicability|restriction|restrictions)\b", normalized):
         _add(intents, INTENT_TARGETING)
-    if re.search(r"\b(?:cost|costs|rouse|xp|experience|spend|spent|pay)\b", normalized):
+    if not rouse_check_definition and re.search(r"\b(?:cost|costs|rouse|xp|experience|spend|spent|pay)\b", normalized):
         _add(intents, INTENT_COST)
-    if re.search(r"\b(?:dice\s+pool|pool|roll|test|check)\b", normalized):
+    if not rouse_check_definition and re.search(r"\b(?:dice\s+pool|pool|roll|test|check)\b", normalized):
         _add(intents, INTENT_DICE_POOL)
     if re.search(r"\b(?:what\s+happens|consequence|result|success|failure|fail|succeed)\b", normalized):
         _add(intents, INTENT_CONSEQUENCE)
@@ -523,12 +526,23 @@ def _build_retrieval_queries(
         if terms:
             queries.append(_retrieval_query(f"{intent}_evidence", terms, evidence=evidence, weight=0.9))
 
+    if "mend" in normalized_question and "superficial" in normalized_question and "damage" in normalized_question:
+        queries.append(
+            _retrieval_query(
+                "mending_damage_evidence",
+                ["mending damage", "superficial damage", "rouse check", "blood potency"],
+                evidence=["system", "cost"],
+                weight=1.0,
+            )
+        )
+
     if required_evidence and entity_terms:
         queries.append(_retrieval_query("required_evidence", [*entity_terms, *required_evidence], evidence=required_evidence, weight=0.8))
 
     unknown_terms = [term for term in raw_unknown_terms if term not in LOW_VALUE_TERMS]
-    if unknown_terms and not entity_terms:
-        queries.append(_retrieval_query("raw_terms", unknown_terms, evidence=[], weight=0.7))
+    if unknown_terms:
+        raw_terms = unknown_terms if not entity_terms else _dedupe([*entity_terms, *unknown_terms])
+        queries.append(_retrieval_query("raw_terms", raw_terms, evidence=[], weight=0.7))
 
     fallback_text = raw_question.strip() or normalized_question
     if fallback_text:

@@ -950,6 +950,7 @@ def query_rules_connection(
     scope_tags: list[str] | None = None,
     db_label: str | None = None,
     data_key: str = "rules_db",
+    embedding_backend: EmbeddingBackend | None = None,
 ) -> CommandResult:
     if limit <= 0:
         raise AppError(
@@ -971,6 +972,7 @@ def query_rules_connection(
         scope_tags=normalized_tags,
         exact_limit=max(limit * 8, RAG_V2_EXACT_CHANNEL_CAP),
         semantic_limit=max(limit * 8, RULE_SEMANTIC_LIMIT),
+        embedding_backend=embedding_backend,
     )
     if not rag_v2_diagnostics.get("channels") and not _rules_query_terms(query_plan.semantic_query):
         raise AppError(
@@ -3760,6 +3762,7 @@ def _generate_rag_v2_candidates(
     scope_tags: list[str],
     exact_limit: int,
     semantic_limit: int,
+    embedding_backend: EmbeddingBackend | None = None,
 ) -> tuple[list[sqlite3.Row], SemanticRulesSearch, dict[int, set[str]], dict[str, Any]]:
     exact_rows: list[sqlite3.Row] = []
     channel_matches: dict[int, set[str]] = {}
@@ -3896,6 +3899,7 @@ def _generate_rag_v2_candidates(
         book_id=book_id,
         scope_tags=scope_tags,
         limit=semantic_limit,
+        embedding_backend=embedding_backend,
     )
     semantic_elapsed = round((time.perf_counter() - semantic_started) * 1000, 3)
     for row, _score in semantic.candidates:
@@ -4375,9 +4379,10 @@ def _search_semantic_rule_chunks(
     book_id: str | None,
     scope_tags: list[str],
     limit: int,
+    embedding_backend: EmbeddingBackend | None = None,
 ) -> SemanticRulesSearch:
     try:
-        backend = resolve_embedding_backend()
+        backend = embedding_backend or resolve_embedding_backend()
         query_vector = backend.encode_many([query]).vectors[0]
     except AppError as error:
         return SemanticRulesSearch(

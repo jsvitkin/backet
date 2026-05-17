@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from backet.embeddings import HashEmbeddingBackend, OllamaEmbeddingBackend, cosine_similarity, resolve_embedding_backend
+from backet.embeddings import (
+    HashEmbeddingBackend,
+    OllamaEmbeddingBackend,
+    cosine_similarity,
+    resolve_embedding_backend,
+    resolve_embedding_backend_from_config,
+)
 from backet.errors import AppError
 
 
@@ -30,6 +36,15 @@ def test_resolve_embedding_backend_rejects_unknown_backend(monkeypatch: pytest.M
 
     with pytest.raises(AppError, match="Unknown embedding backend"):
         resolve_embedding_backend()
+
+
+def test_resolve_embedding_backend_from_config_ignores_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BACKET_EMBEDDING_BACKEND", "mystery")
+
+    backend = resolve_embedding_backend_from_config({"provider": "hash", "dimensions": 32})
+
+    assert isinstance(backend, HashEmbeddingBackend)
+    assert backend.model_name == "hash-v1-32"
 
 
 def test_ollama_embedding_backend_normalizes_vectors(monkeypatch: pytest.MonkeyPatch) -> None:

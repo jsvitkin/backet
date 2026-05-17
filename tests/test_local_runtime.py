@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backet.local_runtime import local_runtime_doctor, run_local_runtime_benchmark
+import urllib.error
+
+from backet.local_runtime import _post_json, local_runtime_doctor, run_local_runtime_benchmark
 
 
 def test_local_runtime_doctor_reports_windows_amd_missing_ollama(monkeypatch) -> None:
@@ -81,6 +83,30 @@ def test_local_runtime_benchmark_records_metrics_without_qa(monkeypatch, tmp_pat
     assert (tmp_path / "local-runtime-benchmark.json").exists()
 
 
+def test_post_json_retries_transient_ollama_connection_close(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    def fake_urlopen(request, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise urllib.error.HTTPError(
+                url=request.full_url,
+                code=400,
+                msg="Bad Request",
+                hdrs={},
+                fp=_FakeErrorBody(
+                    b'{"error":"read tcp 127.0.0.1:1->127.0.0.1:2: wsarecv: An existing connection was forcibly closed by the remote host."}'
+                ),
+            )
+        return _FakeResponse(b'{"ok": true}')
+
+    monkeypatch.setattr("backet.local_runtime.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("backet.local_runtime.LOCAL_RUNTIME_RETRY_DELAYS", (0,))
+
+    assert _post_json("http://127.0.0.1:11434/api/embed", {"model": "nomic"}, timeout_seconds=1) == {"ok": True}
+    assert calls["count"] == 2
+
+
 def _raise_unavailable(url: str, *, timeout_seconds: float):
     from backet.errors import AppError
 
@@ -101,3 +127,28 @@ def _fake_doctor_result():
             }
         },
     )
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self) -> bytes:
+        return self.body
+
+
+class _FakeErrorBody:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def read(self) -> bytes:
+        return self.body
+
+    def close(self) -> None:
+        pass
