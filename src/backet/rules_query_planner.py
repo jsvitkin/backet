@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 from backet.rules_scope import TAXONOMY_ENTRIES, ScopeTaxonomyEntry, canonicalize_scope_tag
 
-RULES_QUERY_PLAN_SCHEMA_VERSION = 1
+RULES_QUERY_PLAN_SCHEMA_VERSION = 2
 
 INTENT_DEFINITION = "definition"
 INTENT_ADVANCEMENT = "advancement"
@@ -94,6 +94,21 @@ COMPOUND_REPLACEMENTS = {
 }
 
 TARGETED_MECHANIC_ALIASES = {
+    "blush of life": {
+        "aliases": ("blush of life", "blush", "look alive", "pass as human"),
+        "expanded": ("blush of life", "rouse check", "simulate life", "food", "sex", "breathing"),
+        "scope_tags": ("mechanic:blush-of-life",),
+    },
+    "rouse check": {
+        "aliases": ("rouse check", "rouse checks", "rousecheck", "rousechecks"),
+        "expanded": ("rouse check", "hunger", "rouse", "check"),
+        "scope_tags": ("mechanic:rouse-check",),
+    },
+    "hunger": {
+        "aliases": ("hunger", "hunger 5", "hunger five", "hunger frenzy"),
+        "expanded": ("hunger", "hunger 5", "hunger frenzy", "rouse check"),
+        "scope_tags": ("mechanic:hunger",),
+    },
     "blood bond": {
         "aliases": ("blood bond", "blood bonds", "bloodbond", "bloodbonds", "blood bonded"),
         "expanded": ("blood bond", "blood bonds", "bond", "bonds", "vitae"),
@@ -121,6 +136,11 @@ TARGETED_MECHANIC_ALIASES = {
 }
 
 TARGETED_POWER_ALIASES = {
+    "Dominate": {
+        "aliases": ("dominate", "domination"),
+        "expanded": ("dominate", "discipline", "command", "mesmerize", "eye contact"),
+        "scope_tags": ("discipline:dominate",),
+    },
     "Dementation": {
         "aliases": ("dementation", "dementia"),
         "expanded": ("dementation", "dominate", "malkavian", "power"),
@@ -187,6 +207,12 @@ class RulesQueryPlan:
     scoring_terms: list[str]
     semantic_query: str
     raw_fallback_query: str
+    resolved_entities: list[dict[str, Any]] = field(default_factory=list)
+    unresolved_high_value_terms: list[str] = field(default_factory=list)
+    target_groups: list[str] = field(default_factory=list)
+    situational_constraints: list[str] = field(default_factory=list)
+    ambiguity_warnings: list[dict[str, Any]] = field(default_factory=list)
+    resolution_confidence: float = 0.0
     schema_version: int = RULES_QUERY_PLAN_SCHEMA_VERSION
 
     @property
@@ -212,6 +238,12 @@ class RulesQueryPlan:
             "scoring_query": self.scoring_query,
             "semantic_query": self.semantic_query,
             "raw_fallback_query": self.raw_fallback_query,
+            "resolved_entities": self.resolved_entities,
+            "unresolved_high_value_terms": self.unresolved_high_value_terms,
+            "target_groups": self.target_groups,
+            "situational_constraints": self.situational_constraints,
+            "ambiguity_warnings": self.ambiguity_warnings,
+            "resolution_confidence": self.resolution_confidence,
         }
 
 
@@ -257,6 +289,16 @@ def plan_rules_query(question: str) -> RulesQueryPlan:
     entities["raw_unknown_terms"] = raw_unknown_terms
     if not canonical_terms and raw_unknown_terms:
         _add(warnings, "no_canonical_entities_detected; retaining raw searchable terms")
+    resolved_entities = _seed_resolved_entities(normalized)
+    target_groups = _target_groups(normalized)
+    situational_constraints = _situational_constraints(normalized)
+    unresolved_high_value_terms = _unresolved_high_value_terms(
+        normalized=normalized,
+        raw_unknown_terms=raw_unknown_terms,
+        resolved_entities=resolved_entities,
+    )
+    if unresolved_high_value_terms:
+        _add(warnings, "unresolved_high_value_terms; broad fallback cannot prove answerability")
 
     scoring_terms = _scoring_terms(
         intents=intents,
@@ -293,6 +335,11 @@ def plan_rules_query(question: str) -> RulesQueryPlan:
         scoring_terms=scoring_terms,
         semantic_query=semantic_query or normalized,
         raw_fallback_query=raw_question,
+        resolved_entities=resolved_entities,
+        unresolved_high_value_terms=unresolved_high_value_terms,
+        target_groups=target_groups,
+        situational_constraints=situational_constraints,
+        resolution_confidence=1.0 if resolved_entities else 0.0,
     )
 
 
@@ -305,6 +352,85 @@ def normalize_rules_query_text(text: str) -> str:
     for compact, expanded in COMPOUND_REPLACEMENTS.items():
         normalized = re.sub(rf"\b{re.escape(compact)}\b", expanded, normalized)
     return " ".join(normalized.split())
+
+
+def _seed_resolved_entities(normalized: str) -> list[dict[str, Any]]:
+    resolved: list[dict[str, Any]] = []
+    for canonical, meta in TARGETED_MECHANIC_ALIASES.items():
+        matched = [alias for alias in meta["aliases"] if _contains_phrase(normalized, normalize_rules_query_text(str(alias)))]
+        if not matched:
+            continue
+        resolved.append(
+            {
+                "entity_id": "seed:mechanic:" + normalize_rules_query_text(canonical).replace(" ", "-"),
+                "canonical_name": canonical,
+                "entity_type": "mechanic",
+                "accepted_aliases": _dedupe(str(alias) for alias in meta["aliases"]),
+                "matched_aliases": _dedupe(matched),
+                "source_anchors": [],
+                "scope_tags": _dedupe(str(tag) for tag in meta.get("scope_tags", ())),
+                "alias_provenance": "curated_seed",
+                "confidence": 0.9,
+            }
+        )
+    for canonical, meta in TARGETED_POWER_ALIASES.items():
+        matched = [alias for alias in meta["aliases"] if _contains_phrase(normalized, normalize_rules_query_text(str(alias)))]
+        if not matched:
+            continue
+        entity_type = "discipline" if str(canonical).casefold() == "dominate" else "power"
+        resolved.append(
+            {
+                "entity_id": "seed:" + entity_type + ":" + normalize_rules_query_text(canonical).replace(" ", "-"),
+                "canonical_name": canonical,
+                "entity_type": entity_type,
+                "accepted_aliases": _dedupe(str(alias) for alias in meta["aliases"]),
+                "matched_aliases": _dedupe(matched),
+                "source_anchors": [],
+                "scope_tags": _dedupe(str(tag) for tag in meta.get("scope_tags", ())),
+                "alias_provenance": "curated_seed",
+                "confidence": 0.9,
+            }
+        )
+    return resolved
+
+
+def _target_groups(normalized: str) -> list[str]:
+    groups: list[str] = []
+    aliases = {
+        "vampire": ("vampire", "vampires", "kindred", "other vampire", "other vampires"),
+        "mortal": ("mortal", "mortals", "human", "humans", "kine"),
+        "ghoul": ("ghoul", "ghouls"),
+        "animal": ("animal", "animals"),
+    }
+    for canonical, values in aliases.items():
+        if any(_contains_phrase(normalized, normalize_rules_query_text(value)) for value in values):
+            _add(groups, canonical)
+    return groups
+
+
+def _situational_constraints(normalized: str) -> list[str]:
+    constraints: list[str] = []
+    patterns = {
+        "eye_contact": r"\b(?:eye\s+contact|look(?:ing)?\s+into\s+(?:their|the)\s+eyes?|meet(?:ing)?\s+eyes?)\b",
+        "touch": r"\b(?:touch|touching|physical\s+contact)\b",
+        "scene_duration": r"\b(?:scene|one\s+scene|until\s+the\s+scene)\b",
+        "hunger_5": r"\b(?:hunger\s+(?:5|five)|at\s+(?:5|five)\s+hunger)\b",
+    }
+    for label, pattern in patterns.items():
+        if re.search(pattern, normalized):
+            _add(constraints, label)
+    return constraints
+
+
+def _unresolved_high_value_terms(
+    *,
+    normalized: str,
+    raw_unknown_terms: list[str],
+    resolved_entities: list[dict[str, Any]],
+) -> list[str]:
+    if resolved_entities:
+        return []
+    return []
 
 
 def _detect_intents(normalized: str, entities: dict[str, list[str]]) -> list[str]:
@@ -354,6 +480,7 @@ def _build_retrieval_queries(
     queries: list[RulesRetrievalQuery] = []
     entity_terms = _dedupe([*canonical_terms, *_high_value_expanded_terms(expanded_terms)])
     if entity_terms:
+        queries.append(_retrieval_query("entity_anchor", entity_terms, evidence=[], weight=1.25))
         queries.append(_retrieval_query("canonical_entities", entity_terms, evidence=[]))
 
     for intent in intents:

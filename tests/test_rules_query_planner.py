@@ -48,8 +48,23 @@ def test_rules_query_plan_warns_for_dementation_alias() -> None:
 def test_rules_query_plan_serializes_diagnostics() -> None:
     payload = plan_rules_query("what are bloodbonds").to_dict()
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["raw_question"] == "what are bloodbonds"
     assert payload["normalized_question"] == "what are blood bonds"
     assert payload["entities"]["mechanics"] == ["blood bond"]
+    assert payload["resolved_entities"][0]["canonical_name"] == "blood bond"
     assert payload["retrieval_queries"][-1]["role"] == "raw_fallback"
+
+
+def test_rules_query_plan_resolves_common_entity_first_targets() -> None:
+    blush = plan_rules_query("do I need blush of life to pass as human?")
+    dominate = plan_rules_query("can I use Dominate without eye contact on another vampire?")
+    hunger = plan_rules_query("what happens when I am at hunger 5 and must rouse?")
+
+    assert blush.resolved_entities[0]["canonical_name"] == "blush of life"
+    assert any(query.role == "entity_anchor" for query in blush.retrieval_queries)
+    assert dominate.target_groups == ["vampire"]
+    assert "eye_contact" in dominate.situational_constraints
+    assert any(entity["canonical_name"] == "Dominate" for entity in dominate.resolved_entities)
+    assert "hunger_5" in hunger.situational_constraints
+    assert any(entity["canonical_name"] == "hunger" for entity in hunger.resolved_entities)

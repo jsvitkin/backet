@@ -316,9 +316,19 @@ backet bot qa /path/to/vault --case-file docs/qa/prague-rules-answer-cases.json 
 backet --json bot qa /path/to/vault --case-file docs/qa/prague-rules-answer-cases.json --report-output .backet/reports/answer-quality
 ```
 
-QA cases store questions, expected planner terms, source anchors, required answer patterns, and forbidden answer patterns. Failures are classified by stage: planner, retrieval, answerability, synthesis, citation, runtime, or output policy. Missing private-vault cases are skipped so shared suites can remain CI-safe.
+QA cases store suite, category, severity, questions, expected planner terms, source anchors, direct-answer checks, required answer patterns, forbidden answer patterns, and optional expected failure stage. Failures are classified by stage: runtime, planner, retrieval, answerability, claim support, synthesis, citation, or output policy. `required` cases can fail validation, while exploratory and private calibration cases report regressions without blocking CI by default. Missing private-vault cases are skipped so shared suites can remain CI-safe.
 
-Current answers are tuned for direct, source-grounded replies rather than raw retrieval dumps. Retrieval produces an evidence packet, synthesis builds a grounded answer outline, and the final answer cites only selected evidence. Broad rules questions should receive short explanations with the main procedure, consequences, and caveats. Specific lookup questions, such as predator-type dice pools, should answer the requested value first and then cite sources. If the selected evidence is related but not sufficient, the bot should say which evidence is missing instead of bluffing. The answer body should not expose internal source labels such as `[R1]`; those belong in the source detail shown after the answer.
+For fresh local calibration without committing a case file, pass repeated ad hoc questions. These run as exploratory cases and can still write JSON and Markdown reports:
+
+```bash
+backet bot qa /path/to/vault \
+  --question "what is a rouse check?" \
+  --question "can I use dominate without eye contact?" \
+  --suite ad-hoc \
+  --report-output .backet/reports/answer-quality/fresh-run
+```
+
+Current answers are tuned for direct, source-grounded replies rather than raw retrieval dumps. Retrieval produces an evidence packet, synthesis validates answer claims over selected evidence, and the final answer cites only selected evidence. Broad rules questions should receive short explanations with the main procedure, consequences, and caveats. Specific lookup questions, such as predator-type dice pools, should answer the requested value first and then cite sources. If the selected evidence is related but not sufficient, the bot should say which evidence is missing instead of bluffing. The answer body should not expose internal source labels such as `[R1]`; those belong in the source detail shown after the answer.
 
 The bundle shape is:
 
@@ -395,7 +405,7 @@ backet bot runtime benchmark E:\Projects\prague-by-night `
   --report-output E:\Projects\prague-by-night\.backet\qa\local-runtime
 ```
 
-The May 17, 2026 baseline on the Ryzen 7 7800X3D / 32 GB RAM / RX 7800 XT machine used Ollama 0.24.0, `nomic-embed-text` for 768-dimensional embeddings, and `llama3.2:3b` for answer synthesis. Deterministic QA passed 5 of 5 Prague cases after the corpus was reindexed to RAG metadata schema 2. Configured-model QA also passed 5 of 5 because invalid model prose fell back to deterministic outline answers. The important caveat is that `llama3.2:3b` omitted required citations or outline support in answerable cases, so it is useful for plumbing tests but not the final-quality answer model. The Dementation targeting case now abstains honestly with missing `dementation` evidence instead of answering from unrelated Malkavian clan text. `llama3.1:8b` was pulled but failed this run with GPU memory/KV cache allocation errors, so do not treat 8B as the minimum supported answer model yet.
+The May 17, 2026 baseline on the Ryzen 7 7800X3D / 32 GB RAM / RX 7800 XT machine used Ollama 0.24.0, `nomic-embed-text` for 768-dimensional embeddings, and `llama3.2:3b` for answer synthesis. After the rule-block, entity-first, and claim-contract apply, screenshot-regression QA passed 4 of 5 required Prague cases; Dementation targeting still fails in retrieval because the selected evidence lacks the required direct targeting source. Configured-model exploratory `standard-fresh` QA passed 1 of 5, so `llama3.2:3b` remains useful for plumbing tests but not the final-quality answer model. Keep fallback enabled and treat the remaining failures as corpus/retrieval/model-selection work rather than Discord formatting problems. `llama3.1:8b` was pulled but failed this run with GPU memory/KV cache allocation errors, so do not treat 8B as the minimum supported answer model yet.
 
 ## Answer Diagnostics
 

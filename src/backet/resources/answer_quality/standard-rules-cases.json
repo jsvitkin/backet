@@ -1,8 +1,13 @@
 {
   "schema_version": 1,
+  "suite": "standard",
+  "category": "observed-regression",
+  "severity": "required",
   "cases": [
     {
       "id": "learn-obfuscate-advancement",
+      "suite": "screenshot-regression",
+      "category": "advancement",
       "description": "A question about learning Obfuscate needs advancement or acquisition evidence, not a character page that happens to contain the word learn and the discipline name.",
       "difficulty": "easy",
       "command": "rules.ask",
@@ -32,6 +37,8 @@
     },
     {
       "id": "malkavian-dementation-targeting",
+      "suite": "screenshot-regression",
+      "category": "targeting",
       "description": "A Malkavian Dementation targeting question needs system or applicability evidence, not a nearby clan discipline mention.",
       "difficulty": "medium",
       "command": "rules.ask",
@@ -68,6 +75,8 @@
     },
     {
       "id": "blood-bond-definition",
+      "suite": "screenshot-regression",
+      "category": "definition",
       "description": "A blood bond question needs Blood Bond definition or mechanics evidence and must not answer from unrelated Second Inquisition text.",
       "difficulty": "easy",
       "command": "rules.ask",
@@ -93,6 +102,8 @@
     },
     {
       "id": "ritual-timing",
+      "suite": "screenshot-regression",
+      "category": "timing",
       "description": "Ritual timing should retrieve and answer from the general ritual procedure.",
       "difficulty": "very-easy",
       "command": "rules.ask",
@@ -116,6 +127,8 @@
     },
     {
       "id": "messy-critical-feeding-masquerade",
+      "suite": "screenshot-regression",
+      "category": "consequence",
       "description": "A messy critical question asks for consequences, not a generic dice-pool example.",
       "difficulty": "hard",
       "command": "rules.ask",
@@ -137,6 +150,130 @@
       "forbidden_answer_contains": [
         "4 successes and no critical"
       ]
+    },
+    {
+      "id": "rouse-check-definition-fresh",
+      "suite": "standard-fresh",
+      "category": "definition",
+      "severity": "exploratory",
+      "description": "A very easy table question should explain the basic Rouse Check mechanic rather than only a Blood Potency modifier.",
+      "difficulty": "very-easy",
+      "command": "rules.ask",
+      "question": "what is a rouse check?",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "rouse check"
+      ],
+      "required_direct_answer_patterns": [
+        "(roll|die|hunger)"
+      ],
+      "forbidden_answer_contains": [
+        "Roll two dice and pick the highest when rolling a Rouse Check for discipline powers"
+      ]
+    },
+    {
+      "id": "bagged-blood-slake-fresh",
+      "suite": "standard-fresh",
+      "category": "feeding",
+      "severity": "exploratory",
+      "description": "A simple feeding question should answer the bagged blood slaking rule directly.",
+      "difficulty": "easy",
+      "command": "rules.ask",
+      "question": "how much hunger does bagged blood slake?",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "hunger",
+        "bagged blood"
+      ],
+      "required_direct_answer_patterns": [
+        "(twice|slake|hunger)"
+      ]
+    },
+    {
+      "id": "blush-of-life-scene-fresh",
+      "suite": "standard-fresh",
+      "category": "mechanic",
+      "severity": "exploratory",
+      "description": "A named mechanic should resolve to Blush of Life and not to unrelated one-scene powers.",
+      "difficulty": "medium",
+      "command": "rules.ask",
+      "question": "can my vampire use blush of life to pass as alive for a scene?",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "blush of life"
+      ],
+      "forbidden_sources": [
+        {
+          "text_contains": "PASSION FEAST"
+        }
+      ],
+      "required_direct_answer_patterns": [
+        "(yes|can|may|pass|alive|life)"
+      ]
+    },
+    {
+      "id": "hunger-five-forced-rouse-fresh",
+      "suite": "standard-fresh",
+      "category": "consequence",
+      "severity": "exploratory",
+      "description": "A hard Hunger 5 edge case should include the forced hunger frenzy test consequence.",
+      "difficulty": "hard",
+      "command": "rules.ask",
+      "question": "what happens if I fail a rouse check while already at hunger 5?",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "rouse check",
+        "hunger"
+      ],
+      "required_direct_answer_patterns": [
+        "(hunger frenzy|Difficulty 4|activates)"
+      ]
+    },
+    {
+      "id": "dominate-eye-contact-fresh",
+      "suite": "standard-fresh",
+      "category": "targeting",
+      "severity": "exploratory",
+      "description": "A very hard targeting question should answer base Dominate eye-contact requirements instead of a special Famulus delivery power.",
+      "difficulty": "very-hard",
+      "command": "rules.ask",
+      "question": "can I use dominate on someone in a fight if they are not making eye contact with me?",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "dominate",
+        "eye contact"
+      ],
+      "forbidden_sources": [
+        {
+          "text_contains": "Animal Messenger"
+        }
+      ],
+      "required_direct_answer_patterns": [
+        "(eye contact|cannot|can't|must|need)"
+      ]
+    },
+    {
+      "id": "unknown-power-insufficient-fresh",
+      "suite": "standard-negative",
+      "category": "insufficient",
+      "severity": "exploratory",
+      "description": "A made-up or unavailable power name should not be answered from generic discipline text.",
+      "difficulty": "medium",
+      "command": "rules.ask",
+      "question": "can my vampire use moonlit ledger to hide a feeding?",
+      "expected_insufficient": true,
+      "expected_response_class": "insufficient"
+    },
+    {
+      "id": "ambiguous-book-scope-fresh",
+      "suite": "standard-negative",
+      "category": "ambiguity",
+      "severity": "exploratory",
+      "description": "When comparable sources conflict or scope is unclear, the bot should surface ambiguity instead of picking silently.",
+      "difficulty": "hard",
+      "command": "rules.ask",
+      "question": "which version of the oblivion ceremony rule should we use?",
+      "expected_response_class": "ambiguous"
     }
   ]
 }

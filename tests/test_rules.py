@@ -12,10 +12,12 @@ from backet.cli import app
 from backet.embeddings import EmbeddingResult
 from backet.errors import AppError
 from backet.rules import (
+    RULE_BLOCK_STRUCTURE_SCHEMA_VERSION,
     _rules_corpus_action_for_book,
     build_rules_fts_query,
     classify_rule_chunk,
     classify_rule_chunk_rag_metadata,
+    derive_rule_block_structure,
     ingest_rulebook,
     normalize_scope_tags,
     open_rules_connection,
@@ -42,6 +44,30 @@ def test_split_rule_chunks_preserves_paragraph_boundaries() -> None:
 
 def test_rules_fts_query_drops_question_stopwords() -> None:
     assert build_rules_fts_query("What is a hunger check?") == '"hunger" OR "check"'
+
+
+def test_rule_block_structure_cleans_page_furniture_and_preserves_stat_block_fields() -> None:
+    structure = derive_rule_block_structure(
+        book_id="core-v5",
+        section_label="V A M P I R E",
+        page_start=205,
+        chunk_index=1,
+        content=(
+            "2 0 5\n"
+            "V A M P I R E : T H E M A S Q U E R A D E 2 0 5 Blood Surge\n"
+            "Cost: One Rouse Check\n"
+            "System: Add dice to one test.\n"
+            "Duration: One test"
+        ),
+    )
+
+    assert structure.schema_version == RULE_BLOCK_STRUCTURE_SCHEMA_VERSION
+    assert structure.block_id.startswith("core-v5:p205:c1")
+    assert structure.block_kind == "rules"
+    assert "Cost: One Rouse Check" in structure.clean_content
+    assert "System: Add dice" in structure.clean_content
+    assert not structure.source_window.startswith("V A M P I R E")
+    assert "page_furniture_removed" in structure.structure_flags
 
 
 def test_rules_ingest_clean_pdf_and_query_metadata(runner, tmp_path: Path) -> None:
@@ -142,6 +168,54 @@ def test_rules_index_reports_semantic_schema_and_refreshes_stale_chunks(runner, 
     assert index_payload["data"]["refreshed_metadata"] > 0
     assert index_payload["data"]["source_pdf_required"] is False
     assert index_payload["data"]["source_operation"] == "stored_chunk_text"
+
+
+def test_rules_index_full_rebuilds_missing_rule_block_structure(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "structure-index.pdf",
+        [
+            _rule_page(
+                "Blood Bonds",
+                "A Blood Bond forms from repeated drinks of vitae. System: The bond creates emotional dependence and obedience pressure.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    with closing(open_rules_connection(vault)) as connection:
+        connection.execute(
+            """
+            UPDATE rule_chunks
+            SET rule_block_id = '',
+                clean_content = '',
+                source_window = '',
+                structure_flags_json = '[]',
+                structure_schema_version = 0
+            WHERE book_id = 'core-v5'
+            """
+        )
+        connection.commit()
+
+    audit_result = runner.invoke(app, ["--json", "rules", "audit", str(vault), "--book-id", "core-v5"])
+    assert audit_result.exit_code == 0
+    audit_payload = json.loads(audit_result.stdout)
+    assert audit_payload["data"]["books"][0]["structure_health"]["missing_structure"] > 0
+    assert "missing_rule_block_structure" in audit_payload["data"]["corpus_health"]["books"][0]["reasons"]
+
+    index_result = runner.invoke(app, ["--json", "rules", "index", str(vault), "--book-id", "core-v5", "--full"])
+    assert index_result.exit_code == 0
+    index_payload = json.loads(index_result.stdout)
+    assert index_payload["data"]["refreshed_structure"] > 0
+    assert index_payload["data"]["missing_structure"] == 0
+    assert index_payload["data"]["source_pdf_required"] is False
+
+    query_result = runner.invoke(app, ["--json", "rules", "query", str(vault), "what is a blood bond", "--limit", "1"])
+    assert query_result.exit_code == 0
+    result = json.loads(query_result.stdout)["data"]["primary_results"][0]
+    assert result["rule_block_id"].startswith("core-v5:p1:c1")
+    assert result["structure_schema_version"] == RULE_BLOCK_STRUCTURE_SCHEMA_VERSION
+    assert "Blood Bond" in result["excerpt"]
 
 
 def test_rules_corpus_health_action_categories() -> None:
@@ -697,6 +771,75 @@ def test_rules_query_excerpt_window_skips_page_furniture(runner, tmp_path: Path)
     excerpt = json.loads(result.stdout)["data"]["primary_results"][0]["excerpt"]
     assert "Blood Surge" in excerpt
     assert not excerpt.startswith("V A M P I R E")
+
+
+def test_rules_entity_first_retrieval_keeps_blush_of_life_on_target(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "blush.pdf",
+        [
+            _rule_page(
+                "Blush of Life",
+                "A vampire can make a Rouse Check to send blood through dead flesh. System: Blush of Life lets the vampire breathe, warm their skin, and pass as human for the scene.",
+            ),
+            _rule_page(
+                "Shadow Cloak",
+                "Duration: One scene. System: This unrelated power hides the vampire in a patch of darkness but says nothing about appearing alive.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+    runner.invoke(app, ["--json", "rules", "index", str(vault), "--book-id", "core-v5", "--full"])
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "how does Blush of Life work?", "--limit", "1"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)["data"]
+    selected = payload["evidence_packet"]["selected_evidence"]
+    assert selected
+    assert selected[0]["section_label"] == "Blush of Life"
+    assert payload["query_plan"]["resolved_entities"][0]["canonical_name"] == "blush of life"
+    assert payload["evidence_packet"]["retrieval_diagnostics"]["entity_first"]["mode"] == "entity_first"
+
+
+def test_rules_entity_first_retrieval_prefers_base_dominate_targeting(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "dominate.pdf",
+        [
+            _rule_page(
+                "Dominate",
+                "System: Dominate powers require the vampire to catch the victim's eye and issue a command. The discipline can affect mortals and Kindred when the individual power permits it.",
+            ),
+            _rule_page(
+                "Famulus Delivery",
+                "System: This special animal delivery power lets a vampire transmit a command through a famulus without direct eye contact. It is a narrow exception and not the base Dominate rule.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+    runner.invoke(app, ["--json", "rules", "index", str(vault), "--book-id", "core-v5", "--full"])
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "query",
+            str(vault),
+            "can I use Dominate on another vampire without eye contact?",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)["data"]
+    selected = payload["evidence_packet"]["selected_evidence"]
+    assert selected
+    assert selected[0]["section_label"] == "Dominate"
+    assert payload["query_plan"]["target_groups"] == ["vampire"]
+    assert "eye_contact" in payload["query_plan"]["situational_constraints"]
 
 
 def test_rule_retrieval_metadata_classifies_common_non_answer_chunks() -> None:

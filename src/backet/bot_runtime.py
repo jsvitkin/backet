@@ -879,6 +879,7 @@ def _trace_answerability(evidence_packet: Any, answer_packet: Any = None) -> dic
         "missing_evidence": list(evidence_packet.get("missing_evidence") or []),
         "satisfied_evidence": list(evidence_packet.get("satisfied_evidence") or []),
         "entity_anchor_status": diagnostics.get("entity_anchor_status"),
+        "entity_first": diagnostics.get("entity_first"),
         "target_group_status": diagnostics.get("target_group_status"),
         "intent_evidence_status": diagnostics.get("intent_evidence_status"),
         "semantic_quality": diagnostics.get("semantic_quality"),

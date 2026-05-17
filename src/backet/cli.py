@@ -724,6 +724,14 @@ def bot_qa_command(
         list[Path] | None,
         typer.Option("--case-file", help="Answer QA case file. Can be repeated. Defaults to packaged standard cases."),
     ] = None,
+    questions: Annotated[
+        list[str] | None,
+        typer.Option("--question", help="Ad hoc QA question. Can be repeated; ad hoc cases are exploratory by default."),
+    ] = None,
+    suites: Annotated[
+        list[str] | None,
+        typer.Option("--suite", help="Run only cases from this suite name. Can be repeated."),
+    ] = None,
     command: Annotated[
         str,
         typer.Option("--command", help="Default command route when a case does not specify one."),
@@ -756,7 +764,9 @@ def bot_qa_command(
     try:
         result = run_bot_qa(
             target=target,
-            case_files=case_files or [],
+            case_files=case_files,
+            questions=questions or [],
+            suites=suites or [],
             command=command,
             user_id=user_id,
             role_ids=role_ids or [],

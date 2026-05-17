@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from backet.errors import AppError
 from backet.indexing import build_scoped_index, timestamp_now
 from backet.models import CommandResult, Issue
 from backet.paths import rules_db_path
+from backet.rules import open_rules_database
 from backet.vault import ensure_bootstrapped_vault
 
 BOT_BUNDLE_SCHEMA_VERSION = 1
@@ -64,6 +66,10 @@ def export_bot_bundle(vault_root: Path, output_path: Path, force: bool = False) 
     if source_rules_db.exists():
         target_rules_db = rules_dir / "rules.sqlite3"
         shutil.copy2(source_rules_db, target_rules_db)
+        try:
+            open_rules_database(target_rules_db).close()
+        except sqlite3.DatabaseError:
+            pass
         rules_meta = {
             "included": True,
             "path": "rules/rules.sqlite3",

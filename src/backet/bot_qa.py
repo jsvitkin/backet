@@ -21,6 +21,8 @@ def run_bot_qa(
     target: Path,
     *,
     case_files: list[Path] | None = None,
+    questions: list[str] | None = None,
+    suites: list[str] | None = None,
     command: str = "rules.ask",
     user_id: str | None = None,
     role_ids: list[str] | None = None,
@@ -31,7 +33,7 @@ def run_bot_qa(
     report_output: Path | None = None,
     force: bool = False,
 ) -> CommandResult:
-    cases = _load_cases(case_files)
+    cases = _load_cases(case_files, questions=questions or [], suites=suites or [])
     resolved_target = target.expanduser().resolve()
     if bundle or _looks_like_bundle(resolved_target):
         return _run_qa_with_bundle(
@@ -106,8 +108,11 @@ def _run_qa_with_bundle(
                 {
                     "case_id": case.get("id"),
                     "question": case.get("question"),
+                    "suite": case.get("suite"),
+                    "category": case.get("category"),
+                    "severity": case.get("severity"),
                     "difficulty": case.get("difficulty"),
-                    "required": bool(case.get("required", True)),
+                    "required": _case_required(case),
                     "skipped": True,
                     "skip_reason": skip_reason,
                     "passed": True,
@@ -130,7 +135,10 @@ def _run_qa_with_bundle(
         case_results.append(
             {
                 **evaluation,
-                "required": bool(case.get("required", True)),
+                "suite": case.get("suite"),
+                "category": case.get("category"),
+                "severity": case.get("severity"),
+                "required": _case_required(case),
                 "skipped": False,
                 "command": case_command,
                 "answer": _answer_summary(answer.to_dict()),
@@ -151,6 +159,9 @@ def _run_qa_with_bundle(
         "failed_count": len(failed),
         "failed_required_count": len(failed_required),
         "skipped_count": len(skipped),
+        "by_suite": _summary_counts(case_results, "suite"),
+        "by_category": _summary_counts(case_results, "category"),
+        "by_difficulty": _summary_counts(case_results, "difficulty"),
         "ok": not failed_required,
         "cases": case_results,
     }
@@ -164,8 +175,8 @@ def _run_qa_with_bundle(
     )
 
 
-def _load_cases(case_files: list[Path] | None) -> list[dict[str, Any]]:
-    paths = case_files or [default_answer_quality_case_file()]
+def _load_cases(case_files: list[Path] | None, *, questions: list[str], suites: list[str]) -> list[dict[str, Any]]:
+    paths = case_files or ([] if questions else [default_answer_quality_case_file()])
     cases: list[dict[str, Any]] = []
     for path in paths:
         try:
@@ -178,6 +189,25 @@ def _load_cases(case_files: list[Path] | None) -> list[dict[str, Any]]:
                 details={"case_file": str(path), "error": str(exc)},
                 exit_code=2,
             ) from exc
+    for index, question in enumerate(questions, start=1):
+        text = str(question).strip()
+        if not text:
+            continue
+        cases.append(
+            {
+                "id": f"ad-hoc-{index}",
+                "suite": "ad-hoc",
+                "category": "ad-hoc",
+                "severity": "exploratory",
+                "required": False,
+                "difficulty": "ungraded",
+                "command": "rules.ask",
+                "question": text,
+            }
+        )
+    suite_filter = {str(suite) for suite in suites if str(suite)}
+    if suite_filter:
+        cases = [case for case in cases if str(case.get("suite") or "") in suite_filter]
     return cases
 
 
@@ -193,6 +223,12 @@ def _skip_reason(case: dict[str, Any]) -> str | None:
     if bundle_path and not Path(str(bundle_path)).expanduser().exists():
         return f"bundle_path_missing:{bundle_path}"
     return None
+
+
+def _case_required(case: dict[str, Any]) -> bool:
+    if "required" in case:
+        return bool(case.get("required"))
+    return str(case.get("severity") or "required") == "required"
 
 
 def _answer_summary(answer: dict[str, Any]) -> dict[str, Any]:
@@ -211,7 +247,35 @@ def _answer_summary(answer: dict[str, Any]) -> dict[str, Any]:
         "source_count": retrieval.get("source_count"),
         "rules_retrieval_mode": retrieval.get("rules_retrieval_mode"),
         "rules_evidence_status": retrieval.get("rules_evidence_status"),
+        "selected_sources": [
+            {
+                "citation": source.get("citation"),
+                "source_type": source.get("source_type"),
+                "book_id": source.get("book_id"),
+                "book_title": source.get("book_title") or source.get("title"),
+                "page_start": source.get("page_start"),
+                "page_end": source.get("page_end"),
+                "section_label": source.get("section_label"),
+            }
+            for source in list(answer.get("sources") or [])[:6]
+            if isinstance(source, dict)
+        ],
     }
+
+
+def _summary_counts(case_results: list[dict[str, Any]], key: str) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for item in case_results:
+        label = str(item.get(key) or "unspecified")
+        bucket = counts.setdefault(label, {"total": 0, "passed": 0, "failed": 0, "skipped": 0})
+        bucket["total"] += 1
+        if item.get("skipped"):
+            bucket["skipped"] += 1
+        elif item.get("passed"):
+            bucket["passed"] += 1
+        else:
+            bucket["failed"] += 1
+    return counts
 
 
 def _write_reports(output: Path, data: dict[str, Any]) -> list[str]:
@@ -239,14 +303,32 @@ def _markdown_report(data: dict[str, Any]) -> str:
         f"- Failed: {data.get('failed_count')}",
         f"- Skipped: {data.get('skipped_count')}",
         "",
-        "## Cases",
+        "## Summary",
         "",
     ]
+    for label, payload in sorted(dict(data.get("by_suite", {}) or {}).items()):
+        if isinstance(payload, dict):
+            lines.append(
+                f"- Suite `{label}`: {payload.get('passed', 0)} passed, {payload.get('failed', 0)} failed, {payload.get('skipped', 0)} skipped"
+            )
+    lines.extend(
+        [
+            "",
+            "## Cases",
+            "",
+        ]
+    )
     for case in data.get("cases", []):
         if not isinstance(case, dict):
             continue
         status = "skipped" if case.get("skipped") else ("passed" if case.get("passed") else "failed")
-        lines.append(f"- {case.get('case_id')}: {status}")
+        meta = ", ".join(
+            str(value)
+            for value in (case.get("suite"), case.get("category"), case.get("difficulty"), case.get("severity"))
+            if value
+        )
+        suffix = f" ({meta})" if meta else ""
+        lines.append(f"- {case.get('case_id')}: {status}{suffix}")
         if case.get("failure_stage"):
             lines.append(f"  - Stage: {case.get('failure_stage')}")
         if case.get("skip_reason"):

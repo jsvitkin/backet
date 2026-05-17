@@ -148,6 +148,57 @@ def test_llama_prompt_consumes_answer_packet_selected_evidence_only() -> None:
     assert "character sheet" not in prompt
 
 
+def test_answer_outline_claim_contract_validates_selected_evidence_only() -> None:
+    selected = _rule_source(
+        citation="R1",
+        page=67,
+        content="Blood Bonds create a supernatural tie between a regnant and a thrall through repeated drinks.",
+    )
+    selected["rule_block_id"] = "core:p67:c1:blood-bonds"
+    packet = AnswerPacket(
+        question="what are blood bonds?",
+        response_class=ANSWER_CLASS_ANSWER,
+        evidence_status="answerable",
+        selected_evidence=[selected],
+        fallback_context=[
+            _rule_source(
+                citation="R2",
+                page=368,
+                content="A prince tried to use the Second Inquisition as a pawn in his own schemes.",
+            )
+        ],
+        answer_shape="definition",
+        diagnostics={
+            "query_plan": {
+                "intents": ["definition"],
+                "resolved_entities": [
+                    {
+                        "entity_id": "seed:mechanic:blood-bond",
+                        "canonical_name": "blood bond",
+                        "accepted_aliases": ["blood bond", "blood bonds"],
+                        "source_anchors": [],
+                    }
+                ],
+                "target_groups": [],
+                "situational_constraints": [],
+            }
+        },
+    )
+
+    outline = build_answer_outline(packet)
+    claim = outline.claims[0]
+    answer = TemplateAnswerGenerator().generate_from_packet(packet)
+
+    assert outline.response_class == ANSWER_CLASS_ANSWER
+    assert claim.validation_status == "validated"
+    assert claim.source_ids == ["R1"]
+    assert claim.covered_entities == ["seed:mechanic:blood-bond"]
+    assert claim.support_windows[0]["source_id"] == "R1"
+    assert "Second Inquisition" not in answer.text
+    assert answer.diagnostics["synthesis"]["claim_contract"]["validated_claims"] == 1
+    assert answer.diagnostics["synthesis"]["final_answer_support"][0]["claim_id"] == claim.claim_id
+
+
 def test_llama_validation_blocks_unavailable_citations_and_status_violations() -> None:
     sources = [_rule_source(citation="R1", page=70, content="Blood Bond definition text.")]
     insufficient_packet = AnswerPacket(

@@ -17,6 +17,9 @@ def test_answer_quality_fixture_cases_load() -> None:
         "malkavian-dementation-targeting",
         "blood-bond-definition",
     }
+    assert all(case["suite"] == "standard" for case in cases)
+    assert all(case["severity"] == "required" for case in cases)
+    assert all(case["required"] is True for case in cases)
 
 
 def test_answer_quality_evaluator_reports_stage_failures() -> None:
@@ -69,6 +72,59 @@ def test_answer_quality_case_file_reports_invalid_field_path(tmp_path: Path) -> 
         load_answer_quality_cases(path)
 
 
+def test_answer_quality_case_file_validates_new_fields(tmp_path: Path) -> None:
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "suite": "pipeline-smoke",
+                "severity": "exploratory",
+                "cases": [
+                    {
+                        "id": "direct-answer",
+                        "question": "what is a rouse check?",
+                        "category": "definition",
+                        "expected_first_failure_stage": "claim-support",
+                        "required_direct_answer_patterns": ["rouse"],
+                        "required_claim_patterns": ["hunger"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cases = load_answer_quality_cases(path)
+
+    assert cases[0]["suite"] == "pipeline-smoke"
+    assert cases[0]["severity"] == "exploratory"
+    assert cases[0]["required"] is False
+    assert cases[0]["expected_failure_stage"] == "claim_support"
+
+
+def test_answer_quality_case_file_rejects_bad_stage(tmp_path: Path) -> None:
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cases": [
+                    {
+                        "id": "bad-stage",
+                        "question": "what is a rouse check?",
+                        "expected_failure_stage": "magic",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"cases\[0\]\.expected_failure_stage"):
+        load_answer_quality_cases(path)
+
+
 def test_answer_quality_evaluator_checks_planner_and_answerability() -> None:
     case = {
         "id": "dementation-targeting",
@@ -103,6 +159,51 @@ def test_answer_quality_evaluator_checks_planner_and_answerability() -> None:
 
     assert result["passed"] is True
     assert result["trace_summary"]["planner_terms"]
+
+
+def test_answer_quality_evaluator_checks_direct_answer_and_claims() -> None:
+    case = {
+        "id": "claim-case",
+        "question": "what happens at hunger 5?",
+        "required_direct_answer_patterns": ["hunger frenzy"],
+        "required_claim_patterns": ["Difficulty 4"],
+        "expected_claim_stance": "consequence",
+    }
+    answer = {
+        "text": "**Short answer:**\n- At Hunger 5, a forced Rouse Check triggers a hunger frenzy test.\n\nSources: Core Rulebook p. 213",
+        "answer_trace": {
+            "stages": {
+                "claim_support": {
+                    "claims": [
+                        {
+                            "text": "At Hunger 5, a forced Rouse Check triggers a Difficulty 4 hunger frenzy test.",
+                            "stance": "consequence",
+                        }
+                    ]
+                }
+            }
+        },
+    }
+
+    result = evaluate_answer_quality_case(answer, case)
+
+    assert result["passed"] is True
+    assert result["stages"]["claim_support"]["status"] == "passed"
+
+
+def test_answer_quality_evaluator_accepts_expected_failure_stage() -> None:
+    case = {
+        "id": "expected-claim-failure",
+        "question": "what happens at hunger 5?",
+        "expected_failure_stage": "claim_support",
+        "required_claim_patterns": ["Difficulty 4"],
+    }
+    answer = {"text": "At Hunger 5, something happens."}
+
+    result = evaluate_answer_quality_case(answer, case)
+
+    assert result["passed"] is True
+    assert result["failure_stage"] == "claim_support"
 
 
 def test_answer_quality_evaluator_classifies_planner_first() -> None:

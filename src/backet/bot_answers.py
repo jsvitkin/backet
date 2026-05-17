@@ -161,12 +161,30 @@ class AnswerClaim:
     text: str
     source_ids: list[str]
     claim_type: str = "rule"
+    claim_id: str = ""
+    support_windows: list[dict[str, Any]] = field(default_factory=list)
+    covered_entities: list[str] = field(default_factory=list)
+    covered_intents: list[str] = field(default_factory=list)
+    stance: str = "unknown"
+    constraints: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    validation_status: str = "unvalidated"
+    validation_errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "claim_id": self.claim_id,
             "text": self.text,
             "source_ids": self.source_ids,
             "claim_type": self.claim_type,
+            "support_windows": self.support_windows,
+            "covered_entities": self.covered_entities,
+            "covered_intents": self.covered_intents,
+            "stance": self.stance,
+            "constraints": self.constraints,
+            "confidence": self.confidence,
+            "validation_status": self.validation_status,
+            "validation_errors": self.validation_errors,
         }
 
 
@@ -249,6 +267,8 @@ class TemplateAnswerGenerator:
                     "answer_shape": outline.answer_shape,
                     "source_ids": outline.source_ids,
                     "fallback_reason": None,
+                    "claim_contract": _claim_contract_diagnostics(outline.claims),
+                    "final_answer_support": _final_answer_support_map(outline),
                 },
             },
         )
@@ -368,6 +388,8 @@ class LlamaLocalAnswerGenerator:
                         "answer_shape": outline.answer_shape,
                         "source_ids": outline.source_ids,
                         "fallback_reason": None,
+                        "claim_contract": _claim_contract_diagnostics(outline.claims),
+                        "final_answer_support": _final_answer_support_map(outline),
                     },
                 },
             )
@@ -479,6 +501,8 @@ class OllamaLocalAnswerGenerator:
                         "answer_shape": outline.answer_shape,
                         "source_ids": outline.source_ids,
                         "fallback_reason": None,
+                        "claim_contract": _claim_contract_diagnostics(outline.claims),
+                        "final_answer_support": _final_answer_support_map(outline),
                     },
                     "timing": {
                         "total_duration_ns": payload.get("total_duration"),
@@ -619,6 +643,8 @@ def _answer_packet_from_sources(question: str, sources: list[dict[str, Any]]) ->
                 "source_count": len(sources),
                 "packet_source": "retrieval_evidence_packet",
                 "candidate_counts": evidence_packet.get("candidate_counts", {}),
+                "query_plan": evidence_packet.get("query_plan", {}),
+                "retrieval_diagnostics": evidence_packet.get("retrieval_diagnostics", {}),
             },
         )
     if sources:
@@ -838,7 +864,14 @@ def build_answer_outline(packet: AnswerPacket | dict[str, Any]) -> AnswerOutline
             if any(existing.text == claim_text for existing in claims):
                 continue
             citation = str(source.get("citation") or "")
-            claims.append(AnswerClaim(text=claim_text, source_ids=[citation] if citation else [], claim_type=current.answer_shape))
+            claim = _build_supported_answer_claim(
+                claim_text=claim_text,
+                source=source,
+                packet=current,
+                answer_shape=current.answer_shape,
+                existing_count=len(claims),
+            )
+            claims.append(claim)
             if len(claims) >= _short_answer_bullet_limit(current.question):
                 break
         if claims and not _outline_allows_multi_source(current.answer_shape):
@@ -846,7 +879,8 @@ def build_answer_outline(packet: AnswerPacket | dict[str, Any]) -> AnswerOutline
         if len(claims) >= _short_answer_bullet_limit(current.question):
             break
 
-    if not claims:
+    valid_claims = [claim for claim in claims if claim.validation_status == "validated"]
+    if not valid_claims:
         return AnswerOutline(
             question=current.question,
             response_class=ANSWER_CLASS_INSUFFICIENT,
@@ -859,21 +893,23 @@ def build_answer_outline(packet: AnswerPacket | dict[str, Any]) -> AnswerOutline
                 "packet": current.summary(),
                 "coverage": coverage,
                 "reason": "no_claims_extracted_from_selected_evidence",
+                "claims": [claim.to_dict() for claim in claims],
             },
         )
 
-    source_ids = _dedupe([source_id for claim in claims for source_id in claim.source_ids])
+    source_ids = _dedupe([source_id for claim in valid_claims for source_id in claim.source_ids])
     return AnswerOutline(
         question=current.question,
         response_class=ANSWER_CLASS_ANSWER,
         evidence_status=current.evidence_status,
         answer_shape=current.answer_shape,
         stance=_outline_stance(current.question, claims),
-        claims=claims,
+        claims=valid_claims,
         source_ids=source_ids,
         diagnostics={
             "packet": current.summary(),
             "coverage": coverage,
+            "claim_contract": _claim_contract_diagnostics(valid_claims),
         },
     )
 
@@ -976,6 +1012,198 @@ def _outline_coverage(packet: AnswerPacket, selected: list[dict[str, Any]]) -> d
         "important_term_hits": hit_count,
         "selected_source_ids": _source_ids(selected),
     }
+
+
+def _build_supported_answer_claim(
+    *,
+    claim_text: str,
+    source: dict[str, Any],
+    packet: AnswerPacket,
+    answer_shape: str,
+    existing_count: int,
+) -> AnswerClaim:
+    citation = str(source.get("citation") or "")
+    query_plan = packet.diagnostics.get("query_plan") if isinstance(packet.diagnostics.get("query_plan"), dict) else {}
+    support_text = _source_text_for_question(source, packet.question, limit=DEFAULT_TEMPLATE_DETAIL_CHARS)
+    covered_entities = _claim_covered_entities(claim_text, source, query_plan)
+    covered_intents = _claim_covered_intents(query_plan, answer_shape)
+    constraints = _claim_constraints(query_plan)
+    claim = AnswerClaim(
+        claim_id=f"C{existing_count + 1}",
+        text=claim_text,
+        source_ids=[citation] if citation else [],
+        claim_type=answer_shape,
+        support_windows=[
+            {
+                "source_id": citation,
+                "text": _bounded_claim_window(support_text),
+            }
+        ]
+        if citation and support_text
+        else [],
+        covered_entities=covered_entities,
+        covered_intents=covered_intents,
+        stance=_claim_stance_from_text(packet.question, claim_text),
+        constraints=constraints,
+        confidence=0.0,
+        validation_status="unvalidated",
+    )
+    errors = _validate_supported_answer_claim(claim, source=source, packet=packet, query_plan=query_plan)
+    claim.validation_errors = errors
+    claim.validation_status = "validated" if not errors else "rejected"
+    claim.confidence = 0.84 if not errors else 0.0
+    return claim
+
+
+def _validate_supported_answer_claim(
+    claim: AnswerClaim,
+    *,
+    source: dict[str, Any],
+    packet: AnswerPacket,
+    query_plan: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    source_ids = set(_source_ids(packet.selected_evidence))
+    if not claim.source_ids:
+        errors.append("missing_source_id")
+    if any(source_id not in source_ids for source_id in claim.source_ids):
+        errors.append("source_not_selected_evidence")
+    source_text = clean_bot_source_text(str(source.get("content") or source.get("excerpt") or ""))
+    normalized_source = _normalize_answer_terms(source_text)
+    terms = _claim_support_terms(claim.text)
+    if terms:
+        required_hits = 1 if len(terms) <= 2 else 2
+        if sum(1 for term in terms if term in normalized_source) < required_hits:
+            errors.append("missing_normalized_support_terms")
+    if query_plan.get("resolved_entities") and not claim.covered_entities:
+        errors.append("missing_resolved_entity_coverage")
+    target_groups = [str(item) for item in query_plan.get("target_groups") or []]
+    if target_groups:
+        haystack = _normalize_answer_terms(f"{claim.text} {source_text}")
+        if not any(_target_group_supported(group, haystack) for group in target_groups):
+            errors.append("missing_target_constraint")
+    if _answer_shape_name(packet.question) == "yes_no" and claim.stance == "unknown":
+        errors.append("missing_yes_no_stance")
+    return _dedupe(errors)
+
+
+def _claim_covered_entities(claim_text: str, source: dict[str, Any], query_plan: dict[str, Any]) -> list[str]:
+    haystack = _normalize_answer_terms(
+        " ".join(
+            [
+                claim_text,
+                str(source.get("section_label") or ""),
+                str(source.get("content") or source.get("excerpt") or ""),
+            ]
+        )
+    )
+    rule_block_id = str(source.get("rule_block_id") or "")
+    covered: list[str] = []
+    for entity in query_plan.get("resolved_entities") or []:
+        if not isinstance(entity, dict):
+            continue
+        entity_id = str(entity.get("entity_id") or "")
+        canonical = str(entity.get("canonical_name") or "")
+        aliases = [canonical, *[str(alias) for alias in entity.get("accepted_aliases") or []]]
+        if any(_normalize_answer_terms(alias) and _normalize_answer_terms(alias) in haystack for alias in aliases):
+            _add_claim_value(covered, entity_id or canonical)
+            continue
+        for anchor in entity.get("source_anchors") or []:
+            if isinstance(anchor, dict) and rule_block_id and str(anchor.get("rule_block_id") or "") == rule_block_id:
+                _add_claim_value(covered, entity_id or canonical)
+                break
+    return covered
+
+
+def _claim_covered_intents(query_plan: dict[str, Any], answer_shape: str) -> list[str]:
+    intents = [str(intent) for intent in query_plan.get("intents") or []]
+    return _dedupe(intents or [answer_shape])
+
+
+def _claim_constraints(query_plan: dict[str, Any]) -> list[str]:
+    return _dedupe(
+        [
+            *[str(group) for group in query_plan.get("target_groups") or []],
+            *[str(item) for item in query_plan.get("situational_constraints") or []],
+        ]
+    )
+
+
+def _claim_stance_from_text(question: str, claim_text: str) -> str:
+    if _answer_shape_name(question) != "yes_no":
+        return _answer_shape_name(question)
+    lowered = claim_text.casefold()
+    if lowered.startswith("yes") or re.search(r"\b(?:can|may|allowed|eligible)\b", lowered):
+        return "yes"
+    if lowered.startswith("no") or re.search(r"\b(?:cannot|can't|may not|not allowed|does not)\b", lowered):
+        return "no"
+    return "qualified" if ":" in claim_text or "if " in lowered else "supporting"
+
+
+def _target_group_supported(group: str, haystack: str) -> bool:
+    aliases = {
+        "vampire": ("vampire", "vampires", "kindred"),
+        "mortal": ("mortal", "mortals", "human", "humans", "kine"),
+        "ghoul": ("ghoul", "ghouls"),
+        "animal": ("animal", "animals"),
+    }
+    return any(alias in haystack for alias in aliases.get(group, (group,)))
+
+
+def _bounded_claim_window(text: str, limit: int = 360) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1].rstrip() + "..."
+
+
+def _claim_contract_diagnostics(claims: list[AnswerClaim]) -> dict[str, Any]:
+    return {
+        "schema_version": ANSWER_OUTLINE_SCHEMA_VERSION,
+        "validated_claims": len([claim for claim in claims if claim.validation_status == "validated"]),
+        "claims": [claim.to_dict() for claim in claims],
+    }
+
+
+def _final_answer_support_map(outline: AnswerOutline) -> list[dict[str, Any]]:
+    return [
+        {
+            "claim_id": claim.claim_id,
+            "source_ids": claim.source_ids,
+            "validation_status": claim.validation_status,
+            "text": claim.text,
+        }
+        for claim in outline.claims
+    ]
+
+
+def _prompt_outline_payload(outline: AnswerOutline) -> dict[str, Any]:
+    payload = outline.to_dict()
+    compact_claims: list[dict[str, Any]] = []
+    for claim in outline.claims:
+        compact_claims.append(
+            {
+                "claim_id": claim.claim_id,
+                "text": claim.text,
+                "source_ids": claim.source_ids,
+                "covered_entities": claim.covered_entities,
+                "covered_intents": claim.covered_intents,
+                "stance": claim.stance,
+                "constraints": claim.constraints,
+                "validation_status": claim.validation_status,
+            }
+        )
+    payload["claims"] = compact_claims
+    payload["diagnostics"] = {
+        "missing_evidence": outline.missing_evidence,
+        "claim_count": len(compact_claims),
+    }
+    return payload
+
+
+def _add_claim_value(values: list[str], value: str) -> None:
+    if value and value not in values:
+        values.append(value)
 
 
 def _important_question_terms(question: str) -> list[str]:
@@ -1155,6 +1383,8 @@ def build_llama_prompt(
     char_budget = max(2200, min(6000, token_budget * 24))
     header = (
         "You are Backet-bot. Answer only from the SOURCE blocks below. "
+        "Use the validated claims in the ANSWER OUTLINE; do not add a substantive rule statement "
+        "unless it is covered by one of those claims. "
         "Cite sources only once at the end as 'Sources: ...' using the human book/page label, "
         "such as 'Sources: Core Rulebook p. 67'. "
         "If the sources are insufficient, say that the permitted sources are insufficient. "
@@ -1166,7 +1396,7 @@ def build_llama_prompt(
         f"{_answer_shape_instruction(question)}\n\n"
         f"QUESTION:\n{question.strip()}\n\n"
         "ANSWER OUTLINE JSON:\n"
-        f"{json.dumps(outline.to_dict(), ensure_ascii=True, sort_keys=True)}\n\n"
+        f"{json.dumps(_prompt_outline_payload(outline), ensure_ascii=True, sort_keys=True)}\n\n"
         "SOURCES:\n"
     )
     remaining = max(200, char_budget - len(header))

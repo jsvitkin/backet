@@ -232,6 +232,14 @@ def emit_bot_qa_report(result: CommandResult) -> None:
     _line("Failed", data.get("failed_count"))
     _line("Skipped", data.get("skipped_count"))
     _line("Required failures", data.get("failed_required_count"))
+    summaries = dict(data.get("by_suite", {}) or {})
+    if summaries:
+        console.print("Suites:")
+        for name, payload in sorted(summaries.items()):
+            if isinstance(payload, dict):
+                console.print(
+                    f"  - {name}: {payload.get('passed', 0)} passed, {payload.get('failed', 0)} failed, {payload.get('skipped', 0)} skipped"
+                )
     _print_issues(result.issues)
     cases = list(data.get("cases") or [])
     if cases:
@@ -242,8 +250,14 @@ def emit_bot_qa_report(result: CommandResult) -> None:
                 continue
             status = "skipped" if case.get("skipped") else ("pass" if case.get("passed") else "fail")
             line = f"  - {case.get('case_id')}: {status}"
+            if case.get("suite"):
+                line += f" [{case.get('suite')}]"
+            if case.get("category"):
+                line += f" {case.get('category')}"
             if case.get("difficulty"):
                 line += f" ({case.get('difficulty')})"
+            if case.get("severity") and case.get("severity") != "required":
+                line += f" {case.get('severity')}"
             if case.get("failure_stage"):
                 line += f" at {case.get('failure_stage')}"
             console.print(line)

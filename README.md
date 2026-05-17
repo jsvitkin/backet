@@ -174,11 +174,11 @@ Repair only runs when the stored source PDF is available and fingerprint-verifie
 
 When automatic repair cannot recover good text, choose manual replacement in the guided prompt. Backet opens your editor for corrected page text. The non-interactive `rules review`, `rules repair`, `rules replace`, and `rules relink-source` commands are still available for agents, tests, and scripts.
 
-Manual replacement refreshes the page audit row, chunks, exact search index, retrieval metadata, scope application, and semantic coverage for that page. Empty or unusable replacement text is rejected; use `ignored` or `excluded` when the right decision is not to store new rules text.
+Manual replacement refreshes the page audit row, chunks, exact search index, rule-block structure, retrieval metadata, scope application, entity catalog coverage, and semantic coverage for that page. Empty or unusable replacement text is rejected; use `ignored` or `excluded` when the right decision is not to store new rules text.
 
-`backet rules query` uses hybrid local retrieval when rule embeddings are available: exact FTS/BM25 matches plus semantic vector matches, with source metadata, generated scope assertions, supplement precedence, and extraction-quality penalties preserved. JSON output reports the retrieval mode, embedding backend/model, candidate counts, and match reasons. If semantic retrieval is missing or unavailable, rules queries fall back to exact search and report that mode.
+`backet rules query` uses hybrid local retrieval when rule embeddings are available: exact FTS/BM25 matches plus semantic vector matches, with source metadata, generated scope assertions, rule-block structure, entity-first alias resolution, supplement precedence, and extraction-quality penalties preserved. JSON output reports the query plan, resolved entities, retrieval mode, embedding backend/model, candidate counts, evidence status, and match reasons. If semantic retrieval is missing or unavailable, rules queries fall back explicitly and report that mode.
 
-Run `backet rules index /path/to/vault` after installing or changing the optional embedding backend, after restoring an older rules store, or when `backet rules audit` reports stale semantic coverage. Use `--book-id <id>` to refresh one book or `--full` to rebuild all rule embeddings and derived retrieval-quality metadata for the selected scope.
+Run `backet rules index /path/to/vault` after installing or changing the optional embedding backend, after restoring an older rules store, or when `backet rules audit` reports stale semantic coverage, stale block structure, or stale entity catalog data. Use `--book-id <id>` to refresh one book or `--full` to rebuild all rule embeddings, rule-block structure, generated entity catalog entries, and derived retrieval-quality metadata for the selected scope.
 
 `backet` stores the ingested rules corpus under `.backet/rules/` so it can travel with the vault backup.
 

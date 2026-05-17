@@ -1,8 +1,12 @@
 {
   "schema_version": 1,
+  "suite": "private-vault-calibration",
+  "category": "prague-rules",
+  "severity": "required",
   "cases": [
     {
       "id": "prague-learn-obfuscate-advancement",
+      "category": "advancement",
       "description": "Private Prague QA template: learning Obfuscate should use advancement/acquisition evidence.",
       "difficulty": "easy",
       "command": "rules.ask",
@@ -18,6 +22,7 @@
     },
     {
       "id": "prague-malkavian-dementation-targeting",
+      "category": "targeting",
       "description": "Private Prague QA template: Dementation targeting must not answer from generic Malkavian flavor.",
       "difficulty": "medium",
       "command": "rules.ask",
@@ -40,6 +45,7 @@
     },
     {
       "id": "prague-blood-bond-definition",
+      "category": "definition",
       "description": "Private Prague QA template: Blood Bond should not answer from unrelated Second Inquisition text.",
       "difficulty": "easy",
       "command": "rules.ask",
@@ -54,6 +60,7 @@
     },
     {
       "id": "prague-ritual-timing",
+      "category": "timing",
       "description": "Private Prague QA template: ritual timing should cite the general ritual procedure.",
       "difficulty": "very-easy",
       "command": "rules.ask",
@@ -68,6 +75,7 @@
     },
     {
       "id": "prague-messy-critical-feeding-masquerade",
+      "category": "consequence",
       "description": "Private Prague QA template: messy critical feeding consequence should address Masquerade breach possibility.",
       "difficulty": "hard",
       "command": "rules.ask",

@@ -7,7 +7,7 @@ import sqlite3
 import subprocess
 import time
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable
@@ -30,6 +30,7 @@ from backet.rules_query_planner import (
     TARGETED_MECHANIC_ALIASES,
     TARGETED_POWER_ALIASES,
     RulesQueryPlan,
+    RulesRetrievalQuery,
     plan_rules_query,
 )
 from backet.rules_scope import (
@@ -59,6 +60,8 @@ from backet.vault import ensure_bootstrapped_vault
 RULES_SCHEMA_VERSION = 5
 RULES_RAG_V2_METADATA_SCHEMA_VERSION = 2
 RULES_RAG_V2_RETRIEVAL_SCHEMA_VERSION = 1
+RULE_BLOCK_STRUCTURE_SCHEMA_VERSION = 1
+RULES_ENTITY_CATALOG_SCHEMA_VERSION = 1
 DEFAULT_PAGE_MIN_CHARS = 80
 DEFAULT_CHUNK_WORDS = 220
 SUPPORTED_TIERS = {"core", "supplement"}
@@ -302,6 +305,11 @@ class RuleSearchCandidate:
     content_hash: str
     section_kind: str
     retrieval_flags: list[str]
+    rule_block_id: str | None = None
+    block_kind: str | None = None
+    source_window: str | None = None
+    structure_schema_version: int | None = None
+    structure_flags: list[str] = field(default_factory=list)
     rag_schema_version: int | None = None
     heading_path: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
@@ -348,6 +356,17 @@ class RuleChunkRetrievalMetadata:
             "section_kind": self.section_kind,
             "retrieval_flags": self.retrieval_flags,
         }
+
+
+@dataclass(slots=True)
+class RuleBlockStructure:
+    block_id: str
+    heading_path: list[str]
+    block_kind: str
+    clean_content: str
+    source_window: str
+    structure_flags: list[str]
+    schema_version: int = RULE_BLOCK_STRUCTURE_SCHEMA_VERSION
 
 
 @dataclass(slots=True)
@@ -477,6 +496,13 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
             extraction_method TEXT NOT NULL,
             scope_tags_json TEXT NOT NULL,
             content_hash TEXT NOT NULL,
+            rule_block_id TEXT NOT NULL DEFAULT '',
+            heading_path_json TEXT NOT NULL DEFAULT '[]',
+            block_kind TEXT NOT NULL DEFAULT 'unknown',
+            clean_content TEXT NOT NULL DEFAULT '',
+            source_window TEXT NOT NULL DEFAULT '',
+            structure_flags_json TEXT NOT NULL DEFAULT '[]',
+            structure_schema_version INTEGER NOT NULL DEFAULT 0,
             UNIQUE (book_id, page_start, chunk_index)
         );
 
@@ -594,6 +620,36 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS rule_entities (
+            entity_id TEXT PRIMARY KEY,
+            book_id TEXT,
+            canonical_name TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            aliases_json TEXT NOT NULL,
+            source_anchors_json TEXT NOT NULL,
+            source_pages_json TEXT NOT NULL,
+            scope_tags_json TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            catalog_schema_version INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS rule_entity_aliases (
+            normalized_alias TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            entity_id TEXT NOT NULL REFERENCES rule_entities(entity_id) ON DELETE CASCADE,
+            provenance TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            PRIMARY KEY (normalized_alias, entity_id, provenance)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rule_entity_aliases_lookup
+        ON rule_entity_aliases(normalized_alias);
+
+        CREATE INDEX IF NOT EXISTS idx_rule_entities_book
+        ON rule_entities(book_id, entity_type, canonical_name);
+
         CREATE TABLE IF NOT EXISTS rule_scope_assertions (
             id INTEGER PRIMARY KEY,
             book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
@@ -627,7 +683,9 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    _ensure_rule_chunk_structure_schema(connection)
     _ensure_rule_chunk_retrieval_metadata_schema(connection)
+    _ensure_seed_rule_entities(connection)
     connection.execute(
         """
         INSERT INTO rules_meta (key, value)
@@ -638,6 +696,22 @@ def ensure_rules_schema(connection: sqlite3.Connection) -> None:
     )
     _backfill_source_scope_assertions(connection)
     connection.commit()
+
+
+def _ensure_rule_chunk_structure_schema(connection: sqlite3.Connection) -> None:
+    existing = _table_columns(connection, "rule_chunks")
+    additions = {
+        "rule_block_id": "TEXT NOT NULL DEFAULT ''",
+        "heading_path_json": "TEXT NOT NULL DEFAULT '[]'",
+        "block_kind": "TEXT NOT NULL DEFAULT 'unknown'",
+        "clean_content": "TEXT NOT NULL DEFAULT ''",
+        "source_window": "TEXT NOT NULL DEFAULT ''",
+        "structure_flags_json": "TEXT NOT NULL DEFAULT '[]'",
+        "structure_schema_version": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for column, column_type in additions.items():
+        if column not in existing:
+            connection.execute(f"ALTER TABLE rule_chunks ADD COLUMN {column} {column_type}")
 
 
 def _ensure_rule_chunk_retrieval_metadata_schema(connection: sqlite3.Connection) -> None:
@@ -652,6 +726,49 @@ def _ensure_rule_chunk_retrieval_metadata_schema(connection: sqlite3.Connection)
     for column, column_type in additions.items():
         if column not in existing:
             connection.execute(f"ALTER TABLE rule_chunk_retrieval_metadata ADD COLUMN {column} {column_type}")
+
+
+def _ensure_seed_rule_entities(connection: sqlite3.Connection) -> None:
+    for entry in _seed_rule_entity_entries():
+        _upsert_rule_entity(connection, entry)
+
+
+def _seed_rule_entity_entries() -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for canonical, meta in TARGETED_MECHANIC_ALIASES.items():
+        entries.append(
+            {
+                "entity_id": "seed:mechanic:" + _slugify(canonical),
+                "book_id": None,
+                "canonical_name": canonical,
+                "entity_type": "mechanic",
+                "aliases": _dedupe_text_values(str(alias) for alias in meta["aliases"]),
+                "source_anchors": [],
+                "source_pages": [],
+                "scope_tags": _dedupe_text_values(str(tag) for tag in meta.get("scope_tags", ())),
+                "provenance": "curated_seed",
+                "content_hash": fingerprint_text(json.dumps(meta, sort_keys=True)),
+                "confidence": 0.9,
+            }
+        )
+    for canonical, meta in TARGETED_POWER_ALIASES.items():
+        entity_type = "discipline" if str(canonical).casefold() == "dominate" else "power"
+        entries.append(
+            {
+                "entity_id": f"seed:{entity_type}:" + _slugify(canonical),
+                "book_id": None,
+                "canonical_name": canonical,
+                "entity_type": entity_type,
+                "aliases": _dedupe_text_values(str(alias) for alias in meta["aliases"]),
+                "source_anchors": [],
+                "source_pages": [],
+                "scope_tags": _dedupe_text_values(str(tag) for tag in meta.get("scope_tags", ())),
+                "provenance": "curated_seed",
+                "content_hash": fingerprint_text(json.dumps(meta, sort_keys=True)),
+                "confidence": 0.9,
+            }
+        )
+    return entries
 
 
 def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
@@ -842,7 +959,7 @@ def query_rules_connection(
             details={"limit": limit},
             exit_code=2,
         )
-    query_plan = plan_rules_query(query)
+    query_plan = _resolve_query_plan_entities(connection, plan_rules_query(query))
     query_terms = _rules_query_terms(query_plan.scoring_query) or _rules_query_terms(query_plan.semantic_query)
     normalized_tags = normalize_scope_tags(scope_tags or [])
     excluded_chunks = _active_excluded_chunk_count(connection, book_id)
@@ -910,6 +1027,7 @@ def query_rules_connection(
                 "rag_v2": rag_v2_diagnostics,
                 "retrieval_mode": semantic.retrieval_mode,
                 "semantic_error": semantic.error,
+                "corpus_blockers": corpus_blockers,
                 "reviewed_exclusions": {"excluded_chunks": excluded_chunks},
             },
             exit_code=2,
@@ -1073,6 +1191,7 @@ def audit_rule_scopes(vault_root: Path, book_id: str | None = None) -> CommandRe
 def _rules_audit_book_report(connection: sqlite3.Connection, book: sqlite3.Row) -> dict[str, Any]:
     current_book_id = str(book["book_id"])
     source_status = _inspect_rule_source_status(book)
+    structure_health = _rules_structure_health(connection, current_book_id)
     pages = connection.execute(
         """
         SELECT * FROM page_audit
@@ -1132,6 +1251,7 @@ def _rules_audit_book_report(connection: sqlite3.Connection, book: sqlite3.Row) 
         "scope_tags": json.loads(book["scope_tags_json"]),
         "page_count": int(book["page_count"]),
         "chunk_count": int(chunk_count),
+        "structure_health": structure_health,
         "ocr_fallback_pages": [int(row["page_number"]) for row in ocr_pages],
         "source_status": source_status.to_dict(),
         "repair_eligible": source_status.repair_eligible,
@@ -1275,6 +1395,12 @@ def _rules_corpus_action_for_book(
     blocked = int(summary.get("blocked") or 0)
     pending_blocked = int(summary.get("pending_blocked") or 0)
     pending = int(summary.get("pending_pages") or 0)
+    structure = dict(book.get("structure_health") or {})
+    missing_structure = int(structure.get("missing_structure") or 0)
+    stale_structure = int(structure.get("stale_structure") or 0)
+    empty_blocks = int(structure.get("empty_blocks") or 0)
+    reindex_eligible = bool(structure.get("reindex_eligible", True))
+    reingest_recommended = bool(structure.get("reingest_recommended", False))
     actionable_suspect_pages = sum(
         1
         for page in book.get("suspect_pages") or []
@@ -1293,21 +1419,38 @@ def _rules_corpus_action_for_book(
             reasons.append("embedding_backend_unavailable")
             missing = chunk_count
     else:
-        missing = int(semantic_index.get("missing_embeddings") or 0) + int(semantic_index.get("missing_metadata") or 0)
-        stale = int(semantic_index.get("stale_embeddings") or 0) + int(semantic_index.get("stale_metadata") or 0)
+        missing = (
+            int(semantic_index.get("missing_embeddings") or 0)
+            + int(semantic_index.get("missing_metadata") or 0)
+            + int(semantic_index.get("missing_structure") or 0)
+        )
+        stale = (
+            int(semantic_index.get("stale_embeddings") or 0)
+            + int(semantic_index.get("stale_metadata") or 0)
+            + int(semantic_index.get("stale_structure") or 0)
+        )
         if missing:
             reasons.append("missing_retrieval_index")
         if stale:
             reasons.append("stale_retrieval_index")
+    if missing_structure:
+        reasons.append("missing_rule_block_structure")
+    if stale_structure:
+        reasons.append("stale_rule_block_structure")
+    if empty_blocks:
+        reasons.append("empty_rule_blocks")
 
     unusable_ratio = (actionable_suspect_pages + actionable_suspect_chunks) / max(page_count + chunk_count, 1)
     if chunk_count == 0:
         action = "reingest"
         reasons.append("no_stored_chunks")
+    elif reingest_recommended or not reindex_eligible:
+        action = "reingest"
+        reasons.append("stored_text_insufficient_for_structure")
     elif unusable_ratio >= 0.35 or pending_blocked > 0:
         action = "repair" if source.get("status") == "available" else "reingest"
         reasons.append("stored_text_quality")
-    elif missing or stale or backend_error is not None:
+    elif missing or stale or missing_structure or stale_structure or backend_error is not None:
         action = "reindex"
     elif pending:
         action = "repair"
@@ -1345,6 +1488,15 @@ def _rules_corpus_action_for_book(
             "stale": stale,
             "backend_error": backend_error,
         },
+        "structure": {
+            "schema_version": structure.get("schema_version", RULE_BLOCK_STRUCTURE_SCHEMA_VERSION),
+            "structured_blocks": int(structure.get("structured_blocks") or 0),
+            "missing": missing_structure,
+            "stale": stale_structure,
+            "empty_blocks": empty_blocks,
+            "reindex_eligible": reindex_eligible,
+            "reingest_recommended": reingest_recommended,
+        },
         "quality": {
             "suspect_pages": suspect_pages,
             "suspect_chunks": suspect_chunks,
@@ -1374,12 +1526,291 @@ def _query_corpus_blockers(connection: sqlite3.Connection, *, book_id: str | Non
         blockers.append("missing_retrieval_index")
     if summary["stale_embeddings"] or summary["stale_metadata"]:
         blockers.append("stale_retrieval_index")
+    if summary["missing_structure"]:
+        blockers.append("missing_rule_block_structure")
+    if summary["stale_structure"]:
+        blockers.append("stale_rule_block_structure")
     return {
         "action": "reindex" if blockers else "none",
         "blockers": blockers,
         "repair_hint": _rules_index_hint(book_id) if blockers else None,
-        "missing": int(summary["missing_embeddings"]) + int(summary["missing_metadata"]),
-        "stale": int(summary["stale_embeddings"]) + int(summary["stale_metadata"]),
+        "missing": int(summary["missing_embeddings"]) + int(summary["missing_metadata"]) + int(summary["missing_structure"]),
+        "stale": int(summary["stale_embeddings"]) + int(summary["stale_metadata"]) + int(summary["stale_structure"]),
+        "structure": {
+            "schema_version": RULE_BLOCK_STRUCTURE_SCHEMA_VERSION,
+            "structured_blocks": int(summary["structure_chunks"]),
+            "missing": int(summary["missing_structure"]),
+            "stale": int(summary["stale_structure"]),
+        },
+    }
+
+
+def _resolve_query_plan_entities(connection: sqlite3.Connection, query_plan: RulesQueryPlan) -> RulesQueryPlan:
+    catalog_matches = _catalog_matches_for_query(connection, query_plan.normalized_question)
+    resolved = _merge_resolved_entities(query_plan.resolved_entities, catalog_matches)
+    ambiguity_warnings = _entity_resolution_ambiguities(resolved)
+    unresolved = list(query_plan.unresolved_high_value_terms)
+
+    entities = {key: list(value) for key, value in query_plan.entities.items()}
+    canonical_terms = list(query_plan.canonical_terms)
+    expanded_terms = list(query_plan.expanded_terms)
+    scope_tags = list(query_plan.scope_tags)
+    for entity in resolved:
+        canonical = str(entity.get("canonical_name") or "")
+        entity_type = str(entity.get("entity_type") or "")
+        if canonical:
+            _add_unique(canonical_terms, canonical)
+            _extend_unique(expanded_terms, entity.get("accepted_aliases") or [])
+        if entity_type in {"mechanic", "rule", "table", "list"}:
+            _add_unique(entities.setdefault("mechanics", []), canonical)
+        elif entity_type == "discipline":
+            _add_unique(entities.setdefault("disciplines", []), canonical)
+        elif entity_type in {"power", "ritual"}:
+            _add_unique(entities.setdefault("powers", []), canonical)
+        _extend_unique(scope_tags, entity.get("scope_tags") or [])
+
+    retrieval_queries = _entity_first_retrieval_queries(query_plan.retrieval_queries, resolved)
+    warnings = list(query_plan.warnings)
+    for warning in ambiguity_warnings:
+        _add_unique(warnings, "ambiguous_entity_alias:" + str(warning.get("alias") or "unknown"))
+    if unresolved:
+        _add_unique(warnings, "unresolved_high_value_terms; broad fallback cannot prove answerability")
+    confidence = max([float(entity.get("confidence") or 0.0) for entity in resolved], default=query_plan.resolution_confidence)
+    semantic_terms = [*canonical_terms, *expanded_terms, *query_plan.required_evidence]
+    if not canonical_terms:
+        semantic_terms.extend(query_plan.raw_unknown_terms)
+    return replace(
+        query_plan,
+        entities={key: _dedupe_text_values(value) for key, value in entities.items()},
+        scope_tags=_dedupe_text_values(scope_tags),
+        canonical_terms=_dedupe_text_values(canonical_terms),
+        expanded_terms=_dedupe_text_values(expanded_terms),
+        retrieval_queries=retrieval_queries,
+        resolved_entities=resolved,
+        unresolved_high_value_terms=_dedupe_text_values(unresolved),
+        ambiguity_warnings=ambiguity_warnings,
+        resolution_confidence=round(confidence, 3),
+        warnings=warnings,
+        semantic_query=" ".join(_dedupe_text_values(semantic_terms)) or query_plan.semantic_query,
+    )
+
+
+def _catalog_matches_for_query(connection: sqlite3.Connection, normalized_question: str) -> list[dict[str, Any]]:
+    query_aliases = _catalog_query_aliases(normalized_question)
+    if not query_aliases:
+        return []
+    matches: dict[str, dict[str, Any]] = {}
+    for alias in query_aliases:
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    a.alias,
+                    a.normalized_alias,
+                    a.provenance AS alias_provenance,
+                    a.confidence,
+                    e.*
+                FROM rule_entity_aliases a
+                JOIN rule_entities e ON e.entity_id = a.entity_id
+                WHERE a.normalized_alias = ?
+                  AND e.catalog_schema_version = ?
+                ORDER BY a.confidence DESC, e.provenance, e.canonical_name
+                """,
+                (alias, RULES_ENTITY_CATALOG_SCHEMA_VERSION),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        for row in rows:
+            entity = matches.setdefault(str(row["entity_id"]), _resolved_entity_from_row(row))
+            _add_unique(entity["matched_aliases"], str(row["alias"]))
+            entity["confidence"] = max(float(entity.get("confidence") or 0.0), float(row["confidence"] or 0.0))
+    return sorted(matches.values(), key=lambda item: (-float(item.get("confidence") or 0.0), str(item.get("canonical_name"))))
+
+
+def _catalog_query_aliases(normalized_question: str) -> list[str]:
+    raw_tokens = re.findall(r"[a-z0-9]+", normalized_question)
+    tokens = [token for token in raw_tokens if token not in RULE_QUERY_STOPWORDS]
+    aliases: list[str] = []
+    for size in (5, 4, 3, 2, 1):
+        for index in range(0, max(len(raw_tokens) - size + 1, 0)):
+            phrase = " ".join(raw_tokens[index : index + size])
+            if len(phrase) >= 3:
+                _add_unique(aliases, _normalize_rule_alias(phrase))
+    for size in (4, 3, 2, 1):
+        for index in range(0, max(len(tokens) - size + 1, 0)):
+            phrase = " ".join(tokens[index : index + size])
+            if len(phrase) >= 3:
+                _add_unique(aliases, _normalize_rule_alias(phrase))
+    return aliases
+
+
+def _resolved_entity_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "entity_id": row["entity_id"],
+        "canonical_name": row["canonical_name"],
+        "entity_type": row["entity_type"],
+        "accepted_aliases": _json_text_list(row["aliases_json"]),
+        "matched_aliases": [str(row["alias"])],
+        "source_anchors": _json_dict_list(row["source_anchors_json"]),
+        "source_pages": [int(page) for page in _json_list(row["source_pages_json"]) if str(page).isdigit()],
+        "scope_tags": _json_text_list(row["scope_tags_json"]),
+        "alias_provenance": row["alias_provenance"],
+        "provenance": row["provenance"],
+        "confidence": float(row["confidence"] or 0.0),
+    }
+
+
+def _merge_resolved_entities(seed_entities: list[dict[str, Any]], catalog_entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for entity in [*seed_entities, *catalog_entities]:
+        entity_id = str(entity.get("entity_id") or "")
+        if not entity_id:
+            continue
+        existing = merged.get(entity_id)
+        if existing is None:
+            merged[entity_id] = {**entity, "matched_aliases": list(entity.get("matched_aliases") or [])}
+            continue
+        _extend_unique(existing.setdefault("matched_aliases", []), entity.get("matched_aliases") or [])
+        _extend_unique(existing.setdefault("accepted_aliases", []), entity.get("accepted_aliases") or [])
+        source_anchors = existing.setdefault("source_anchors", [])
+        for anchor in entity.get("source_anchors") or []:
+            if anchor not in source_anchors:
+                source_anchors.append(anchor)
+        existing["confidence"] = max(float(existing.get("confidence") or 0.0), float(entity.get("confidence") or 0.0))
+    return sorted(merged.values(), key=lambda item: (-float(item.get("confidence") or 0.0), str(item.get("canonical_name"))))
+
+
+def _entity_resolution_ambiguities(resolved: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_alias: dict[str, list[dict[str, Any]]] = {}
+    for entity in resolved:
+        for alias in entity.get("matched_aliases") or []:
+            by_alias.setdefault(_normalize_rule_alias(str(alias)), []).append(entity)
+    warnings: list[dict[str, Any]] = []
+    for alias, entities in by_alias.items():
+        canonical = {str(entity.get("canonical_name") or "") for entity in entities}
+        if len(canonical) <= 1:
+            continue
+        top = max(float(entity.get("confidence") or 0.0) for entity in entities)
+        comparable = [entity for entity in entities if top - float(entity.get("confidence") or 0.0) <= 0.1]
+        if len(comparable) > 1:
+            warnings.append(
+                {
+                    "alias": alias,
+                    "entity_ids": [str(entity.get("entity_id")) for entity in comparable],
+                    "canonical_names": sorted(str(entity.get("canonical_name")) for entity in comparable),
+                }
+            )
+    return warnings
+
+
+def _entity_first_retrieval_queries(
+    existing: list[RulesRetrievalQuery],
+    resolved_entities: list[dict[str, Any]],
+) -> list[RulesRetrievalQuery]:
+    queries: list[RulesRetrievalQuery] = []
+    entity_terms: list[str] = []
+    for entity in resolved_entities:
+        _add_unique(entity_terms, str(entity.get("canonical_name") or ""))
+        _extend_unique(entity_terms, entity.get("matched_aliases") or [])
+        _extend_unique(entity_terms, entity.get("accepted_aliases") or [])
+    entity_terms = _dedupe_text_values(entity_terms)
+    if entity_terms:
+        queries.append(
+            RulesRetrievalQuery(
+                role="entity_anchor",
+                text=" ".join(entity_terms),
+                terms=entity_terms,
+                evidence=[],
+                weight=1.35,
+            )
+        )
+    queries.extend(existing)
+    return _dedupe_rules_retrieval_queries(queries)
+
+
+def _dedupe_rules_retrieval_queries(queries: list[RulesRetrievalQuery]) -> list[RulesRetrievalQuery]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[RulesRetrievalQuery] = []
+    for query in queries:
+        key = (query.role, query.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(query)
+    return deduped
+
+
+def _rules_structure_health(connection: sqlite3.Connection, book_id: str) -> dict[str, Any]:
+    rows = connection.execute(
+        """
+        SELECT
+            id,
+            rule_block_id,
+            block_kind,
+            clean_content,
+            source_window,
+            structure_flags_json,
+            structure_schema_version
+        FROM rule_chunks
+        WHERE book_id = ?
+        ORDER BY page_start, chunk_index
+        """,
+        (book_id,),
+    ).fetchall()
+    total = len(rows)
+    structured = 0
+    missing = 0
+    stale = 0
+    page_furniture = 0
+    empty = 0
+    mixed = 0
+    table_blocks = 0
+    list_blocks = 0
+    sample_block_ids: list[str] = []
+    stale_sample_block_ids: list[str] = []
+    for row in rows:
+        block_id = str(row["rule_block_id"] or "")
+        block_kind = str(row["block_kind"] or "")
+        flags = _json_list(row["structure_flags_json"])
+        has_clean_text = bool(str(row["clean_content"] or "").strip())
+        current_schema = int(row["structure_schema_version"] or 0) == RULE_BLOCK_STRUCTURE_SCHEMA_VERSION
+        if "page_furniture_removed" in flags:
+            page_furniture += 1
+        if "empty_after_structure_clean" in flags or not has_clean_text:
+            empty += 1
+        if "possible_mixed_topic" in flags:
+            mixed += 1
+        if block_kind == "table":
+            table_blocks += 1
+        if block_kind == "list":
+            list_blocks += 1
+        if not block_id or not has_clean_text:
+            missing += 1
+            continue
+        if not current_schema:
+            stale += 1
+            _add_unique(stale_sample_block_ids, block_id)
+            continue
+        structured += 1
+        _add_unique(sample_block_ids, block_id)
+
+    empty_ratio = empty / max(total, 1)
+    reingest_recommended = total == 0 or empty_ratio >= 0.35
+    return {
+        "schema_version": RULE_BLOCK_STRUCTURE_SCHEMA_VERSION,
+        "total_chunks": total,
+        "structured_blocks": structured,
+        "missing_structure": missing,
+        "stale_structure": stale,
+        "page_furniture_heavy_blocks": page_furniture,
+        "empty_blocks": empty,
+        "mixed_topic_blocks": mixed,
+        "table_blocks": table_blocks,
+        "list_blocks": list_blocks,
+        "reindex_eligible": total > 0 and not reingest_recommended,
+        "reingest_recommended": reingest_recommended,
+        "sample_block_ids": sample_block_ids[:5],
+        "stale_sample_block_ids": stale_sample_block_ids[:5],
     }
 
 
@@ -1713,8 +2144,16 @@ def _audit_category_counts(findings: list[RuleAuditFinding]) -> dict[str, int]:
 def _rules_audit_maintenance_findings(semantic_index: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     if not semantic_index.get("available", False) or semantic_index.get("repair_hint"):
-        missing = int(semantic_index.get("missing_embeddings") or 0) + int(semantic_index.get("missing_metadata") or 0)
-        stale = int(semantic_index.get("stale_embeddings") or 0) + int(semantic_index.get("stale_metadata") or 0)
+        missing = (
+            int(semantic_index.get("missing_embeddings") or 0)
+            + int(semantic_index.get("missing_metadata") or 0)
+            + int(semantic_index.get("missing_structure") or 0)
+        )
+        stale = (
+            int(semantic_index.get("stale_embeddings") or 0)
+            + int(semantic_index.get("stale_metadata") or 0)
+            + int(semantic_index.get("stale_structure") or 0)
+        )
         if missing or stale or not semantic_index.get("available", False):
             findings.append(
                 {
@@ -2432,15 +2871,24 @@ def _replace_pages(
         )
         page_chunks = split_rule_chunks(page.text)
         for chunk_index, chunk_text in enumerate(page_chunks, start=1):
-            excerpt = summarize_text(chunk_text)
+            structure = derive_rule_block_structure(
+                book_id=entry.book_id,
+                section_label=page.section_label,
+                content=chunk_text,
+                page_start=page.page_number,
+                chunk_index=chunk_index,
+            )
+            excerpt = structure.source_window or summarize_text(structure.clean_content or chunk_text)
             content_hash = fingerprint_text(chunk_text)
             cursor = connection.execute(
                 """
                 INSERT INTO rule_chunks (
                     book_id, page_start, page_end, chunk_index, section_label, content,
-                    excerpt, word_count, confidence, extraction_method, scope_tags_json, content_hash
+                    excerpt, word_count, confidence, extraction_method, scope_tags_json, content_hash,
+                    rule_block_id, heading_path_json, block_kind, clean_content, source_window,
+                    structure_flags_json, structure_schema_version
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.book_id,
@@ -2455,6 +2903,13 @@ def _replace_pages(
                     page.extraction_method,
                     json.dumps(entry.scope_tags),
                     content_hash,
+                    structure.block_id,
+                    json.dumps(structure.heading_path),
+                    structure.block_kind,
+                    structure.clean_content,
+                    structure.source_window,
+                    json.dumps(structure.structure_flags),
+                    structure.schema_version,
                 ),
             )
             _upsert_rule_chunk_retrieval_metadata(
@@ -2486,7 +2941,14 @@ def _rebuild_rule_chunks_fts(
     connection.execute("DELETE FROM rule_chunks_fts WHERE book_id = ?", (book_id,))
     chunk_rows = connection.execute(
         """
-        SELECT rc.id, rc.book_id, b.book_title, b.tier, rc.scope_tags_json, rc.section_label, rc.content
+        SELECT
+            rc.id,
+            rc.book_id,
+            b.book_title,
+            b.tier,
+            rc.scope_tags_json,
+            rc.section_label,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content
         FROM rule_chunks rc
         JOIN books b ON b.book_id = rc.book_id
         WHERE rc.book_id = ?
@@ -3163,13 +3625,20 @@ def _search_rule_chunks(
             rc.scope_tags_json AS chunk_scope_tags_json,
             rc.page_start,
             rc.page_end,
+            rc.chunk_index,
             rc.section_label,
-            rc.content,
-            rc.excerpt,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
+            COALESCE(NULLIF(rc.source_window, ''), rc.excerpt) AS excerpt,
             rc.word_count,
             rc.content_hash,
             rc.confidence,
             rc.extraction_method,
+            rc.rule_block_id,
+            rc.heading_path_json AS block_heading_path_json,
+            rc.block_kind,
+            rc.source_window,
+            rc.structure_flags_json,
+            rc.structure_schema_version,
             m.section_kind,
             m.retrieval_flags_json,
             m.content_hash AS metadata_content_hash,
@@ -3318,6 +3787,20 @@ def _generate_rag_v2_candidates(
                 raw_fallback=raw_fallback,
                 error=error,
             )
+        )
+
+    if query_plan.resolved_entities:
+        run_channel(
+            "entity_anchor",
+            RAG_V2_EXACT_CHANNEL_CAP,
+            " | ".join(str(entity.get("canonical_name") or "") for entity in query_plan.resolved_entities),
+            lambda: _search_rule_chunks_by_entity_anchors(
+                connection,
+                resolved_entities=query_plan.resolved_entities,
+                book_id=book_id,
+                scope_tags=scope_tags,
+                limit=RAG_V2_EXACT_CHANNEL_CAP,
+            ),
         )
 
     for retrieval_query in query_plan.retrieval_queries:
@@ -3478,6 +3961,111 @@ def _rag_v2_metadata_terms(query_plan: RulesQueryPlan) -> list[str]:
     return _dedupe_text_values(terms)[:24]
 
 
+def _search_rule_chunks_by_entity_anchors(
+    connection: sqlite3.Connection,
+    *,
+    resolved_entities: list[dict[str, Any]],
+    book_id: str | None,
+    scope_tags: list[str],
+    limit: int,
+) -> list[sqlite3.Row]:
+    chunk_ids: list[int] = []
+    block_ids: list[str] = []
+    for entity in resolved_entities:
+        for anchor in entity.get("source_anchors") or []:
+            if not isinstance(anchor, dict):
+                continue
+            try:
+                chunk_id = int(anchor.get("chunk_id") or 0)
+            except (TypeError, ValueError):
+                chunk_id = 0
+            if chunk_id:
+                chunk_ids.append(chunk_id)
+            block_id = str(anchor.get("rule_block_id") or "")
+            if block_id:
+                block_ids.append(block_id)
+    chunk_ids = sorted(set(chunk_ids))
+    block_ids = sorted(set(block_ids))
+    if not chunk_ids and not block_ids:
+        return []
+    where_parts: list[str] = []
+    parameters: list[Any] = []
+    if chunk_ids:
+        where_parts.append(f"rc.id IN ({','.join('?' for _ in chunk_ids)})")
+        parameters.extend(chunk_ids)
+    if block_ids:
+        where_parts.append(f"rc.rule_block_id IN ({','.join('?' for _ in block_ids)})")
+        parameters.extend(block_ids)
+    rows = connection.execute(
+        f"""
+        SELECT
+            rc.id AS chunk_id,
+            rc.book_id,
+            b.book_title,
+            b.tier,
+            b.scope_tags_json AS book_scope_tags_json,
+            rc.scope_tags_json AS chunk_scope_tags_json,
+            rc.page_start,
+            rc.page_end,
+            rc.chunk_index,
+            rc.section_label,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
+            COALESCE(NULLIF(rc.source_window, ''), rc.excerpt) AS excerpt,
+            rc.word_count,
+            rc.content_hash,
+            rc.confidence,
+            rc.extraction_method,
+            rc.rule_block_id,
+            rc.heading_path_json AS block_heading_path_json,
+            rc.block_kind,
+            rc.source_window,
+            rc.structure_flags_json,
+            rc.structure_schema_version,
+            m.section_kind,
+            m.retrieval_flags_json,
+            m.content_hash AS metadata_content_hash,
+            m.rag_schema_version,
+            m.heading_path_json,
+            m.aliases_json,
+            m.entity_locations_json,
+            m.evidence_cues_json,
+            COALESCE((
+                SELECT json_group_array(json_object(
+                    'id', rsa.id,
+                    'tag', rsa.tag,
+                    'role', rsa.role,
+                    'status', rsa.status,
+                    'confidence', rsa.confidence
+                ))
+                FROM rule_chunk_scope_assertions csa
+                JOIN rule_scope_assertions rsa ON rsa.id = csa.assertion_id
+                WHERE csa.chunk_id = rc.id
+                  AND rsa.status = 'applied'
+            ), '[]') AS scope_assertions_json,
+            -1.0 AS rank
+        FROM rule_chunks rc
+        JOIN books b ON b.book_id = rc.book_id
+        LEFT JOIN rule_chunk_retrieval_metadata m ON m.chunk_id = rc.id
+        LEFT JOIN rule_retrieval_exclusions rex
+          ON rex.chunk_id = rc.id
+         AND rex.content_hash = rc.content_hash
+        WHERE rex.id IS NULL
+          AND ({' OR '.join(where_parts)})
+        ORDER BY rc.book_id, rc.page_start, rc.chunk_index
+        LIMIT ?
+        """,
+        [*parameters, limit],
+    ).fetchall()
+    filtered: list[sqlite3.Row] = []
+    for row in rows:
+        if book_id and row["book_id"] != book_id:
+            continue
+        if row["tier"] == "supplement" and scope_tags and not _row_matches_scope(row, scope_tags):
+            continue
+        filtered.append(row)
+    return filtered
+
+
 def _search_rule_chunks_by_metadata(
     connection: sqlite3.Connection,
     *,
@@ -3493,9 +4081,12 @@ def _search_rule_chunks_by_metadata(
     parameters: list[Any] = []
     for pattern in patterns:
         where_parts.append(
-            "(m.aliases_json LIKE ? OR m.entity_locations_json LIKE ? OR m.evidence_cues_json LIKE ? OR rc.section_label LIKE ?)"
+            "("
+            "m.aliases_json LIKE ? OR m.entity_locations_json LIKE ? OR m.evidence_cues_json LIKE ? "
+            "OR rc.section_label LIKE ? OR rc.heading_path_json LIKE ? OR rc.clean_content LIKE ? OR rc.source_window LIKE ?"
+            ")"
         )
-        parameters.extend([pattern, pattern, pattern, pattern])
+        parameters.extend([pattern, pattern, pattern, pattern, pattern, pattern, pattern])
     rows = connection.execute(
         f"""
         SELECT
@@ -3509,12 +4100,18 @@ def _search_rule_chunks_by_metadata(
             rc.page_end,
             rc.chunk_index,
             rc.section_label,
-            rc.content,
-            rc.excerpt,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
+            COALESCE(NULLIF(rc.source_window, ''), rc.excerpt) AS excerpt,
             rc.word_count,
             rc.content_hash,
             rc.confidence,
             rc.extraction_method,
+            rc.rule_block_id,
+            rc.heading_path_json AS block_heading_path_json,
+            rc.block_kind,
+            rc.source_window,
+            rc.structure_flags_json,
+            rc.structure_schema_version,
             m.section_kind,
             m.retrieval_flags_json,
             m.content_hash AS metadata_content_hash,
@@ -3685,6 +4282,11 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
         "match_reasons": sorted(set(row.match_reasons)),
         "section_kind": row.section_kind,
         "retrieval_flags": row.retrieval_flags,
+        "rule_block_id": row.rule_block_id,
+        "block_kind": row.block_kind,
+        "source_window": row.source_window,
+        "structure_schema_version": row.structure_schema_version,
+        "structure_flags": row.structure_flags,
         "rag_schema_version": row.rag_schema_version,
         "heading_path": row.heading_path,
         "aliases": row.aliases,
@@ -3696,6 +4298,8 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
 
 
 def _candidate_source_window(candidate: RuleSearchCandidate, limit: int = 360) -> str:
+    if candidate.source_window and candidate.structure_schema_version == RULE_BLOCK_STRUCTURE_SCHEMA_VERSION:
+        return summarize_text(candidate.source_window, limit=limit)
     content = " ".join(str(candidate.content or "").split())
     if not content:
         return str(candidate.excerpt or "")
@@ -3807,12 +4411,18 @@ def _search_semantic_rule_chunks(
             rc.page_end,
             rc.chunk_index,
             rc.section_label,
-            rc.content,
-            rc.excerpt,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
+            COALESCE(NULLIF(rc.source_window, ''), rc.excerpt) AS excerpt,
             rc.word_count,
             rc.content_hash,
             rc.confidence,
             rc.extraction_method,
+            rc.rule_block_id,
+            rc.heading_path_json AS block_heading_path_json,
+            rc.block_kind,
+            rc.source_window,
+            rc.structure_flags_json,
+            rc.structure_schema_version,
             e.embedding_json,
             m.section_kind,
             m.retrieval_flags_json,
@@ -3969,12 +4579,18 @@ def _neighbor_rows_for_seed(
             rc.page_end,
             rc.chunk_index,
             rc.section_label,
-            rc.content,
-            rc.excerpt,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
+            COALESCE(NULLIF(rc.source_window, ''), rc.excerpt) AS excerpt,
             rc.word_count,
             rc.content_hash,
             rc.confidence,
             rc.extraction_method,
+            rc.rule_block_id,
+            rc.heading_path_json AS block_heading_path_json,
+            rc.block_kind,
+            rc.source_window,
+            rc.structure_flags_json,
+            rc.structure_schema_version,
             m.section_kind,
             m.retrieval_flags_json,
             m.content_hash AS metadata_content_hash,
@@ -4060,9 +4676,15 @@ def _candidate_from_row(row: sqlite3.Row) -> RuleSearchCandidate:
     retrieval_flags = _json_list(_row_optional(row, "retrieval_flags_json"))
     rag_schema_version = _row_optional(row, "rag_schema_version")
     heading_path = _json_text_list(_row_optional(row, "heading_path_json"))
+    block_heading_path = _json_text_list(_row_optional(row, "block_heading_path_json"))
     aliases = _json_text_list(_row_optional(row, "aliases_json"))
     entity_locations = _json_dict_list(_row_optional(row, "entity_locations_json"))
     evidence_cues = _json_text_list(_row_optional(row, "evidence_cues_json"))
+    rule_block_id = str(_row_optional(row, "rule_block_id") or "") or None
+    block_kind = str(_row_optional(row, "block_kind") or "") or None
+    source_window = str(_row_optional(row, "source_window") or "") or None
+    structure_schema_version = int(_row_optional(row, "structure_schema_version") or 0) or None
+    structure_flags = _json_list(_row_optional(row, "structure_flags_json"))
     scope_assertions = _json_assertions(_row_optional(row, "scope_assertions_json"))
     book_scope_tags = _json_list(_row_optional(row, "book_scope_tags_json"))
     scope_tags = _json_list(_row_optional(row, "chunk_scope_tags_json"))
@@ -4088,6 +4710,8 @@ def _candidate_from_row(row: sqlite3.Row) -> RuleSearchCandidate:
         aliases = metadata.aliases
         entity_locations = metadata.entity_locations
         evidence_cues = metadata.evidence_cues
+    if block_heading_path:
+        heading_path = block_heading_path
     return RuleSearchCandidate(
         chunk_id=int(row["chunk_id"]),
         book_id=str(row["book_id"]),
@@ -4109,6 +4733,11 @@ def _candidate_from_row(row: sqlite3.Row) -> RuleSearchCandidate:
         content_hash=str(row["content_hash"]),
         section_kind=str(section_kind or "unknown"),
         retrieval_flags=retrieval_flags,
+        rule_block_id=rule_block_id,
+        block_kind=block_kind,
+        source_window=source_window,
+        structure_schema_version=structure_schema_version,
+        structure_flags=structure_flags,
         rag_schema_version=int(rag_schema_version or 0) or None,
         heading_path=heading_path,
         aliases=aliases,
@@ -4291,7 +4920,13 @@ def _rag_v2_entity_score(candidate: RuleSearchCandidate, query_plan: RulesQueryP
         normalized = _normalize_rule_alias(term)
         if normalized and _contains_normalized_phrase(_normalize_rule_alias(haystack), normalized):
             hits += 1
-    return min(hits, 5) * 0.12
+    score = min(hits, 5) * 0.12
+    if _candidate_matches_resolved_source_anchor(candidate, query_plan):
+        score += 0.8
+    canonical_names = [_normalize_rule_alias(str(entity.get("canonical_name") or "")) for entity in query_plan.resolved_entities]
+    if _normalize_rule_alias(candidate.section_label) in canonical_names:
+        score += 0.45
+    return score
 
 
 def _rag_v2_channel_score(candidate: RuleSearchCandidate) -> float:
@@ -4299,6 +4934,10 @@ def _rag_v2_channel_score(candidate: RuleSearchCandidate) -> float:
     score = 0.0
     if any(channel.startswith("planned_exact") for channel in channels):
         score += 0.18
+    if "entity_anchor" in channels:
+        score += 0.35
+    if any(channel == "planned_exact:entity_anchor" for channel in channels):
+        score += 0.1
     if "phrase" in channels:
         score += 0.18
     if "alias" in channels:
@@ -4395,6 +5034,9 @@ def _query_requires_entity_anchor(query_plan: RulesQueryPlan) -> bool:
 def _query_entity_anchor_terms(query_plan: RulesQueryPlan) -> list[str]:
     entities = query_plan.entities
     terms: list[str] = []
+    for entity in query_plan.resolved_entities:
+        _add_unique(terms, str(entity.get("canonical_name") or ""))
+        _extend_unique(terms, entity.get("matched_aliases") or [])
     for key in ("powers", "disciplines", "mechanics", "clans"):
         _extend_unique(terms, entities.get(key, []))
     _extend_unique(terms, query_plan.canonical_terms)
@@ -4409,15 +5051,27 @@ def _candidate_has_entity_anchor(candidate: RuleSearchCandidate, query_plan: Rul
     terms = _query_entity_anchor_terms(query_plan)
     if not terms:
         return True
+    if _candidate_matches_resolved_source_anchor(candidate, query_plan):
+        return True
     haystack = _candidate_anchor_haystack(candidate)
     return any(_contains_normalized_phrase(haystack, _normalize_rule_alias(term)) for term in terms)
+
+
+def _candidate_matches_resolved_source_anchor(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> bool:
+    if not candidate.rule_block_id:
+        return False
+    for entity in query_plan.resolved_entities:
+        for anchor in entity.get("source_anchors") or []:
+            if isinstance(anchor, dict) and str(anchor.get("rule_block_id") or "") == candidate.rule_block_id:
+                return True
+    return False
 
 
 def _query_target_group_terms(query_plan: RulesQueryPlan) -> list[str]:
     if INTENT_TARGETING not in query_plan.intents:
         return []
     normalized = query_plan.normalized_question
-    groups: list[str] = []
+    groups: list[str] = list(query_plan.target_groups)
     target_groups = {
         "vampire": ("vampire", "vampires", "kindred", "other vampire", "other vampires"),
         "mortal": ("mortal", "mortals", "human", "humans", "kine"),
@@ -4501,8 +5155,10 @@ def _build_rag_v2_evidence_packet(
         missing.insert(0, "entity_anchor")
     if target_status["required"] and not target_status["satisfied"]:
         missing.insert(0, "target_group")
+    if query_plan.unresolved_high_value_terms:
+        missing.insert(0, "unresolved_entity")
 
-    if (strict_requirements or entity_status["required"] or target_status["required"]) and missing:
+    if (strict_requirements or entity_status["required"] or target_status["required"] or query_plan.unresolved_high_value_terms) and missing:
         status = "insufficient"
         selected_evidence: list[dict[str, Any]] = []
         fallback_context = [_row_to_rule_result(row) for row in (primary_rows + fallback_rows)[:RAG_V2_FALLBACK_CONTEXT_LIMIT]]
@@ -4538,6 +5194,14 @@ def _build_rag_v2_evidence_packet(
             "required": sorted(strict_requirements),
             "satisfied": sorted(satisfied),
             "missing": missing,
+        },
+        "entity_first": {
+            "mode": "entity_first" if query_plan.resolved_entities else "fallback",
+            "resolved_entities": query_plan.resolved_entities,
+            "unresolved_high_value_terms": query_plan.unresolved_high_value_terms,
+            "target_groups": query_plan.target_groups,
+            "situational_constraints": query_plan.situational_constraints,
+            "ambiguity_warnings": query_plan.ambiguity_warnings,
         },
     }
     return RagV2EvidencePacket(
@@ -4651,6 +5315,8 @@ def _rag_v2_candidate_summary(candidate: RuleSearchCandidate, *, reasons: list[s
         "page_end": candidate.page_end,
         "chunk_index": candidate.chunk_index,
         "section_label": candidate.section_label,
+        "rule_block_id": candidate.rule_block_id,
+        "block_kind": candidate.block_kind,
         "score": round(candidate.score, 6),
         "evidence_score": round(candidate.evidence_score, 6),
         "section_kind": candidate.section_kind,
@@ -4879,8 +5545,27 @@ def _index_rule_chunks(
 ) -> dict[str, Any]:
     rows = _fetch_rule_chunks_for_index(connection, book_id=book_id)
     before = _semantic_index_summary(rows, backend=backend)
-    embedding_rows = [row for row in rows if full or _embedding_needs_refresh(row, backend)]
-    metadata_rows = [row for row in rows if full or _metadata_needs_refresh(row)]
+    structure_rows = [row for row in rows if full or _structure_needs_refresh(row)]
+    refreshed_structure_ids = {int(row["chunk_id"]) for row in structure_rows}
+    affected_book_ids = sorted({str(row["book_id"]) for row in structure_rows})
+
+    for row in structure_rows:
+        _update_rule_chunk_structure(connection, row)
+
+    for current_book_id in affected_book_ids:
+        _rebuild_rule_chunks_fts(connection, current_book_id)
+
+    if structure_rows:
+        rows = _fetch_rule_chunks_for_index(connection, book_id=book_id)
+
+    embedding_rows = [
+        row
+        for row in rows
+        if full or _embedding_needs_refresh(row, backend) or int(row["chunk_id"]) in refreshed_structure_ids
+    ]
+    metadata_rows = [
+        row for row in rows if full or _metadata_needs_refresh(row) or int(row["chunk_id"]) in refreshed_structure_ids
+    ]
 
     if embedding_rows:
         result = backend.encode_many([row["content"] for row in embedding_rows])
@@ -4923,6 +5608,7 @@ def _index_rule_chunks(
             content_hash=row["content_hash"],
         )
 
+    catalog_summary = _refresh_rules_entity_catalog(connection, book_id=book_id, full=full)
     refreshed_rows = _fetch_rule_chunks_for_index(connection, book_id=book_id)
     summary = _semantic_index_summary(refreshed_rows, backend=backend)
     summary.update(
@@ -4933,8 +5619,13 @@ def _index_rule_chunks(
             "metadata_chunks_before": before["metadata_chunks"],
             "missing_metadata_before": before["missing_metadata"],
             "stale_metadata_before": before["stale_metadata"],
+            "structure_chunks_before": before["structure_chunks"],
+            "missing_structure_before": before["missing_structure"],
+            "stale_structure_before": before["stale_structure"],
             "refreshed_embeddings": len(embedding_rows),
             "refreshed_metadata": len(metadata_rows),
+            "refreshed_structure": len(structure_rows),
+            "entity_catalog": catalog_summary,
             "full_reindex": full,
             "source_pdf_required": False,
             "source_operation": "stored_chunk_text",
@@ -4964,6 +5655,8 @@ def _inspect_rule_semantic_index_for_current_backend(
         or summary["stale_embeddings"] > 0
         or summary["missing_metadata"] > 0
         or summary["stale_metadata"] > 0
+        or summary["missing_structure"] > 0
+        or summary["stale_structure"] > 0
     )
     summary.update(
         {
@@ -4974,6 +5667,12 @@ def _inspect_rule_semantic_index_for_current_backend(
                 "available_chunks": summary["metadata_chunks"],
                 "missing_chunks": summary["missing_metadata"],
                 "stale_chunks": summary["stale_metadata"],
+            },
+            "rule_block_structure": {
+                "schema_version": RULE_BLOCK_STRUCTURE_SCHEMA_VERSION,
+                "available_chunks": summary["structure_chunks"],
+                "missing_chunks": summary["missing_structure"],
+                "stale_chunks": summary["stale_structure"],
             },
             "repair_hint": _rules_index_hint(book_id) if needs_repair else None,
         }
@@ -4988,6 +5687,9 @@ def _semantic_index_summary(rows: list[sqlite3.Row], backend: EmbeddingBackend) 
     missing_metadata = 0
     stale_metadata = 0
     metadata_chunks = 0
+    structure_chunks = 0
+    missing_structure = 0
+    stale_structure = 0
     for row in rows:
         if _embedding_missing(row):
             missing_embeddings += 1
@@ -5003,6 +5705,13 @@ def _semantic_index_summary(rows: list[sqlite3.Row], backend: EmbeddingBackend) 
         else:
             metadata_chunks += 1
 
+        if _structure_missing(row):
+            missing_structure += 1
+        elif _structure_needs_refresh(row):
+            stale_structure += 1
+        else:
+            structure_chunks += 1
+
     return {
         "embedding_backend": backend.name,
         "embedding_model": backend.model_name,
@@ -5016,6 +5725,274 @@ def _semantic_index_summary(rows: list[sqlite3.Row], backend: EmbeddingBackend) 
         "missing_metadata": missing_metadata,
         "stale_metadata": stale_metadata,
         "rag_metadata_schema_version": RULES_RAG_V2_METADATA_SCHEMA_VERSION,
+        "structure_chunks": structure_chunks,
+        "missing_structure": missing_structure,
+        "stale_structure": stale_structure,
+        "rule_block_structure_schema_version": RULE_BLOCK_STRUCTURE_SCHEMA_VERSION,
+    }
+
+
+def _structure_missing(row: sqlite3.Row) -> bool:
+    return not str(_row_optional(row, "rule_block_id") or "").strip() or not str(
+        _row_optional(row, "clean_content") or ""
+    ).strip()
+
+
+def _structure_needs_refresh(row: sqlite3.Row) -> bool:
+    if _structure_missing(row):
+        return True
+    return int(_row_optional(row, "structure_schema_version") or 0) != RULE_BLOCK_STRUCTURE_SCHEMA_VERSION
+
+
+def _update_rule_chunk_structure(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
+    content = str(_row_optional(row, "raw_content") or row["content"] or "")
+    structure = derive_rule_block_structure(
+        book_id=str(row["book_id"]),
+        section_label=str(row["section_label"]),
+        content=content,
+        page_start=int(row["page_start"]),
+        chunk_index=int(row["chunk_index"]),
+    )
+    connection.execute(
+        """
+        UPDATE rule_chunks
+        SET rule_block_id = ?,
+            heading_path_json = ?,
+            block_kind = ?,
+            clean_content = ?,
+            source_window = ?,
+            structure_flags_json = ?,
+            structure_schema_version = ?
+        WHERE id = ?
+        """,
+        (
+            structure.block_id,
+            json.dumps(structure.heading_path),
+            structure.block_kind,
+            structure.clean_content,
+            structure.source_window,
+            json.dumps(structure.structure_flags),
+            structure.schema_version,
+            int(row["chunk_id"]),
+        ),
+    )
+
+
+def _refresh_rules_entity_catalog(connection: sqlite3.Connection, *, book_id: str | None, full: bool) -> dict[str, Any]:
+    _ensure_seed_rule_entities(connection)
+    if not full:
+        return _rules_entity_catalog_summary(connection, book_id=book_id, refreshed=0)
+
+    parameters: list[Any] = []
+    where_clause = "WHERE rc.structure_schema_version = ? AND rc.rule_block_id != '' AND rc.clean_content != ''"
+    parameters.append(RULE_BLOCK_STRUCTURE_SCHEMA_VERSION)
+    if book_id:
+        where_clause += " AND rc.book_id = ?"
+        parameters.append(book_id)
+    rows = connection.execute(
+        f"""
+        SELECT
+            rc.id AS chunk_id,
+            rc.book_id,
+            rc.page_start,
+            rc.page_end,
+            rc.chunk_index,
+            rc.section_label,
+            rc.content_hash,
+            rc.rule_block_id,
+            rc.heading_path_json AS block_heading_path_json,
+            rc.block_kind,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
+            rc.scope_tags_json AS chunk_scope_tags_json,
+            m.aliases_json,
+            m.entity_locations_json,
+            m.evidence_cues_json
+        FROM rule_chunks rc
+        LEFT JOIN rule_chunk_retrieval_metadata m ON m.chunk_id = rc.id
+        {where_clause}
+        ORDER BY rc.book_id, rc.page_start, rc.chunk_index
+        """,
+        parameters,
+    ).fetchall()
+    refreshed = 0
+    for row in rows:
+        entry = _catalog_entry_from_rule_block(row)
+        if entry is None:
+            continue
+        _upsert_rule_entity(connection, entry)
+        refreshed += 1
+    return _rules_entity_catalog_summary(connection, book_id=book_id, refreshed=refreshed)
+
+
+def _catalog_entry_from_rule_block(row: sqlite3.Row) -> dict[str, Any] | None:
+    heading_path = _json_text_list(_row_optional(row, "block_heading_path_json"))
+    canonical = _catalog_canonical_name(row, heading_path)
+    if not canonical:
+        return None
+    aliases = _dedupe_text_values(
+        [
+            canonical,
+            *heading_path,
+            str(row["section_label"]),
+        ]
+    )
+    source_anchor = {
+        "book_id": row["book_id"],
+        "chunk_id": int(row["chunk_id"]),
+        "rule_block_id": row["rule_block_id"],
+        "page_start": int(row["page_start"]),
+        "page_end": int(row["page_end"]),
+        "section_label": row["section_label"],
+    }
+    scope_tags = _json_list(_row_optional(row, "chunk_scope_tags_json"))
+    entity_type = _catalog_entity_type(canonical=canonical, block_kind=str(row["block_kind"] or ""), content=str(row["content"] or ""))
+    return {
+        "entity_id": f"{row['book_id']}:{row['rule_block_id']}",
+        "book_id": row["book_id"],
+        "canonical_name": canonical,
+        "entity_type": entity_type,
+        "aliases": aliases,
+        "source_anchors": [source_anchor],
+        "source_pages": [int(row["page_start"])],
+        "scope_tags": scope_tags,
+        "provenance": "generated_block",
+        "content_hash": fingerprint_text(
+            "|".join(
+                [
+                    str(row["content_hash"]),
+                    json.dumps(heading_path, sort_keys=True),
+                    str(row["block_kind"] or ""),
+                ]
+            )
+        ),
+        "confidence": 0.78,
+    }
+
+
+def _catalog_canonical_name(row: sqlite3.Row, heading_path: list[str]) -> str:
+    for heading in reversed(heading_path):
+        normalized = " ".join(str(heading or "").strip().split())
+        if _catalog_heading_is_name(normalized):
+            return normalized
+    first_line = str(row["content"] or "").splitlines()[0] if str(row["content"] or "").splitlines() else ""
+    first_sentence = re.split(r"[.:]", first_line, maxsplit=1)[0]
+    normalized = " ".join(first_sentence.strip().split())
+    return normalized if _catalog_heading_is_name(normalized) else ""
+
+
+def _catalog_heading_is_name(value: str) -> bool:
+    if not (3 <= len(value) <= 80):
+        return False
+    if len(value.split()) > 8:
+        return False
+    if re.search(r"^(?:cost|system|duration|dice pools?|amalgam|prerequisite|chapter|page)\b", value, re.I):
+        return False
+    if re.fullmatch(r"(?:[A-Z]\s+){4,}[A-Z0-9 ]+", value):
+        return False
+    return True
+
+
+def _catalog_entity_type(*, canonical: str, block_kind: str, content: str) -> str:
+    normalized = _normalize_rule_alias(f"{canonical} {content}")
+    if block_kind in {"power", "ritual", "table", "list"}:
+        return block_kind
+    if "discipline" in normalized and len(canonical.split()) <= 2:
+        return "discipline"
+    if re.search(r"\b(?:ritual|ceremony|formula)\b", normalized):
+        return "ritual"
+    if re.search(r"\b(?:cost|system|duration|dice pool|rouse check|hunger|blood bond)\b", normalized):
+        return "mechanic"
+    return "rule"
+
+
+def _upsert_rule_entity(connection: sqlite3.Connection, entry: dict[str, Any]) -> None:
+    now = timestamp_now()
+    entity_id = str(entry["entity_id"])
+    aliases = _dedupe_text_values(entry.get("aliases") or [])
+    connection.execute(
+        """
+        INSERT INTO rule_entities (
+            entity_id, book_id, canonical_name, entity_type, aliases_json, source_anchors_json,
+            source_pages_json, scope_tags_json, provenance, content_hash, catalog_schema_version, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(entity_id) DO UPDATE SET
+            book_id = excluded.book_id,
+            canonical_name = excluded.canonical_name,
+            entity_type = excluded.entity_type,
+            aliases_json = excluded.aliases_json,
+            source_anchors_json = excluded.source_anchors_json,
+            source_pages_json = excluded.source_pages_json,
+            scope_tags_json = excluded.scope_tags_json,
+            provenance = excluded.provenance,
+            content_hash = excluded.content_hash,
+            catalog_schema_version = excluded.catalog_schema_version,
+            updated_at = excluded.updated_at
+        """,
+        (
+            entity_id,
+            entry.get("book_id"),
+            str(entry["canonical_name"]),
+            str(entry["entity_type"]),
+            json.dumps(aliases),
+            json.dumps(entry.get("source_anchors") or []),
+            json.dumps(entry.get("source_pages") or []),
+            json.dumps(entry.get("scope_tags") or []),
+            str(entry["provenance"]),
+            str(entry["content_hash"]),
+            RULES_ENTITY_CATALOG_SCHEMA_VERSION,
+            now,
+        ),
+    )
+    for alias in aliases:
+        normalized_alias = _normalize_rule_alias(alias)
+        if not normalized_alias:
+            continue
+        connection.execute(
+            """
+            INSERT INTO rule_entity_aliases (normalized_alias, alias, entity_id, provenance, confidence)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(normalized_alias, entity_id, provenance) DO UPDATE SET
+                alias = excluded.alias,
+                confidence = excluded.confidence
+            """,
+            (
+                normalized_alias,
+                alias,
+                entity_id,
+                str(entry["provenance"]),
+                float(entry.get("confidence") or 0.75),
+            ),
+        )
+
+
+def _rules_entity_catalog_summary(connection: sqlite3.Connection, *, book_id: str | None, refreshed: int) -> dict[str, Any]:
+    parameters: list[Any] = []
+    where_clause = ""
+    if book_id:
+        where_clause = "WHERE book_id = ? OR book_id IS NULL"
+        parameters.append(book_id)
+    rows = connection.execute(
+        f"""
+        SELECT entity_type, provenance, COUNT(*) AS count
+        FROM rule_entities
+        {where_clause}
+        GROUP BY entity_type, provenance
+        ORDER BY entity_type, provenance
+        """,
+        parameters,
+    ).fetchall()
+    by_type: dict[str, int] = {}
+    by_provenance: dict[str, int] = {}
+    for row in rows:
+        by_type[str(row["entity_type"])] = by_type.get(str(row["entity_type"]), 0) + int(row["count"])
+        by_provenance[str(row["provenance"])] = by_provenance.get(str(row["provenance"]), 0) + int(row["count"])
+    return {
+        "schema_version": RULES_ENTITY_CATALOG_SCHEMA_VERSION,
+        "refreshed_entities": refreshed,
+        "entity_count": sum(int(row["count"]) for row in rows),
+        "by_type": by_type,
+        "by_provenance": by_provenance,
     }
 
 
@@ -5034,12 +6011,21 @@ def _fetch_rule_chunks_for_index(connection: sqlite3.Connection, book_id: str | 
             rc.page_end,
             rc.chunk_index,
             rc.section_label,
-            rc.content,
-            rc.excerpt,
+            rc.content AS raw_content,
+            rc.excerpt AS raw_excerpt,
+            COALESCE(NULLIF(rc.clean_content, ''), rc.content) AS content,
+            COALESCE(NULLIF(rc.source_window, ''), rc.excerpt) AS excerpt,
             rc.word_count,
             rc.confidence,
             rc.extraction_method,
             rc.content_hash,
+            rc.rule_block_id,
+            rc.heading_path_json AS block_heading_path_json,
+            rc.block_kind,
+            rc.clean_content,
+            rc.source_window,
+            rc.structure_flags_json,
+            rc.structure_schema_version,
             e.backend AS embedding_backend,
             e.model AS embedding_model,
             e.dimensions AS embedding_dimensions,
@@ -5498,8 +6484,8 @@ def _semantic_error(error: AppError) -> dict[str, Any]:
 
 def _rules_index_hint(book_id: str | None) -> str:
     if book_id:
-        return f"Run `backet rules index <vault> --book-id {book_id}` to refresh semantic rules retrieval."
-    return "Run `backet rules index <vault>` to refresh semantic rules retrieval."
+        return f"Run `backet rules index <vault> --book-id {book_id} --full` to refresh rules retrieval metadata."
+    return "Run `backet rules index <vault> --full` to refresh rules retrieval metadata."
 
 
 def _audit_summary(connection: sqlite3.Connection, book_id: str) -> dict[str, Any]:
@@ -5539,9 +6525,9 @@ def _is_definition_rule_query(text: str) -> bool:
 
 
 def split_rule_chunks(text: str) -> list[str]:
-    paragraphs = [paragraph.strip() for paragraph in text.split("\n\n") if paragraph.strip()]
+    normalized = normalize_text(text)
+    paragraphs = _split_rule_block_candidates(normalized)
     if not paragraphs:
-        normalized = normalize_text(text)
         return [normalized] if normalized else []
 
     chunks: list[str] = []
@@ -5563,6 +6549,209 @@ def split_rule_chunks(text: str) -> list[str]:
     if current:
         chunks.append("\n\n".join(current).strip())
     return [chunk for chunk in chunks if chunk]
+
+
+def _split_rule_block_candidates(text: str) -> list[str]:
+    paragraphs = [paragraph.strip() for paragraph in str(text or "").split("\n\n") if paragraph.strip()]
+    if len(paragraphs) > 1:
+        return paragraphs
+
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for index, line in enumerate(lines):
+        next_line = lines[index + 1] if index + 1 < len(lines) else ""
+        if current and _looks_rule_block_heading_line(line, next_line):
+            blocks.append(current)
+            current = []
+        current.append(line)
+    if current:
+        blocks.append(current)
+    return ["\n".join(block).strip() for block in blocks if "\n".join(block).strip()]
+
+
+def _looks_rule_block_heading_line(line: str, next_line: str) -> bool:
+    stripped = " ".join(str(line or "").strip().split())
+    if not (3 <= len(stripped) <= 90):
+        return False
+    if len(stripped.split()) > 10:
+        return False
+    if re.search(r"^(?:cost|system|duration|dice pools?|amalgam|prerequisite|ingredients|process)\s*:", stripped, re.I):
+        return False
+    if stripped.endswith((".", ",", ";", ":")):
+        return False
+    if re.fullmatch(r"(?:[A-Z]\s+){4,}[A-Z0-9 ]+", stripped):
+        return False
+    next_is_stat = bool(
+        re.search(r"^(?:cost|system|duration|dice pools?|amalgam|prerequisite|ingredients|process)\s*:", next_line, re.I)
+    )
+    if next_is_stat:
+        return True
+    words = stripped.split()
+    titled_words = sum(1 for word in words if word[:1].isupper() and any(char.islower() for char in word[1:]))
+    return len(words) <= 6 and titled_words >= max(1, len(words) - 1)
+
+
+def derive_rule_block_structure(
+    *,
+    book_id: str,
+    section_label: str,
+    content: str,
+    page_start: int,
+    chunk_index: int,
+) -> RuleBlockStructure:
+    clean_content, flags = _clean_rule_block_text(content, section_label=section_label)
+    heading_path = _infer_heading_path(section_label, clean_content)
+    block_kind = _infer_rule_block_kind(section_label, clean_content)
+    if block_kind in {"table", "list", "power", "ritual"}:
+        _add_unique(flags, f"block_kind:{block_kind}")
+    slug_source = heading_path[-1] if heading_path else section_label or f"chunk-{chunk_index}"
+    slug = _slugify(slug_source)[:48] or f"chunk-{chunk_index}"
+    block_id = f"{book_id}:p{int(page_start)}:c{int(chunk_index)}:{slug}"
+    source_window = _rule_block_source_window(clean_content, heading_path=heading_path)
+    return RuleBlockStructure(
+        block_id=block_id,
+        heading_path=heading_path,
+        block_kind=block_kind,
+        clean_content=clean_content,
+        source_window=source_window,
+        structure_flags=sorted(set(flags)),
+    )
+
+
+def _clean_rule_block_text(content: str, *, section_label: str) -> tuple[str, list[str]]:
+    flags: list[str] = []
+    lines: list[str] = []
+    seen_non_furniture = False
+    for raw_line in str(content or "").splitlines():
+        line = " ".join(raw_line.strip().split())
+        if not line:
+            if lines and lines[-1]:
+                lines.append("")
+            continue
+        line, inline_furniture_removed = _strip_inline_rule_page_furniture(line)
+        if inline_furniture_removed:
+            _add_unique(flags, "page_furniture_removed")
+        if not line:
+            continue
+        if _looks_rule_block_page_furniture(line, section_label=section_label, seen_non_furniture=seen_non_furniture):
+            _add_unique(flags, "page_furniture_removed")
+            continue
+        seen_non_furniture = True
+        lines.append(line)
+    clean = "\n".join(lines).strip()
+    if not clean:
+        _add_unique(flags, "empty_after_structure_clean")
+        clean = normalize_text(content)
+    if len(clean.split()) < 12:
+        _add_unique(flags, "very_short_block")
+    if len(re.findall(r"\b(?:system|cost|duration)\s*:", clean, flags=re.I)) >= 6:
+        _add_unique(flags, "possible_mixed_topic")
+    return clean, flags
+
+
+def _strip_inline_rule_page_furniture(line: str) -> tuple[str, bool]:
+    parts = str(line or "").split()
+    removed = False
+    while parts:
+        prefix = 0
+        for part in parts:
+            token = re.sub(r"[^A-Za-z0-9]+", "", part)
+            if not token or len(token) == 1 or token.isdigit():
+                prefix += 1
+                continue
+            break
+        if prefix < 8:
+            break
+        parts = parts[prefix:]
+        removed = True
+    if removed:
+        return " ".join(parts).strip(), True
+    return line, False
+
+
+def _looks_rule_block_page_furniture(line: str, *, section_label: str, seen_non_furniture: bool) -> bool:
+    compact = re.sub(r"[^a-z0-9]+", "", line.casefold())
+    if re.fullmatch(r"(?:page)?\d{1,4}", compact):
+        return True
+    if re.fullmatch(r"(?:[a-z]\s+){4,}[a-z]", line.casefold()):
+        return True
+    if len(line.split()) <= 5 and re.search(r"\b(?:vampire|masquerade|core rulebook|players guide)\b", line, flags=re.I):
+        return True
+    if not seen_non_furniture and line.strip() == str(section_label or "").strip() and _looks_page_furniture(section_label, line, len(line.split())):
+        return True
+    return False
+
+
+def _infer_rule_block_kind(section_label: str, content: str) -> str:
+    text = f"{section_label}\n{content}".casefold()
+    if _looks_like_structured_table(content):
+        return "table"
+    if re.search(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+", content):
+        return "list"
+    if re.search(r"\b(?:level\s+\d|amalgam|cost\s*:|dice pools?\s*:|duration\s*:|system\s*:)", text):
+        if re.search(r"\b(?:discipline|amalgam|level\s+\d)\b", text):
+            return "power"
+        if re.search(r"\b(?:ritual|ceremony|formula)\b", text):
+            return "ritual"
+        return "rules"
+    section_kind, _flags = classify_rule_chunk(
+        section_label=section_label,
+        content=content,
+        word_count=len(content.split()),
+        confidence=1.0,
+        extraction_method="direct",
+    )
+    return section_kind
+
+
+def _looks_like_structured_table(content: str) -> bool:
+    rows = [line.strip() for line in str(content or "").splitlines() if line.strip()]
+    if len(rows) < 2:
+        return False
+    label_value_rows = sum(1 for line in rows if re.search(r"\b[A-Za-z][A-Za-z /+\-]{2,40}\s{2,}[A-Za-z0-9]", line))
+    colon_rows = sum(
+        1
+        for line in rows
+        if re.search(r"^[A-Za-z][A-Za-z /+\-]{2,40}\s*:", line)
+        and not re.search(r"^(?:cost|system|duration|dice pools?|amalgam|prerequisite|ingredients|process)\s*:", line, re.I)
+    )
+    return label_value_rows >= 2 or colon_rows >= 3
+
+
+def _rule_block_source_window(content: str, *, heading_path: list[str], limit: int = 520) -> str:
+    normalized = " ".join(str(content or "").split())
+    if not normalized:
+        return ""
+    heading_starts = [
+        normalized.casefold().find(heading.casefold().rstrip(":"))
+        for heading in heading_path
+        if heading
+    ]
+    heading_starts = [start for start in heading_starts if start >= 0]
+    start = min(heading_starts) if heading_starts else 0
+    if not heading_starts:
+        for pattern in (r"\bcost\s*:", r"\bsystem\s*:", r"\bdice pools?\s*:", r"\bduration\s*:"):
+            match = re.search(pattern, normalized, flags=re.I)
+            if match:
+                start = max(0, match.start() - 160)
+                if start > 0:
+                    start = normalized.find(" ", start)
+                    if start < 0:
+                        start = 0
+                break
+    end = min(len(normalized), start + limit)
+    if end < len(normalized):
+        end = max(start + 80, normalized.rfind(" ", start, end))
+    window = normalized[start:end].strip()
+    if start > 0:
+        window = f"... {window}"
+    if end < len(normalized):
+        window = f"{window} ..."
+    return window
 
 
 def infer_section_label(text: str, page_number: int) -> str:

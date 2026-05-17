@@ -384,17 +384,17 @@ backet bot runtime benchmark E:\Projects\prague-by-night `
   --report-output E:\Projects\prague-by-night\.backet\qa\local-runtime
 ```
 
-Measured results from that run:
+Measured results from the May 17, 2026 local calibration runs:
 
 - embedding call: `nomic-embed-text`, 768 dimensions, about 0.02 seconds warm
 - answer smoke call: `llama3.2:3b`, about 0.8 seconds warm, first token at about 0.15 seconds, about 138 tokens/second
 - Ollama process working set: about 2.7 GB
-- deterministic QA workbench: 5 of 5 Prague cases passed
-- configured-model QA workbench: 5 of 5 passed after validation fallback
-- local `llama3.2:3b` quality caveat: it omitted required source citations or outline support in answerable cases, so the validator rejected the model prose and used deterministic outline answers instead
-- remaining content gap: Dementation targeting now fails honestly with "missing evidence: dementation" because the permitted corpus did not contain a direct targeting rule; it no longer answers from unrelated Malkavian/Obfuscate clan text
+- screenshot-regression QA after the claim-contract apply: 4 of 5 required Prague cases passed; the Dementation targeting case still fails in retrieval because the selected evidence does not include the needed direct targeting source
+- configured-model exploratory `standard-fresh` QA after the claim-contract apply: 1 of 5 passed; the local `llama3.2:3b` path is useful for plumbing but still fails several direct-answer checks
+- local `llama3.2:3b` quality caveat: it can omit required source citations, miss validated claim coverage, or produce prose that fails QA; keep deterministic fallback enabled until a stronger local answer model passes the workbench
+- remaining content gap: Dementation targeting must be fixed at retrieval/corpus coverage, not by asking the answer model to infer from related Malkavian or special-case text
 
-This is enough for `rag-standard` local testing. It is not enough to call the profile `rag-quality` yet, because no reranker service is configured and the small local answer model repeatedly fails answer validation. For first production sizing, start from at least this machine class: 32 GB RAM, fast SSD model cache, and GPU/runtime compatibility proven with the same benchmark command. Do not size final production from synthetic model latency alone; require the QA workbench to pass without frequent model fallbacks.
+This is enough for `rag-standard` local testing. It is not enough to call the profile `rag-quality` yet, because no reranker service is configured and the small local answer model repeatedly fails answer validation and exploratory QA. For first production sizing, start from at least this machine class: 32 GB RAM, fast SSD model cache, and GPU/runtime compatibility proven with the same benchmark command. Do not size final production from synthetic model latency alone; require the QA workbench to pass without frequent model fallbacks.
 
 llama.cpp Vulkan remains the advanced fallback path. The helper script at `scripts/setup-llama-cpp-vulkan-windows.ps1` documents a Windows Vulkan build and starts a llama.cpp-compatible endpoint at `http://127.0.0.1:8080/completion`. Use it only when Ollama cannot provide the required service mix or quality.
 
@@ -457,9 +457,19 @@ Run the QA workbench before redeploying answer-quality changes:
 backet bot qa /path/to/vault --case-file docs/qa/prague-rules-answer-cases.json --limit 6
 ```
 
-The QA report groups failures by planner, retrieval, answerability, synthesis, citation, runtime, or output policy so you can tell which layer needs work before changing the live Discord bot.
+The QA report groups failures by runtime, planner, retrieval, answerability, claim support, synthesis, citation, or output policy so you can tell which layer needs work before changing the live Discord bot. Cases can be required, exploratory, or private calibration; only required failures block validation by default.
 
-Current answers are generated from an evidence-aware packet and grounded answer outline rather than raw retrieval snippets. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. If retrieved chunks are related but do not answer the question, the bot should say what evidence is missing instead of bluffing. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
+For fresh local checks, run ad hoc exploratory cases without editing a committed case file:
+
+```bash
+backet bot qa /path/to/vault \
+  --question "what is a rouse check?" \
+  --question "can I use dominate without eye contact?" \
+  --suite ad-hoc \
+  --report-output .backet/reports/answer-quality/fresh-run
+```
+
+Current answers are generated from an evidence-aware packet and validated answer claims rather than raw retrieval snippets. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. If retrieved chunks are related but do not answer the question, the bot should say what evidence is missing instead of bluffing. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
 
 ## Answer Logs
 

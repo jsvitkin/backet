@@ -9,8 +9,38 @@ ANSWER_QUALITY_CASE_SCHEMA_VERSION = 1
 STAGE_PASSED = "passed"
 STAGE_FAILED = "failed"
 STAGE_NOT_APPLICABLE = "not_applicable"
-FAILURE_STAGE_ORDER = ("runtime", "planner", "retrieval", "answerability", "synthesis", "citation", "output_policy")
+FAILURE_STAGE_ORDER = (
+    "runtime",
+    "planner",
+    "retrieval",
+    "answerability",
+    "claim_support",
+    "synthesis",
+    "citation",
+    "output_policy",
+)
 CASE_REQUIRED_FIELDS = ("id", "question")
+CASE_SEVERITIES = ("required", "exploratory", "calibration", "private")
+CASE_FIELD_TYPES = {
+    "suite": str,
+    "category": str,
+    "severity": str,
+    "expected_failure_stage": str,
+    "expected_first_failure_stage": str,
+    "direct_answer_contains": list,
+    "required_direct_answer_contains": list,
+    "direct_answer_patterns": list,
+    "required_direct_answer_patterns": list,
+    "required_claim_patterns": list,
+    "forbidden_claim_patterns": list,
+}
+STAGE_ALIASES = {
+    "answer": "synthesis",
+    "claim-support": "claim_support",
+    "claim_support": "claim_support",
+    "output-policy": "output_policy",
+    "output_policy": "output_policy",
+}
 
 
 def load_answer_quality_cases(path: Path) -> list[dict[str, Any]]:
@@ -18,6 +48,10 @@ def load_answer_quality_cases(path: Path) -> list[dict[str, Any]]:
     schema_version = int(payload.get("schema_version", 0))
     if schema_version != ANSWER_QUALITY_CASE_SCHEMA_VERSION:
         raise ValueError(f"Unsupported answer quality case schema: {schema_version}")
+    suite_name = str(payload.get("suite") or payload.get("name") or "standard")
+    default_category = str(payload.get("category") or "uncategorized")
+    default_severity = str(payload.get("severity") or "required")
+    _validate_severity(default_severity, "severity")
     cases = payload.get("cases", [])
     if not isinstance(cases, list):
         raise ValueError("Answer quality cases must be a list")
@@ -28,7 +62,24 @@ def load_answer_quality_cases(path: Path) -> list[dict[str, Any]]:
         for field in CASE_REQUIRED_FIELDS:
             if not str(case.get(field) or "").strip():
                 raise ValueError(f"cases[{index}].{field} is required")
-        validated.append(dict(case))
+        current = dict(case)
+        _validate_case_shape(current, index)
+        current.setdefault("suite", suite_name)
+        current.setdefault("category", default_category)
+        if "severity" in current and current.get("severity") is not None:
+            severity = str(current.get("severity"))
+        elif "required" in current:
+            severity = "required" if bool(current.get("required")) else "exploratory"
+        else:
+            severity = default_severity
+        _validate_severity(severity, f"cases[{index}].severity")
+        current["severity"] = severity
+        current["required"] = bool(current.get("required")) if "required" in current else severity == "required"
+        if stage := current.get("expected_first_failure_stage"):
+            current["expected_failure_stage"] = _normalize_stage_name(str(stage), f"cases[{index}].expected_first_failure_stage")
+        if stage := current.get("expected_failure_stage"):
+            current["expected_failure_stage"] = _normalize_stage_name(str(stage), f"cases[{index}].expected_failure_stage")
+        validated.append(current)
     return validated
 
 
@@ -37,6 +88,7 @@ def evaluate_answer_quality_case(answer: Mapping[str, Any], case: Mapping[str, A
     planner = _evaluate_planner(answer, case)
     retrieval = _evaluate_retrieval(answer, case)
     answerability = _evaluate_answerability(answer, case)
+    claim_support = _evaluate_claim_support(answer, case)
     synthesis = _evaluate_answer_text(answer, case)
     citation = _evaluate_citation(answer, case)
     output_policy = _evaluate_output_policy(answer, case)
@@ -45,18 +97,28 @@ def evaluate_answer_quality_case(answer: Mapping[str, Any], case: Mapping[str, A
         "planner": planner,
         "retrieval": retrieval,
         "answerability": answerability,
+        "claim_support": claim_support,
         "synthesis": synthesis,
         "answer": synthesis,
         "citation": citation,
         "output_policy": output_policy,
     }
     first_failed = _first_failed_stage(stages)
+    expected_failure_stage = case.get("expected_failure_stage")
+    expected_failure_matched = expected_failure_stage is not None and first_failed == expected_failure_stage
+    passed = first_failed is None if expected_failure_stage is None else expected_failure_matched
     return {
         "case_id": case.get("id"),
         "question": case.get("question"),
+        "suite": case.get("suite"),
+        "category": case.get("category"),
+        "severity": case.get("severity"),
         "difficulty": case.get("difficulty"),
-        "passed": first_failed is None,
+        "required": bool(case.get("required", case.get("severity") == "required")),
+        "passed": passed,
         "failure_stage": first_failed,
+        "expected_failure_stage": expected_failure_stage,
+        "expected_failure_matched": expected_failure_matched,
         "stages": stages,
         "trace_summary": summarize_answer_trace(answer),
     }
@@ -85,8 +147,12 @@ def summarize_answer_trace(answer: Mapping[str, Any]) -> dict[str, Any]:
         "embedding_backend": retrieval.get("rules_embedding_backend"),
         "embedding_model": retrieval.get("rules_embedding_model"),
         "source_count": retrieval.get("source_count"),
+        "selected_source_count": len(_answer_sources(answer)),
+        "fallback_reason": generation.get("fallback_reason"),
         "planner_terms": _plan_terms(query_plan),
         "intents": list(query_plan.get("intents") or []),
+        "resolved_entities": _resolved_entity_names(query_plan.get("resolved_entities")),
+        "unresolved_terms": _text_list(query_plan.get("unresolved_high_value_terms")),
         "selected_sources": [
             _bounded_source_summary(source)
             for source in _answer_sources(answer)[:8]
@@ -172,16 +238,26 @@ def _evaluate_answerability(answer: Mapping[str, Any], case: Mapping[str, Any]) 
 
 def _evaluate_answer_text(answer: Mapping[str, Any], case: Mapping[str, Any]) -> dict[str, Any]:
     text = str(answer.get("text") or "")
+    direct_text = _direct_answer_text(text)
     folded = text.casefold()
+    direct_folded = direct_text.casefold()
     failures: list[str] = []
     expected_contains = list(case.get("expected_answer_contains", []) or []) + list(case.get("required_answer_contains", []) or [])
     forbidden_contains = list(case.get("forbidden_answer_contains", []) or [])
     for expected in expected_contains:
         if str(expected).casefold() not in folded:
             failures.append(f"answer does not contain expected text: {expected}")
+    direct_contains = list(case.get("direct_answer_contains", []) or []) + list(case.get("required_direct_answer_contains", []) or [])
+    for expected in direct_contains:
+        if str(expected).casefold() not in direct_folded:
+            failures.append(f"direct answer does not contain expected text: {expected}")
     for pattern in case.get("required_answer_patterns", []) or []:
         if re.search(str(pattern), text, flags=re.IGNORECASE) is None:
             failures.append(f"answer does not match required pattern: {pattern}")
+    direct_patterns = list(case.get("direct_answer_patterns", []) or []) + list(case.get("required_direct_answer_patterns", []) or [])
+    for pattern in direct_patterns:
+        if re.search(str(pattern), direct_text, flags=re.IGNORECASE) is None:
+            failures.append(f"direct answer does not match required pattern: {pattern}")
     for forbidden in forbidden_contains:
         if str(forbidden).casefold() in folded:
             failures.append(f"answer contains forbidden text: {forbidden}")
@@ -213,6 +289,8 @@ def _evaluate_answer_text(answer: Mapping[str, Any], case: Mapping[str, Any]) ->
         and not forbidden_contains
         and not case.get("required_answer_patterns")
         and not case.get("forbidden_answer_patterns")
+        and not direct_contains
+        and not direct_patterns
         and expected_synthesis_mode is None
         and expected_answer_shape is None
         and expected_stance is None
@@ -235,8 +313,40 @@ def _evaluate_citation(answer: Mapping[str, Any], case: Mapping[str, Any]) -> di
     for citation in required:
         if citation not in text and citation not in available:
             failures.append(f"required citation missing: {citation}")
-    if citation_required and "sources:" not in text.casefold() and not sources:
+    if citation_required and "sources:" not in text.casefold() and "source:" not in text.casefold():
         failures.append("answer does not include source citation details")
+    return _stage_result(failures)
+
+
+def _evaluate_claim_support(answer: Mapping[str, Any], case: Mapping[str, Any]) -> dict[str, Any]:
+    required_patterns = _text_list(case.get("required_claim_patterns"))
+    forbidden_patterns = _text_list(case.get("forbidden_claim_patterns"))
+    expected_stance = case.get("expected_claim_stance")
+    forbid_unsupported = bool(case.get("forbid_unsupported_final_text"))
+    if not required_patterns and not forbidden_patterns and expected_stance is None and not forbid_unsupported:
+        return {"status": STAGE_NOT_APPLICABLE, "failures": []}
+    claims = _answer_claims(answer)
+    claim_text = "\n".join(str(claim.get("text") or claim.get("claim") or "") for claim in claims)
+    failures: list[str] = []
+    if required_patterns and not claims:
+        failures.append("no claim diagnostics available")
+    for pattern in required_patterns:
+        if re.search(str(pattern), claim_text, flags=re.IGNORECASE) is None:
+            failures.append(f"validated claims do not match required pattern: {pattern}")
+    for pattern in forbidden_patterns:
+        if re.search(str(pattern), claim_text, flags=re.IGNORECASE) is not None:
+            failures.append(f"validated claims match forbidden pattern: {pattern}")
+    if expected_stance is not None:
+        stances = {str(claim.get("stance") or "") for claim in claims}
+        if str(expected_stance) not in stances:
+            failures.append(f"claim stance {sorted(stances)!r} did not include expected {expected_stance!r}")
+    if forbid_unsupported:
+        support = _mapping(_mapping(_answer_trace(answer).get("stages")).get("claim_support"))
+        unsupported = support.get("unsupported_final_text")
+        if unsupported:
+            failures.append("final answer includes unsupported text")
+        if not support and not claims:
+            failures.append("no final answer support mapping available")
     return _stage_result(failures)
 
 
@@ -272,6 +382,16 @@ def _answer_sources(answer: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if not isinstance(selected, list):
         return []
     return [source for source in selected if isinstance(source, Mapping)]
+
+
+def _answer_claims(answer: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    trace = _answer_trace(answer)
+    stages = _mapping(trace.get("stages"))
+    claim_stage = _mapping(stages.get("claim_support")) or _mapping(stages.get("claims"))
+    raw_claims = claim_stage.get("claims") or claim_stage.get("validated_claims") or trace.get("claims")
+    if not isinstance(raw_claims, list):
+        return []
+    return [claim for claim in raw_claims if isinstance(claim, Mapping)]
 
 
 def _source_matches(source: Mapping[str, Any], predicate: Mapping[str, Any]) -> bool:
@@ -359,6 +479,39 @@ def _text_list(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _resolved_entity_names(value: Any) -> list[str]:
+    if not isinstance(value, Iterable) or isinstance(value, (str, bytes, bytearray, Mapping)):
+        return _text_list(value)
+    names: list[str] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            name = item.get("canonical_name") or item.get("entity_id")
+            if name:
+                names.append(str(name))
+        elif str(item):
+            names.append(str(item))
+    return names
+
+
+def _direct_answer_text(text: str) -> str:
+    lines: list[str] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if lines:
+                break
+            continue
+        lowered = stripped.casefold().strip("*: ")
+        if lowered.startswith("sources") or lowered.startswith("source detail") or lowered.startswith("evidence"):
+            break
+        if lowered in {"short answer", "answer"}:
+            continue
+        lines.append(stripped)
+        if len(lines) >= 4:
+            break
+    return " ".join(lines) if lines else str(text or "")
+
+
 def _plan_terms(query_plan: Mapping[str, Any]) -> list[str]:
     terms: list[str] = []
     for key in ("canonical_terms", "expanded_terms", "raw_unknown_terms", "required_evidence", "scoring_terms", "low_value_terms"):
@@ -388,6 +541,30 @@ def _first_failed_stage(stages: Mapping[str, Mapping[str, Any]]) -> str | None:
         if isinstance(current, Mapping) and current.get("status") == STAGE_FAILED:
             return stage
     return None
+
+
+def _validate_case_shape(case: Mapping[str, Any], index: int) -> None:
+    for field, expected_type in CASE_FIELD_TYPES.items():
+        if field not in case or case[field] is None:
+            continue
+        value = case[field]
+        if expected_type is list and isinstance(value, str):
+            continue
+        if not isinstance(value, expected_type):
+            raise ValueError(f"cases[{index}].{field} must be {expected_type.__name__}")
+
+
+def _validate_severity(severity: str, field_path: str) -> None:
+    if severity not in CASE_SEVERITIES:
+        raise ValueError(f"{field_path} must be one of {', '.join(CASE_SEVERITIES)}")
+
+
+def _normalize_stage_name(stage: str, field_path: str) -> str:
+    normalized = STAGE_ALIASES.get(stage, stage)
+    valid = set(FAILURE_STAGE_ORDER)
+    if normalized not in valid:
+        raise ValueError(f"{field_path} must be one of {', '.join(FAILURE_STAGE_ORDER)}")
+    return normalized
 
 
 def _bounded_source_summary(source: Mapping[str, Any]) -> dict[str, Any]:

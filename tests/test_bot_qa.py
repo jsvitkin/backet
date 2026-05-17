@@ -56,6 +56,51 @@ def test_bot_qa_skips_missing_private_vault_case(tmp_path: Path, monkeypatch) ->
     assert result.data["ok"] is True
     assert result.data["skipped_count"] == 1
     assert result.data["cases"][0]["skip_reason"].startswith("vault_path_missing")
+    assert result.data["by_suite"]["standard"]["skipped"] == 1
+
+
+def test_bot_qa_exploratory_failures_do_not_fail_run(tmp_path: Path, monkeypatch) -> None:
+    bundle = _fake_bundle(tmp_path)
+    case_file = tmp_path / "cases.json"
+    case_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "suite": "exploratory",
+                "severity": "exploratory",
+                "cases": [
+                    {
+                        "id": "future-case",
+                        "question": "can I use blush of life?",
+                        "required_answer_contains": ["Blush of Life"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bot_qa.BotBundle, "load", lambda _path: object())
+    monkeypatch.setattr(bot_qa, "answer_bot_query", lambda *_args, **_kwargs: FakeAnswer(_answer_payload("unrelated text")))
+
+    result = bot_qa.run_bot_qa(bundle, case_files=[case_file], bundle=True)
+
+    assert result.data["ok"] is True
+    assert result.data["failed_count"] == 1
+    assert result.data["failed_required_count"] == 0
+    assert result.data["cases"][0]["severity"] == "exploratory"
+
+
+def test_bot_qa_runs_ad_hoc_questions_without_default_cases(tmp_path: Path, monkeypatch) -> None:
+    bundle = _fake_bundle(tmp_path)
+    monkeypatch.setattr(bot_qa.BotBundle, "load", lambda _path: object())
+    monkeypatch.setattr(bot_qa, "answer_bot_query", lambda *_args, **_kwargs: FakeAnswer(_answer_payload("Rouse Check rules.")))
+
+    result = bot_qa.run_bot_qa(bundle, questions=["what is a rouse check?"], bundle=True)
+
+    assert result.data["case_count"] == 1
+    assert result.data["cases"][0]["case_id"] == "ad-hoc-1"
+    assert result.data["cases"][0]["suite"] == "ad-hoc"
+    assert result.data["ok"] is True
 
 
 def test_bot_qa_cli_json_exits_nonzero_on_required_failure(tmp_path: Path, monkeypatch, runner) -> None:
@@ -70,6 +115,32 @@ def test_bot_qa_cli_json_exits_nonzero_on_required_failure(tmp_path: Path, monke
     payload = json.loads(result.stdout)
     assert payload["data"]["ok"] is False
     assert payload["data"]["cases"][0]["failure_stage"] in {"planner", "retrieval", "synthesis"}
+
+
+def test_bot_qa_cli_accepts_question_and_suite_filter(tmp_path: Path, monkeypatch, runner) -> None:
+    bundle = _fake_bundle(tmp_path)
+    monkeypatch.setattr(bot_qa.BotBundle, "load", lambda _path: object())
+    monkeypatch.setattr(bot_qa, "answer_bot_query", lambda *_args, **_kwargs: FakeAnswer(_answer_payload("Rouse Check rules.")))
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "bot",
+            "qa",
+            str(bundle),
+            "--bundle",
+            "--question",
+            "what is a rouse check?",
+            "--suite",
+            "ad-hoc",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["case_count"] == 1
+    assert payload["data"]["cases"][0]["suite"] == "ad-hoc"
 
 
 def test_packaged_standard_cases_avoid_long_source_excerpts() -> None:
