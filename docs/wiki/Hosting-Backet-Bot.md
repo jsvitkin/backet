@@ -316,7 +316,7 @@ For `rag-quality`, add required `reranker` and `answer` service entries as well.
 
 ## Measured Local Runtime Baseline
 
-The v0.2.0 local quality baseline was measured on May 17, 2026 with:
+The v0.3.0 local quality baseline was measured on May 17, 2026 with:
 
 - Windows 11
 - AMD Ryzen 7 7800X3D, 8 cores / 16 logical processors
