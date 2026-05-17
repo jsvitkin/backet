@@ -19,6 +19,11 @@ from backet.errors import AppError
 from backet.models import CommandResult
 from backet.paths import rules_db_path
 from backet.rules_query_planner import (
+    ANSWERABILITY_CONFLICTING,
+    ANSWERABILITY_ENOUGH,
+    ANSWERABILITY_INSUFFICIENT,
+    ANSWERABILITY_PARTIAL,
+    CONTRACT_INSUFFICIENCY,
     INTENT_ADVANCEMENT,
     INTENT_BROAD_EXPLANATION,
     INTENT_CONSEQUENCE,
@@ -442,11 +447,18 @@ class RagV2ChannelDiagnostics:
 @dataclass(slots=True)
 class RagV2EvidencePacket:
     evidence_status: str
+    answerability_status: str
     selected_evidence: list[dict[str, Any]]
     fallback_context: list[dict[str, Any]]
     rejected_candidates: list[dict[str, Any]]
     missing_evidence: list[str]
     satisfied_evidence: list[str]
+    evidence_contract: dict[str, Any]
+    scenario_frame: dict[str, Any]
+    satisfied_facets: list[str]
+    missing_facets: list[str]
+    selected_evidence_ids: list[str]
+    failure_stage: str | None
     candidate_counts: dict[str, int]
     retrieval_diagnostics: dict[str, Any]
     query_plan: dict[str, Any]
@@ -455,11 +467,18 @@ class RagV2EvidencePacket:
         return {
             "schema_version": RULES_RAG_V2_RETRIEVAL_SCHEMA_VERSION,
             "evidence_status": self.evidence_status,
+            "answerability_status": self.answerability_status,
             "selected_evidence": self.selected_evidence,
             "fallback_context": self.fallback_context,
             "rejected_candidates": self.rejected_candidates,
             "missing_evidence": self.missing_evidence,
             "satisfied_evidence": self.satisfied_evidence,
+            "evidence_contract": self.evidence_contract,
+            "scenario_frame": self.scenario_frame,
+            "satisfied_facets": self.satisfied_facets,
+            "missing_facets": self.missing_facets,
+            "selected_evidence_ids": self.selected_evidence_ids,
+            "failure_stage": self.failure_stage,
             "candidate_counts": self.candidate_counts,
             "retrieval_diagnostics": self.retrieval_diagnostics,
             "query_plan": self.query_plan,
@@ -5408,6 +5427,8 @@ def _rag_v2_rejection_reasons(candidate: RuleSearchCandidate, query_plan: RulesQ
         _add_unique(reasons, "missing_evidence_cue")
     if candidate.retrieval_flags and not strong_answer:
         _add_unique(reasons, "retrieval_flagged")
+    for reason in _candidate_contract_rejection_reasons(candidate, query_plan, include_missing_facets=True):
+        _add_unique(reasons, reason)
     return reasons
 
 
@@ -5555,6 +5576,173 @@ def _candidate_anchor_haystack(candidate: RuleSearchCandidate) -> str:
     )
 
 
+def _query_plan_contract(query_plan: RulesQueryPlan) -> dict[str, Any]:
+    contract = getattr(query_plan, "evidence_contract", None)
+    if contract is None:
+        return {
+            "contract_id": CONTRACT_INSUFFICIENCY,
+            "required_facets": [],
+            "acceptable_source_roles": ["base", "specific", "exception", "chunk"],
+            "fallback_source_roles": ["optional", "example", "flavor"],
+            "requires_explicit_negative_evidence": False,
+            "diagnostics": {"reason": "missing_contract"},
+        }
+    return contract.to_dict()
+
+
+def _query_plan_scenario(query_plan: RulesQueryPlan) -> dict[str, Any]:
+    frame = getattr(query_plan, "scenario_frame", None)
+    return frame.to_dict() if frame is not None else {"requires_scenario": False, "confidence": 0.0}
+
+
+def _contract_required_facets(query_plan: RulesQueryPlan) -> set[str]:
+    contract = _query_plan_contract(query_plan)
+    return {str(facet) for facet in contract.get("required_facets") or [] if str(facet)}
+
+
+def _candidate_contract_facets(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan | None = None) -> set[str]:
+    facets = set(_candidate_rule_unit_facets(candidate))
+    cues = set(candidate.evidence_cues)
+    cue_facets = {
+        "definition": {"effect"},
+        "overview": {"effect"},
+        "system": {"effect"},
+        "targeting": {"target", "effect"},
+        "target": {"target"},
+        "cost": {"cost", "resource"},
+        "prerequisite": {"prerequisite", "limit"},
+        "duration": {"duration"},
+        "dice_pool": {"dice_pool"},
+        "consequence": {"consequence", "effect"},
+        "advancement": {"prerequisite", "cost", "effect"},
+        "example": set(),
+        "lore": set(),
+    }
+    for cue in cues:
+        facets.update(cue_facets.get(cue, set()))
+    haystack = _candidate_anchor_haystack(candidate)
+    if re.search(r"\b(?:system|is|are|means?|describes?|can|does|allows?|lets?|affects?|adds?|binds?|requires?|creates?)\b", haystack):
+        facets.add("effect")
+    if re.search(r"\b(?:target|targets|victim|subject|vampire|vampires|kindred|mortal|mortals|human|kine|ghoul|animal)\b", haystack):
+        facets.add("target")
+    if re.search(r"\b(?:cost|costs|rouse|hunger|blood|vitae|xp|experience|spend|spent|pay)\b", haystack):
+        facets.update({"cost", "resource"})
+    if re.search(r"\b(?:cannot|cant|can't|without|not|no|unless|except|restriction|limit|must|requires?|forbidden|prohibited)\b", haystack):
+        facets.add("limit")
+    if re.search(r"\b(?:duration|lasts?|scene|minutes?|turns?|rounds?|until)\b", haystack):
+        facets.add("duration")
+    if re.search(r"\b(?:dice\s+pool|roll|test|check|difficulty)\b", haystack):
+        facets.add("dice_pool")
+    if re.search(r"\b(?:success|failure|fails?|succeeds?|result|consequence|happens)\b", haystack):
+        facets.add("consequence")
+    if candidate.book_id and candidate.page_start:
+        facets.add("source_reference")
+    if query_plan is not None:
+        for group in query_plan.target_groups:
+            if _contains_normalized_phrase(haystack, _normalize_rule_alias(group)):
+                facets.add("target")
+        for term in ("rouse", "hunger", "blood", "vitae", "xp", "experience"):
+            if _contains_normalized_phrase(query_plan.normalized_question, term) and _contains_normalized_phrase(haystack, term):
+                facets.add("resource")
+    return facets
+
+
+def _candidate_source_roles(candidate: RuleSearchCandidate) -> set[str]:
+    roles = {
+        str(unit.get("authority_role") or "")
+        for unit in candidate.rule_units
+        if str(unit.get("authority_role") or "")
+    }
+    if not roles:
+        roles.add("chunk")
+    return roles
+
+
+def _candidate_contract_rejection_reasons(
+    candidate: RuleSearchCandidate,
+    query_plan: RulesQueryPlan,
+    *,
+    include_missing_facets: bool = False,
+) -> list[str]:
+    contract = _query_plan_contract(query_plan)
+    required = {str(facet) for facet in contract.get("required_facets") or [] if str(facet)}
+    if not required:
+        return []
+    facets = _candidate_contract_facets(candidate, query_plan)
+    roles = _candidate_source_roles(candidate)
+    acceptable_roles = {str(role) for role in contract.get("acceptable_source_roles") or [] if str(role)}
+    fallback_roles = {str(role) for role in contract.get("fallback_source_roles") or [] if str(role)}
+    reasons: list[str] = []
+    if acceptable_roles and not (roles & acceptable_roles or roles & fallback_roles):
+        _add_unique(reasons, "unacceptable_source_role")
+    if not facets.intersection(required - {"source_reference"}):
+        _add_unique(reasons, "missing_contract_evidence")
+    if include_missing_facets:
+        for facet in sorted(required - facets):
+            _add_unique(reasons, f"missing_contract_facet:{facet}")
+    if contract.get("requires_explicit_negative_evidence") and "limit" not in facets:
+        _add_unique(reasons, "missing_explicit_restriction_evidence")
+    return reasons
+
+
+def _satisfied_contract_facets(candidates: list[RuleSearchCandidate], query_plan: RulesQueryPlan) -> set[str]:
+    facets: set[str] = set()
+    for candidate in candidates:
+        facets.update(_candidate_contract_facets(candidate, query_plan))
+    return facets
+
+
+def _answerability_status(
+    *,
+    required_facets: set[str],
+    satisfied_facets: set[str],
+    missing: list[str],
+    candidate_pool: list[RuleSearchCandidate],
+) -> str:
+    if not missing and required_facets <= satisfied_facets:
+        return ANSWERABILITY_ENOUGH
+    if candidate_pool and satisfied_facets:
+        return ANSWERABILITY_PARTIAL
+    return ANSWERABILITY_INSUFFICIENT
+
+
+def _failure_stage_for_evidence_packet(
+    *,
+    query_plan: RulesQueryPlan,
+    primary_rows: list[RuleSearchCandidate],
+    candidate_pool: list[RuleSearchCandidate],
+    missing: list[str],
+    missing_facets: list[str],
+) -> str | None:
+    if not missing and not missing_facets:
+        return None
+    scenario = _query_plan_scenario(query_plan)
+    contract = _query_plan_contract(query_plan)
+    if scenario.get("requires_scenario") and not scenario.get("mechanic"):
+        return "scenario_framing"
+    diagnostics = contract.get("diagnostics") if isinstance(contract.get("diagnostics"), dict) else {}
+    if contract.get("contract_id") == CONTRACT_INSUFFICIENCY or diagnostics.get("reason"):
+        return "contract_selection"
+    if not primary_rows:
+        return "retrieval"
+    if not candidate_pool:
+        return "evidence_assembly"
+    return "answerability"
+
+
+def _evidence_result_id(result: dict[str, Any]) -> str:
+    return ":".join(
+        str(part)
+        for part in (
+            result.get("book_id"),
+            result.get("page_start"),
+            result.get("chunk_index"),
+            result.get("section_label"),
+        )
+        if part not in (None, "")
+    )
+
+
 def _build_rag_v2_evidence_packet(
     *,
     query_plan: RulesQueryPlan,
@@ -5593,6 +5781,11 @@ def _build_rag_v2_evidence_packet(
         eligible_rows = _dedupe_candidates([*bridged_anchor_rows[:1], *eligible_rows])
     candidate_pool = eligible_rows[:candidate_limit]
     satisfied = _satisfied_evidence_types(candidate_pool, strict_requirements)
+    required_facets = _contract_required_facets(query_plan)
+    satisfied_facets = _satisfied_contract_facets(candidate_pool, query_plan)
+    missing_facets = sorted(required_facets - satisfied_facets)
+    contract = _query_plan_contract(query_plan)
+    scenario = _query_plan_scenario(query_plan)
     missing = [intent for intent in strict_requirements if intent not in satisfied]
     entity_status = _entity_anchor_status(query_plan, candidate_pool)
     target_status = _target_group_status(query_plan, candidate_pool)
@@ -5602,8 +5795,19 @@ def _build_rag_v2_evidence_packet(
         missing.insert(0, "target_group")
     if query_plan.unresolved_high_value_terms:
         missing.insert(0, "unresolved_entity")
+    for facet in missing_facets:
+        _add_unique(missing, f"facet:{facet}")
+    contract_diagnostics = contract.get("diagnostics") if isinstance(contract.get("diagnostics"), dict) else {}
+    if contract.get("contract_id") == CONTRACT_INSUFFICIENCY or contract_diagnostics.get("reason"):
+        _add_unique(missing, "evidence_contract")
 
-    if (strict_requirements or entity_status["required"] or target_status["required"] or query_plan.unresolved_high_value_terms) and missing:
+    if (
+        strict_requirements
+        or required_facets
+        or entity_status["required"]
+        or target_status["required"]
+        or query_plan.unresolved_high_value_terms
+    ) and missing:
         status = "insufficient"
         selected_evidence: list[dict[str, Any]] = []
         fallback_context = [_row_to_rule_result(row) for row in (primary_rows + fallback_rows)[:RAG_V2_FALLBACK_CONTEXT_LIMIT]]
@@ -5611,6 +5815,20 @@ def _build_rag_v2_evidence_packet(
         status = "answerable"
         selected_evidence = [_row_to_rule_result(row) for row in candidate_pool]
         fallback_context = [_row_to_rule_result(row) for row in fallback_rows[:RAG_V2_FALLBACK_CONTEXT_LIMIT]]
+    answerability_status = _answerability_status(
+        required_facets=required_facets,
+        satisfied_facets=satisfied_facets,
+        missing=missing,
+        candidate_pool=candidate_pool,
+    )
+    failure_stage = _failure_stage_for_evidence_packet(
+        query_plan=query_plan,
+        primary_rows=primary_rows,
+        candidate_pool=candidate_pool,
+        missing=missing,
+        missing_facets=missing_facets,
+    )
+    selected_evidence_ids = [_evidence_result_id(item) for item in selected_evidence]
 
     selected_ids = {item["book_id"] + ":" + str(item["page_start"]) + ":" + item["section_label"] for item in selected_evidence}
     rejected = []
@@ -5622,6 +5840,8 @@ def _build_rag_v2_evidence_packet(
         reasons = [*candidate.rejection_reasons]
         if set(candidate.retrieval_channels) == {"semantic"} and semantic_quality.get("status") != "available":
             _add_unique(reasons, "degraded_semantic_only")
+        for reason in _candidate_contract_rejection_reasons(candidate, query_plan, include_missing_facets=True):
+            _add_unique(reasons, reason)
         if not reasons:
             reasons = ["lower_ranked"]
         rejected.append(_rag_v2_candidate_summary(candidate, reasons=reasons))
@@ -5635,6 +5855,18 @@ def _build_rag_v2_evidence_packet(
         "semantic_quality": semantic_quality,
         "entity_anchor_status": entity_status,
         "target_group_status": target_status,
+        "scenario_frame": scenario,
+        "evidence_contract": contract,
+        "answerability_status": answerability_status,
+        "satisfied_facets": sorted(satisfied_facets),
+        "missing_facets": missing_facets,
+        "selected_evidence_ids": selected_evidence_ids,
+        "failure_stage": failure_stage,
+        "evidence_packet_bounds": {
+            "selected_limit": candidate_limit,
+            "fallback_context_limit": RAG_V2_FALLBACK_CONTEXT_LIMIT,
+            "rejected_limit": RAG_V2_REJECTED_LIMIT,
+        },
         "intent_evidence_status": {
             "required": sorted(strict_requirements),
             "satisfied": sorted(satisfied),
@@ -5651,11 +5883,18 @@ def _build_rag_v2_evidence_packet(
     }
     return RagV2EvidencePacket(
         evidence_status=status,
+        answerability_status=answerability_status,
         selected_evidence=selected_evidence,
         fallback_context=fallback_context,
         rejected_candidates=rejected,
         missing_evidence=missing,
         satisfied_evidence=sorted(satisfied),
+        evidence_contract=contract,
+        scenario_frame=scenario,
+        satisfied_facets=sorted(satisfied_facets),
+        missing_facets=missing_facets,
+        selected_evidence_ids=selected_evidence_ids,
+        failure_stage=failure_stage,
         candidate_counts=counts,
         retrieval_diagnostics=diagnostics,
         query_plan=query_plan.to_dict(),
@@ -5710,6 +5949,8 @@ def _candidate_answerability_rejections(
     strict = _strict_evidence_requirements(query_plan.intents)
     if strict and not _candidate_satisfies_any_requirement(candidate, strict):
         _add_unique(reasons, "missing_intent_evidence")
+    for reason in _candidate_contract_rejection_reasons(candidate, query_plan):
+        _add_unique(reasons, reason)
     if candidate.section_kind in {"toc", "index", "sheet", "art", "furniture"} and not _candidate_has_strong_intent_answer(
         candidate, query_plan
     ):

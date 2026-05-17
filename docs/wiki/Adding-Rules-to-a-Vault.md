@@ -168,7 +168,9 @@ backet rules query /path/to/vault "feeding rights blood doll" \
 
 When a supplement matches the requested scope, `backet` returns supplement results as primary results and core results as fallback results. If several supplement books match with comparable precedence, `backet` asks you to narrow the query with `--book-id` or more specific `--scope-tag` filters instead of guessing.
 
-In v0.2.0, rules queries run through the RAG v2 retrieval path. Backet plans the query, resolves common rule entities and aliases, combines exact search with semantic matches when embeddings are available, reranks bounded candidates, and builds an evidence packet before answer synthesis. JSON output includes the query plan, resolved entities, unresolved terms, target groups, retrieval mode, embedding backend/model, candidate counts, evidence status, selected evidence, fallback context, and corpus blockers. If semantic retrieval or evidence checks are unavailable, Backet falls back explicitly instead of silently pretending the stronger path ran.
+In v0.3.0, rules queries run through the RAG v2 retrieval path with scenario answerability. Backet plans the query, resolves common rule entities and aliases, frames the scenario, selects an evidence contract, combines exact search with semantic matches when embeddings are available, reranks bounded candidates, and builds an evidence packet before answer synthesis. JSON output includes the query plan, scenario frame, evidence contract, resolved entities, unresolved terms, target groups, retrieval mode, embedding backend/model, candidate counts, evidence status, answerability status, selected evidence IDs, satisfied facets, missing facets, fallback context, and corpus blockers. If semantic retrieval or evidence checks are unavailable, Backet falls back explicitly instead of silently pretending the stronger path ran.
+
+The human `backet rules query` output is intentionally short. It shows the evidence status, selected contract, scenario archetype, missing facets, selected source labels, and near-miss rejection reasons without dumping full passages or raw JSON dictionaries. Use `backet --json rules query ...` when you need the full trace for debugging.
 
 The rules store also derives rule units from chunks. A rule unit is a rebuildable mechanics record that keeps source book/page/chunk links but classifies the passage as a base rule, specific power, ritual, table row, exception, example, or flavor/lore and records facets such as cost, dice pool, target, duration, prerequisite, consequence, and effect. Queries use these units as an additional bounded retrieval channel so an example or nearby lore paragraph is less likely to outrank an actual rule.
 
@@ -184,7 +186,7 @@ Inspect one unit:
 backet rules units /path/to/vault --unit-id core-v5:unit:p214:c2:ritual-ward-against-kindred:abc123def4
 ```
 
-The evidence packet is also used by the Discord bot. The bot now composes final text from validated answer claims over selected evidence, not from arbitrary fallback snippets. If the retrieved chunks are merely related but do not contain answer evidence, the bot should refuse with a missing-evidence answer instead of summarizing the wrong passage.
+The evidence packet is also used by the Discord bot. The bot now composes final text from validated answer claims over selected evidence, not from arbitrary fallback snippets. If the retrieved chunks are merely related but do not satisfy the selected contract, the bot should report the missing facets instead of summarizing the wrong passage. This matters for normal table questions such as "can this power affect that target," "what does this cost," "how do I perform this ritual," and "does this exception apply."
 
 ## Refresh semantic indexes
 

@@ -101,6 +101,7 @@ from backet.rules_output import (
     emit_rules_audit_review_card,
     emit_rules_ingest_report,
     emit_rules_index_report,
+    emit_rules_query_report,
     emit_rules_scope_audit_report,
     emit_rules_units_report,
 )
@@ -1273,7 +1274,10 @@ def rules_query_command(
             book_id=book_id,
             scope_tags=scope_tags or [],
         )
-        emit_success(state, result)
+        if state.json_output:
+            emit_success(state, result)
+            return
+        emit_rules_query_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 

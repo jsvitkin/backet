@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 from backet.rules_scope import TAXONOMY_ENTRIES, ScopeTaxonomyEntry, canonicalize_scope_tag
 
-RULES_QUERY_PLAN_SCHEMA_VERSION = 2
+RULES_QUERY_PLAN_SCHEMA_VERSION = 3
 
 INTENT_DEFINITION = "definition"
 INTENT_ADVANCEMENT = "advancement"
@@ -16,6 +16,34 @@ INTENT_TIMING = "timing"
 INTENT_DICE_POOL = "dice_pool"
 INTENT_CONSEQUENCE = "consequence"
 INTENT_BROAD_EXPLANATION = "broad_explanation"
+
+QUESTION_ARCHETYPE_DEFINITION = "definition"
+QUESTION_ARCHETYPE_PROCEDURE = "procedure"
+QUESTION_ARCHETYPE_COST = "cost"
+QUESTION_ARCHETYPE_RESOURCE_QUANTITY = "resource_quantity"
+QUESTION_ARCHETYPE_TARGETING = "targeting"
+QUESTION_ARCHETYPE_RESTRICTION = "restriction"
+QUESTION_ARCHETYPE_INTERACTION = "interaction"
+QUESTION_ARCHETYPE_EXCEPTION = "exception"
+QUESTION_ARCHETYPE_CONFLICT = "conflict"
+QUESTION_ARCHETYPE_BROAD_EXPLANATION = "broad_explanation"
+QUESTION_ARCHETYPE_INSUFFICIENCY = "insufficiency"
+
+CONTRACT_DEFINITION = "definition"
+CONTRACT_PROCEDURE = "procedure"
+CONTRACT_COST = "cost"
+CONTRACT_RESOURCE_QUANTITY = "resource_quantity"
+CONTRACT_TARGETING = "targeting"
+CONTRACT_RESTRICTION = "restriction"
+CONTRACT_INTERACTION = "interaction"
+CONTRACT_EXCEPTION = "exception"
+CONTRACT_CONFLICT = "conflict"
+CONTRACT_INSUFFICIENCY = "insufficiency"
+
+ANSWERABILITY_ENOUGH = "enough"
+ANSWERABILITY_PARTIAL = "partial"
+ANSWERABILITY_CONFLICTING = "conflicting"
+ANSWERABILITY_INSUFFICIENT = "insufficient"
 
 INTENT_ORDER = (
     INTENT_DEFINITION,
@@ -191,6 +219,160 @@ class RulesRetrievalQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class ScenarioFrame:
+    actor: str | None
+    action: str | None
+    target: str | None
+    mechanic: str | None
+    entities: list[str]
+    conditions: list[str]
+    polarity: str
+    requested_answer_shape: str
+    question_archetype: str
+    requires_scenario: bool
+    confidence: float
+    ambiguity_warnings: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "actor": self.actor,
+            "action": self.action,
+            "target": self.target,
+            "mechanic": self.mechanic,
+            "entities": self.entities,
+            "conditions": self.conditions,
+            "polarity": self.polarity,
+            "requested_answer_shape": self.requested_answer_shape,
+            "question_archetype": self.question_archetype,
+            "requires_scenario": self.requires_scenario,
+            "confidence": self.confidence,
+            "ambiguity_warnings": self.ambiguity_warnings,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceContract:
+    contract_id: str
+    archetype: str
+    required_facets: list[str]
+    acceptable_source_roles: list[str]
+    fallback_source_roles: list[str]
+    missing_facet_policy: str
+    answerability_statuses: list[str]
+    requires_explicit_negative_evidence: bool = False
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_id": self.contract_id,
+            "archetype": self.archetype,
+            "required_facets": self.required_facets,
+            "acceptable_source_roles": self.acceptable_source_roles,
+            "fallback_source_roles": self.fallback_source_roles,
+            "missing_facet_policy": self.missing_facet_policy,
+            "answerability_statuses": self.answerability_statuses,
+            "requires_explicit_negative_evidence": self.requires_explicit_negative_evidence,
+            "diagnostics": self.diagnostics,
+        }
+
+
+CONTRACT_DEFINITIONS: dict[str, EvidenceContract] = {
+    CONTRACT_DEFINITION: EvidenceContract(
+        contract_id=CONTRACT_DEFINITION,
+        archetype=QUESTION_ARCHETYPE_DEFINITION,
+        required_facets=["effect", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example"],
+        missing_facet_policy=ANSWERABILITY_PARTIAL,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_PARTIAL, ANSWERABILITY_INSUFFICIENT],
+    ),
+    CONTRACT_PROCEDURE: EvidenceContract(
+        contract_id=CONTRACT_PROCEDURE,
+        archetype=QUESTION_ARCHETYPE_PROCEDURE,
+        required_facets=["effect", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example"],
+        missing_facet_policy=ANSWERABILITY_PARTIAL,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_PARTIAL, ANSWERABILITY_INSUFFICIENT],
+    ),
+    CONTRACT_COST: EvidenceContract(
+        contract_id=CONTRACT_COST,
+        archetype=QUESTION_ARCHETYPE_COST,
+        required_facets=["cost", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example"],
+        missing_facet_policy=ANSWERABILITY_PARTIAL,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_PARTIAL, ANSWERABILITY_INSUFFICIENT],
+    ),
+    CONTRACT_RESOURCE_QUANTITY: EvidenceContract(
+        contract_id=CONTRACT_RESOURCE_QUANTITY,
+        archetype=QUESTION_ARCHETYPE_RESOURCE_QUANTITY,
+        required_facets=["resource", "cost", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example"],
+        missing_facet_policy=ANSWERABILITY_PARTIAL,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_PARTIAL, ANSWERABILITY_INSUFFICIENT],
+    ),
+    CONTRACT_TARGETING: EvidenceContract(
+        contract_id=CONTRACT_TARGETING,
+        archetype=QUESTION_ARCHETYPE_TARGETING,
+        required_facets=["target", "effect", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example"],
+        missing_facet_policy=ANSWERABILITY_PARTIAL,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_PARTIAL, ANSWERABILITY_INSUFFICIENT],
+    ),
+    CONTRACT_RESTRICTION: EvidenceContract(
+        contract_id=CONTRACT_RESTRICTION,
+        archetype=QUESTION_ARCHETYPE_RESTRICTION,
+        required_facets=["limit", "target", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional"],
+        missing_facet_policy=ANSWERABILITY_INSUFFICIENT,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_PARTIAL, ANSWERABILITY_INSUFFICIENT],
+        requires_explicit_negative_evidence=True,
+    ),
+    CONTRACT_INTERACTION: EvidenceContract(
+        contract_id=CONTRACT_INTERACTION,
+        archetype=QUESTION_ARCHETYPE_INTERACTION,
+        required_facets=["effect", "target", "limit", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example"],
+        missing_facet_policy=ANSWERABILITY_PARTIAL,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_PARTIAL, ANSWERABILITY_INSUFFICIENT],
+    ),
+    CONTRACT_EXCEPTION: EvidenceContract(
+        contract_id=CONTRACT_EXCEPTION,
+        archetype=QUESTION_ARCHETYPE_EXCEPTION,
+        required_facets=["limit", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example"],
+        missing_facet_policy=ANSWERABILITY_PARTIAL,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_PARTIAL, ANSWERABILITY_INSUFFICIENT],
+    ),
+    CONTRACT_CONFLICT: EvidenceContract(
+        contract_id=CONTRACT_CONFLICT,
+        archetype=QUESTION_ARCHETYPE_CONFLICT,
+        required_facets=["effect", "source_reference"],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example"],
+        missing_facet_policy=ANSWERABILITY_CONFLICTING,
+        answerability_statuses=[ANSWERABILITY_ENOUGH, ANSWERABILITY_CONFLICTING, ANSWERABILITY_INSUFFICIENT],
+    ),
+    CONTRACT_INSUFFICIENCY: EvidenceContract(
+        contract_id=CONTRACT_INSUFFICIENCY,
+        archetype=QUESTION_ARCHETYPE_INSUFFICIENCY,
+        required_facets=[],
+        acceptable_source_roles=["base", "specific", "exception", "chunk"],
+        fallback_source_roles=["optional", "example", "flavor"],
+        missing_facet_policy=ANSWERABILITY_INSUFFICIENT,
+        answerability_statuses=[ANSWERABILITY_INSUFFICIENT],
+        diagnostics={"reason": "contract_selection_unavailable"},
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
 class RulesQueryPlan:
     raw_question: str
     normalized_question: str
@@ -212,6 +394,8 @@ class RulesQueryPlan:
     target_groups: list[str] = field(default_factory=list)
     situational_constraints: list[str] = field(default_factory=list)
     ambiguity_warnings: list[dict[str, Any]] = field(default_factory=list)
+    scenario_frame: ScenarioFrame | None = None
+    evidence_contract: EvidenceContract | None = None
     resolution_confidence: float = 0.0
     schema_version: int = RULES_QUERY_PLAN_SCHEMA_VERSION
 
@@ -243,6 +427,8 @@ class RulesQueryPlan:
             "target_groups": self.target_groups,
             "situational_constraints": self.situational_constraints,
             "ambiguity_warnings": self.ambiguity_warnings,
+            "scenario_frame": self.scenario_frame.to_dict() if self.scenario_frame else None,
+            "evidence_contract": self.evidence_contract.to_dict() if self.evidence_contract else None,
             "resolution_confidence": self.resolution_confidence,
         }
 
@@ -292,6 +478,13 @@ def plan_rules_query(question: str) -> RulesQueryPlan:
     resolved_entities = _seed_resolved_entities(normalized)
     target_groups = _target_groups(normalized)
     situational_constraints = _situational_constraints(normalized)
+    ambiguity_warnings = _ambiguity_warnings(
+        normalized=normalized,
+        warnings=warnings,
+        canonical_terms=canonical_terms,
+        entities=entities,
+        resolved_entities=resolved_entities,
+    )
     unresolved_high_value_terms = _unresolved_high_value_terms(
         normalized=normalized,
         raw_unknown_terms=raw_unknown_terms,
@@ -318,6 +511,17 @@ def plan_rules_query(question: str) -> RulesQueryPlan:
         required_evidence=required_evidence,
         raw_unknown_terms=raw_unknown_terms,
     )
+    scenario_frame = _build_scenario_frame(
+        normalized=normalized,
+        intents=intents,
+        entities=entities,
+        canonical_terms=canonical_terms,
+        resolved_entities=resolved_entities,
+        target_groups=target_groups,
+        situational_constraints=situational_constraints,
+        ambiguity_warnings=ambiguity_warnings,
+    )
+    evidence_contract = _select_evidence_contract(intents=intents, scenario_frame=scenario_frame)
 
     return RulesQueryPlan(
         raw_question=raw_question,
@@ -339,8 +543,299 @@ def plan_rules_query(question: str) -> RulesQueryPlan:
         unresolved_high_value_terms=unresolved_high_value_terms,
         target_groups=target_groups,
         situational_constraints=situational_constraints,
-        resolution_confidence=1.0 if resolved_entities else 0.0,
+        ambiguity_warnings=ambiguity_warnings,
+        scenario_frame=scenario_frame,
+        evidence_contract=evidence_contract,
+        resolution_confidence=scenario_frame.confidence if scenario_frame else (1.0 if resolved_entities else 0.0),
     )
+
+
+def _build_scenario_frame(
+    *,
+    normalized: str,
+    intents: list[str],
+    entities: dict[str, list[str]],
+    canonical_terms: list[str],
+    resolved_entities: list[dict[str, Any]],
+    target_groups: list[str],
+    situational_constraints: list[str],
+    ambiguity_warnings: list[dict[str, Any]],
+) -> ScenarioFrame:
+    requested_shape = _requested_answer_shape(normalized, intents)
+    archetype = _question_archetype(normalized, intents, requested_shape, entities, target_groups)
+    mechanic = _scenario_mechanic(entities, canonical_terms, resolved_entities)
+    actor = _scenario_actor(normalized, entities)
+    target = target_groups[0] if target_groups else _target_from_question_text(normalized)
+    conditions = _scenario_conditions(normalized, situational_constraints)
+    requires_scenario = _scenario_required(archetype, intents)
+    confidence = _scenario_confidence(
+        mechanic=mechanic,
+        actor=actor,
+        target=target,
+        requested_shape=requested_shape,
+        requires_scenario=requires_scenario,
+        ambiguity_warnings=ambiguity_warnings,
+    )
+    return ScenarioFrame(
+        actor=actor,
+        action=_scenario_action(normalized, intents, requested_shape),
+        target=target,
+        mechanic=mechanic,
+        entities=_scenario_entities(entities, canonical_terms, resolved_entities),
+        conditions=conditions,
+        polarity=_question_polarity(normalized),
+        requested_answer_shape=requested_shape,
+        question_archetype=archetype,
+        requires_scenario=requires_scenario,
+        confidence=confidence,
+        ambiguity_warnings=ambiguity_warnings,
+    )
+
+
+def _select_evidence_contract(*, intents: list[str], scenario_frame: ScenarioFrame) -> EvidenceContract:
+    archetype = scenario_frame.question_archetype
+    mapping = {
+        QUESTION_ARCHETYPE_DEFINITION: CONTRACT_DEFINITION,
+        QUESTION_ARCHETYPE_PROCEDURE: CONTRACT_PROCEDURE,
+        QUESTION_ARCHETYPE_COST: CONTRACT_COST,
+        QUESTION_ARCHETYPE_RESOURCE_QUANTITY: CONTRACT_RESOURCE_QUANTITY,
+        QUESTION_ARCHETYPE_TARGETING: CONTRACT_TARGETING,
+        QUESTION_ARCHETYPE_RESTRICTION: CONTRACT_RESTRICTION,
+        QUESTION_ARCHETYPE_INTERACTION: CONTRACT_INTERACTION,
+        QUESTION_ARCHETYPE_EXCEPTION: CONTRACT_EXCEPTION,
+        QUESTION_ARCHETYPE_CONFLICT: CONTRACT_CONFLICT,
+        QUESTION_ARCHETYPE_BROAD_EXPLANATION: CONTRACT_PROCEDURE,
+    }
+    contract_id = mapping.get(archetype)
+    if not contract_id:
+        return CONTRACT_DEFINITIONS[CONTRACT_INSUFFICIENCY]
+    if scenario_frame.requires_scenario and not scenario_frame.mechanic and INTENT_TARGETING in intents:
+        return EvidenceContract(
+            **{
+                **CONTRACT_DEFINITIONS[CONTRACT_INSUFFICIENCY].to_dict(),
+                "diagnostics": {
+                    "reason": "missing_scenario_mechanic",
+                    "candidate_archetype": archetype,
+                },
+            }
+        )
+    return CONTRACT_DEFINITIONS[contract_id]
+
+
+def _requested_answer_shape(normalized: str, intents: list[str]) -> str:
+    if re.search(r"^(?:can|could|does|do|is|are|should|would|will|did)\b", normalized):
+        return "yes_no"
+    if INTENT_COST in intents or re.search(r"\b(?:how\s+much|cost|costs|spend|spent|pay|rouse)\b", normalized):
+        return "cost"
+    if INTENT_TIMING in intents:
+        return "timing"
+    if INTENT_DICE_POOL in intents:
+        return "dice_pool"
+    if INTENT_CONSEQUENCE in intents:
+        return "consequence"
+    if INTENT_DEFINITION in intents and not re.search(r"\bhow\s+(?:do|does|can)\b", normalized):
+        return "definition"
+    if INTENT_ADVANCEMENT in intents or re.search(r"\bhow\s+(?:do|does|can)\b", normalized):
+        return "procedure"
+    return "explanation"
+
+
+def _question_archetype(
+    normalized: str,
+    intents: list[str],
+    requested_shape: str,
+    entities: dict[str, list[str]],
+    target_groups: list[str],
+) -> str:
+    known_entities = sum(len(values) for key, values in entities.items() if key != "raw_unknown_terms")
+    if re.search(r"\b(?:conflict|contradict|which\s+rule|takes\s+precedence|override|overrides)\b", normalized):
+        return QUESTION_ARCHETYPE_CONFLICT
+    if re.search(r"\b(?:unless|except|exception|exceptions|special\s+case)\b", normalized):
+        return QUESTION_ARCHETYPE_EXCEPTION
+    if re.search(r"\b(?:cannot|cant|can't|without|not|no|prohibited|forbidden|must\s+not)\b", normalized):
+        return QUESTION_ARCHETYPE_RESTRICTION
+    if re.search(r"\b(?:interact|combine|stack|versus|vs|against|while|during|spot\s+someone\s+using)\b", normalized) and (
+        known_entities > 1 or target_groups
+    ):
+        return QUESTION_ARCHETYPE_INTERACTION
+    if INTENT_TARGETING in intents:
+        return QUESTION_ARCHETYPE_TARGETING
+    if INTENT_COST in intents and re.search(r"\b(?:how\s+much|amount|quantity|many|blood|vitae|hunger|rouse|xp|experience)\b", normalized):
+        return QUESTION_ARCHETYPE_RESOURCE_QUANTITY
+    if INTENT_COST in intents:
+        return QUESTION_ARCHETYPE_COST
+    if INTENT_CONSEQUENCE in intents:
+        return QUESTION_ARCHETYPE_PROCEDURE
+    if requested_shape in {"timing", "dice_pool", "procedure"} or INTENT_ADVANCEMENT in intents:
+        return QUESTION_ARCHETYPE_PROCEDURE
+    if INTENT_DEFINITION in intents:
+        return QUESTION_ARCHETYPE_DEFINITION
+    if INTENT_BROAD_EXPLANATION in intents:
+        return QUESTION_ARCHETYPE_BROAD_EXPLANATION
+    return QUESTION_ARCHETYPE_INSUFFICIENCY
+
+
+def _scenario_required(archetype: str, intents: list[str]) -> bool:
+    if archetype == QUESTION_ARCHETYPE_DEFINITION and intents == [INTENT_DEFINITION]:
+        return False
+    return archetype not in {QUESTION_ARCHETYPE_DEFINITION, QUESTION_ARCHETYPE_INSUFFICIENCY}
+
+
+def _scenario_mechanic(
+    entities: dict[str, list[str]],
+    canonical_terms: list[str],
+    resolved_entities: list[dict[str, Any]],
+) -> str | None:
+    for entity in resolved_entities:
+        name = str(entity.get("canonical_name") or "").strip()
+        if name:
+            return name
+    for key in ("powers", "disciplines", "mechanics", "clans"):
+        values = entities.get(key) or []
+        if values:
+            return values[0]
+    return canonical_terms[0] if canonical_terms else None
+
+
+def _scenario_entities(
+    entities: dict[str, list[str]],
+    canonical_terms: list[str],
+    resolved_entities: list[dict[str, Any]],
+) -> list[str]:
+    values: list[str] = []
+    for entity in resolved_entities:
+        _add(values, str(entity.get("canonical_name") or ""))
+    for key in ("powers", "disciplines", "mechanics", "clans", "sects"):
+        _extend(values, entities.get(key) or [])
+    _extend(values, canonical_terms)
+    return _dedupe(values)
+
+
+def _scenario_actor(normalized: str, entities: dict[str, list[str]]) -> str | None:
+    if entities.get("clans"):
+        return entities["clans"][0]
+    if _contains_phrase(normalized, "my character") or re.search(r"\b(?:i|me|my)\b", normalized):
+        return "player_character"
+    if re.search(r"\b(?:vampire|vampires|kindred)\b", normalized):
+        return "vampire"
+    if re.search(r"\b(?:mortal|human|kine)\b", normalized):
+        return "mortal"
+    return None
+
+
+def _scenario_action(normalized: str, intents: list[str], requested_shape: str) -> str | None:
+    patterns = (
+        ("learn", r"\b(?:learn|acquire|buy|purchase|gain|get)\b"),
+        ("use", r"\b(?:use|activate|employ)\b"),
+        ("target", r"\b(?:target|affect|apply)\b"),
+        ("perform", r"\b(?:perform|cast|make|do)\b"),
+        ("roll", r"\b(?:roll|test|check)\b"),
+        ("pay", r"\b(?:cost|spend|pay|rouse)\b"),
+    )
+    for action, pattern in patterns:
+        if re.search(pattern, normalized):
+            return action
+    if INTENT_DEFINITION in intents:
+        return "define"
+    if requested_shape != "explanation":
+        return requested_shape
+    return None
+
+
+def _target_from_question_text(normalized: str) -> str | None:
+    target_match = re.search(r"\b(?:on|against|to|affect)\s+(?:another|other|a|an|the)?\s*([a-z][a-z0-9 ]{2,40})$", normalized)
+    if not target_match:
+        return None
+    target = target_match.group(1).strip()
+    if not target:
+        return None
+    return " ".join(token for token in target.split() if token not in LOW_VALUE_TERMS) or target
+
+
+def _scenario_conditions(normalized: str, situational_constraints: list[str]) -> list[str]:
+    conditions = list(situational_constraints)
+    if re.search(r"\b(?:without|no|not)\b", normalized):
+        _add(conditions, "negative_condition")
+    if re.search(r"\b(?:during|while|in combat|scene)\b", normalized):
+        _add(conditions, "scene_context")
+    return _dedupe(conditions)
+
+
+def _question_polarity(normalized: str) -> str:
+    if re.search(r"\b(?:cannot|cant|can't|without|not|no|prohibited|forbidden|must\s+not)\b", normalized):
+        return "negative"
+    return "positive"
+
+
+def _scenario_confidence(
+    *,
+    mechanic: str | None,
+    actor: str | None,
+    target: str | None,
+    requested_shape: str,
+    requires_scenario: bool,
+    ambiguity_warnings: list[dict[str, Any]],
+) -> float:
+    confidence = 0.45
+    if mechanic:
+        confidence += 0.25
+    if actor:
+        confidence += 0.08
+    if target:
+        confidence += 0.08
+    if requested_shape != "explanation":
+        confidence += 0.12
+    if not requires_scenario:
+        confidence += 0.12
+    if ambiguity_warnings:
+        confidence -= 0.12
+    if requires_scenario and not mechanic:
+        confidence -= 0.18
+    return round(max(0.1, min(confidence, 0.95)), 2)
+
+
+def _ambiguity_warnings(
+    *,
+    normalized: str,
+    warnings: list[str],
+    canonical_terms: list[str],
+    entities: dict[str, list[str]],
+    resolved_entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ambiguity: list[dict[str, Any]] = []
+    for warning in warnings:
+        if "ambiguous_power_alias" in warning:
+            ambiguity.append(
+                {
+                    "code": "ambiguous_power_alias",
+                    "term": "dementation" if "dementation" in warning else None,
+                    "message": warning,
+                }
+            )
+    mechanic_like = _dedupe(
+        [
+            *entities.get("powers", []),
+            *entities.get("disciplines", []),
+            *entities.get("mechanics", []),
+            *canonical_terms,
+        ]
+    )
+    if len(mechanic_like) > 3:
+        ambiguity.append(
+            {
+                "code": "multiple_plausible_mechanics",
+                "candidates": mechanic_like[:6],
+                "message": "Multiple mechanics or entities are plausible for this question.",
+            }
+        )
+    if not mechanic_like and not resolved_entities and re.search(r"\b(?:can|could|how|use|target|affect|cost)\b", normalized):
+        ambiguity.append(
+            {
+                "code": "missing_mechanic",
+                "message": "No named mechanic or entity was detected for a scenario-shaped question.",
+            }
+        )
+    return ambiguity
 
 
 def normalize_rules_query_text(text: str) -> str:

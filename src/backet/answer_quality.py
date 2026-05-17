@@ -12,7 +12,10 @@ STAGE_NOT_APPLICABLE = "not_applicable"
 FAILURE_STAGE_ORDER = (
     "runtime",
     "planner",
+    "scenario_framing",
+    "contract_selection",
     "retrieval",
+    "evidence_assembly",
     "answerability",
     "claim_support",
     "synthesis",
@@ -27,12 +30,16 @@ CASE_FIELD_TYPES = {
     "severity": str,
     "expected_failure_stage": str,
     "expected_first_failure_stage": str,
+    "expected_scenario_archetype": str,
+    "expected_contract_id": str,
+    "expected_answerability_status": str,
     "direct_answer_contains": list,
     "required_direct_answer_contains": list,
     "direct_answer_patterns": list,
     "required_direct_answer_patterns": list,
     "required_claim_patterns": list,
     "forbidden_claim_patterns": list,
+    "expected_missing_facets": list,
 }
 STAGE_ALIASES = {
     "answer": "synthesis",
@@ -40,6 +47,10 @@ STAGE_ALIASES = {
     "claim_support": "claim_support",
     "output-policy": "output_policy",
     "output_policy": "output_policy",
+    "planning": "planner",
+    "scenario-framing": "scenario_framing",
+    "contract-selection": "contract_selection",
+    "evidence-assembly": "evidence_assembly",
 }
 
 
@@ -131,11 +142,21 @@ def summarize_answer_trace(answer: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(query_plan, Mapping):
         query_plan = {}
     answer_packet = _mapping(_mapping(trace.get("stages")).get("answer_packet"))
+    answerability = _mapping(_mapping(trace.get("stages")).get("answerability"))
     synthesis = _mapping(_mapping(trace.get("stages")).get("synthesis"))
     generation = _mapping(trace.get("generation"))
+    scenario_frame = _mapping(query_plan.get("scenario_frame")) or _mapping(answerability.get("scenario_frame"))
+    evidence_contract = _mapping(query_plan.get("evidence_contract")) or _mapping(answerability.get("evidence_contract"))
     return {
         "response_class": answer_packet.get("response_class"),
         "evidence_status": answer_packet.get("evidence_status") or retrieval.get("rules_evidence_status"),
+        "answerability_status": answerability.get("answerability_status"),
+        "failure_stage": answerability.get("failure_stage"),
+        "scenario_archetype": scenario_frame.get("question_archetype"),
+        "scenario_confidence": scenario_frame.get("confidence"),
+        "contract_id": evidence_contract.get("contract_id"),
+        "satisfied_facets": _text_list(answerability.get("satisfied_facets")),
+        "missing_facets": _text_list(answerability.get("missing_facets")),
         "answer_mode": generation.get("mode"),
         "fallback_used": generation.get("fallback_used"),
         "fallback_reason": generation.get("fallback_reason"),
@@ -176,7 +197,9 @@ def _evaluate_planner(answer: Mapping[str, Any], case: Mapping[str, Any]) -> dic
     expected_plan = _mapping(case.get("expected_plan"))
     required_terms = _text_list(case.get("required_planner_terms")) + _text_list(expected_plan.get("required_terms"))
     expected_intents = _text_list(case.get("expected_intents")) + _text_list(expected_plan.get("intents"))
-    if not required_terms and not expected_intents:
+    expected_archetype = case.get("expected_scenario_archetype") or expected_plan.get("scenario_archetype")
+    expected_contract = case.get("expected_contract_id") or expected_plan.get("contract_id")
+    if not required_terms and not expected_intents and expected_archetype is None and expected_contract is None:
         return {"status": STAGE_NOT_APPLICABLE, "failures": []}
 
     trace = _answer_trace(answer)
@@ -192,6 +215,14 @@ def _evaluate_planner(answer: Mapping[str, Any], case: Mapping[str, Any]) -> dic
     for intent in expected_intents:
         if intent not in intents:
             failures.append(f"planner missing expected intent: {intent}")
+    scenario_frame = _mapping(query_plan.get("scenario_frame"))
+    evidence_contract = _mapping(query_plan.get("evidence_contract"))
+    if expected_archetype is not None and scenario_frame.get("question_archetype") != expected_archetype:
+        failures.append(
+            f"scenario_archetype {scenario_frame.get('question_archetype')!r} did not match expected {expected_archetype!r}"
+        )
+    if expected_contract is not None and evidence_contract.get("contract_id") != expected_contract:
+        failures.append(f"contract_id {evidence_contract.get('contract_id')!r} did not match expected {expected_contract!r}")
     return _stage_result(failures)
 
 
@@ -218,10 +249,15 @@ def _evaluate_answerability(answer: Mapping[str, Any], case: Mapping[str, Any]) 
     expects_answerable = bool(case.get("expected_answerable"))
     expected_class = case.get("expected_answer_class") or case.get("expected_response_class")
     expected_evidence = case.get("expected_evidence_status")
+    expected_answerability = case.get("expected_answerability_status")
+    expected_missing_facets = _text_list(case.get("expected_missing_facets"))
     trace = _answer_trace(answer)
     answer_packet = _mapping(_mapping(trace.get("stages")).get("answer_packet"))
+    answerability = _mapping(_mapping(trace.get("stages")).get("answerability"))
     actual_class = answer_packet.get("response_class")
     actual_evidence = answer_packet.get("evidence_status")
+    actual_answerability = answerability.get("answerability_status")
+    missing_facets = set(_text_list(answerability.get("missing_facets")))
     insufficient = _looks_insufficient(str(answer.get("text") or ""))
     if expects_insufficient and not insufficient:
         failures.append("answer did not report insufficient permitted sources")
@@ -231,8 +267,16 @@ def _evaluate_answerability(answer: Mapping[str, Any], case: Mapping[str, Any]) 
         failures.append(f"response_class {actual_class!r} did not match expected {expected_class!r}")
     if expected_evidence is not None and actual_evidence != expected_evidence:
         failures.append(f"evidence_status {actual_evidence!r} did not match expected {expected_evidence!r}")
+    if expected_answerability is not None and actual_answerability != expected_answerability:
+        failures.append(
+            f"answerability_status {actual_answerability!r} did not match expected {expected_answerability!r}"
+        )
+    for facet in expected_missing_facets:
+        if facet not in missing_facets:
+            failures.append(f"missing_facets did not include expected facet: {facet}")
     if not expects_insufficient and not expects_answerable and expected_class is None and expected_evidence is None:
-        return {"status": STAGE_NOT_APPLICABLE, "failures": []}
+        if expected_answerability is None and not expected_missing_facets:
+            return {"status": STAGE_NOT_APPLICABLE, "failures": []}
     return _stage_result(failures)
 
 

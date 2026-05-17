@@ -693,6 +693,63 @@ def test_rules_rag_v2_requires_entity_and_intent_cooccurrence(runner, tmp_path: 
     assert "missing_intent_evidence" in rejected_reasons
 
 
+def test_rules_rag_v2_marks_missing_contract_facets(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "targeting-missing-facet.pdf",
+        [
+            _rule_page(
+                "Dementation System",
+                (
+                    "Dementation is a Malkavian Dominate power. "
+                    "System: the power causes confusion after the user's roll succeeds."
+                ),
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "can malkavians use dementation on other vampires", "--limit", "1"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    packet = json.loads(result.stdout)["data"]["evidence_packet"]
+    assert packet["evidence_status"] == "insufficient"
+    assert packet["answerability_status"] in {"partial", "insufficient"}
+    assert "target" in packet["missing_facets"]
+    assert packet["evidence_contract"]["contract_id"] == "targeting"
+    assert packet["scenario_frame"]["target"] == "vampire"
+    rejected_reasons = {reason for candidate in packet["rejected_candidates"] for reason in candidate["rejection_reasons"]}
+    assert "missing_contract_facet:target" in rejected_reasons
+
+
+def test_rules_query_human_output_summarizes_evidence_packet(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "human-query.pdf",
+        [
+            _rule_page(
+                "Blood Surge",
+                "Cost: One Rouse Check. System: Blood Surge adds dice to one test.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(app, ["rules", "query", str(vault), "what does blood surge cost", "--limit", "1"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "Rules query" in result.stdout
+    assert "Status:" in result.stdout
+    assert "Contract:" in result.stdout
+    assert "Sources:" in result.stdout
+    assert "{" not in result.stdout
+    assert "query_plan" not in result.stdout
+    assert "source_content_hash" not in result.stdout
+
+
 def test_rules_rag_v2_uses_bounded_neighbor_expansion_for_split_system_text(runner, tmp_path: Path) -> None:
     vault = _make_bootstrapped_vault(runner, tmp_path)
     anchor_paragraph = "Dementation is a Malkavian Dominate power. " + ("Malkavian memory " * 105)

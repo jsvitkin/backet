@@ -645,6 +645,13 @@ def _answer_packet_from_sources(question: str, sources: list[dict[str, Any]]) ->
                 "candidate_counts": evidence_packet.get("candidate_counts", {}),
                 "query_plan": evidence_packet.get("query_plan", {}),
                 "retrieval_diagnostics": evidence_packet.get("retrieval_diagnostics", {}),
+                "answerability_status": evidence_packet.get("answerability_status"),
+                "scenario_frame": evidence_packet.get("scenario_frame", {}),
+                "evidence_contract": evidence_packet.get("evidence_contract", {}),
+                "satisfied_facets": list(evidence_packet.get("satisfied_facets") or []),
+                "missing_facets": list(evidence_packet.get("missing_facets") or []),
+                "selected_evidence_ids": list(evidence_packet.get("selected_evidence_ids") or []),
+                "failure_stage": evidence_packet.get("failure_stage"),
             },
         )
     if sources:
@@ -706,7 +713,17 @@ def _answer_packet_from_dict(
         missing_evidence=[str(item) for item in payload.get("missing_evidence", []) or []],
         ambiguity=dict(payload.get("ambiguity", {}) or {}),
         answer_shape=str(payload.get("answer_shape") or _answer_shape_name(question)),
-        diagnostics={**dict(payload.get("diagnostics", {}) or {}), **(diagnostics or {})},
+        diagnostics={
+            **dict(payload.get("diagnostics", {}) or {}),
+            "answerability_status": payload.get("answerability_status"),
+            "scenario_frame": payload.get("scenario_frame", {}),
+            "evidence_contract": payload.get("evidence_contract", {}),
+            "satisfied_facets": list(payload.get("satisfied_facets") or []),
+            "missing_facets": list(payload.get("missing_facets") or []),
+            "selected_evidence_ids": list(payload.get("selected_evidence_ids") or []),
+            "failure_stage": payload.get("failure_stage"),
+            **(diagnostics or {}),
+        },
     )
 
 

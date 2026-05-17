@@ -238,6 +238,65 @@ def emit_rules_index_report(result: CommandResult) -> None:
     output.console.print(f"Stored:      {data.get('rules_db')}")
 
 
+def emit_rules_query_report(result: CommandResult) -> None:
+    data = result.data
+    packet = data.get("evidence_packet") if isinstance(data.get("evidence_packet"), dict) else {}
+    contract = packet.get("evidence_contract") if isinstance(packet.get("evidence_contract"), dict) else {}
+    frame = packet.get("scenario_frame") if isinstance(packet.get("scenario_frame"), dict) else {}
+    answerability = packet.get("answerability_status") or data.get("evidence_status") or "unknown"
+    output.console.print("[bold green]Rules query[/bold green]")
+    output.console.print("")
+    output.console.print(f"Status:      {data.get('evidence_status') or 'unknown'}")
+    output.console.print(f"Answerable:  {answerability}")
+    if contract:
+        output.console.print(f"Contract:    {contract.get('contract_id') or 'unknown'}")
+    if frame:
+        archetype = frame.get("question_archetype") or "unknown"
+        confidence = frame.get("confidence")
+        output.console.print(f"Scenario:    {archetype} ({confidence})")
+    missing_facets = _list_values(packet.get("missing_facets"))
+    if missing_facets:
+        output.console.print(f"Missing:     {', '.join(missing_facets)}")
+    satisfied_facets = _list_values(packet.get("satisfied_facets"))
+    if satisfied_facets:
+        output.console.print(f"Satisfied:   {', '.join(satisfied_facets)}")
+
+    sources = packet.get("selected_evidence") if isinstance(packet.get("selected_evidence"), list) else []
+    if not sources:
+        sources = packet.get("fallback_context") if isinstance(packet.get("fallback_context"), list) else []
+    if not sources:
+        sources = data.get("primary_results") if isinstance(data.get("primary_results"), list) else []
+    if sources:
+        output.console.print("")
+        output.console.print("Sources:")
+        for source in sources[:5]:
+            if not isinstance(source, dict):
+                continue
+            page = source.get("page_start")
+            if source.get("page_end") and source.get("page_end") != page:
+                page = f"{page}-{source.get('page_end')}"
+            reasons = ", ".join(_list_values(source.get("match_reasons"))[:3])
+            suffix = f" ({reasons})" if reasons else ""
+            output.console.print(
+                f"  - {source.get('book_title') or source.get('book_id')} p. {page}: "
+                f"{source.get('section_label')}{suffix}"
+            )
+
+    rejected = packet.get("rejected_candidates") if isinstance(packet.get("rejected_candidates"), list) else []
+    if rejected:
+        output.console.print("")
+        output.console.print("Near misses:")
+        for item in rejected[:3]:
+            if not isinstance(item, dict):
+                continue
+            reasons = ", ".join(_list_values(item.get("rejection_reasons"))[:3]) or "lower ranked"
+            output.console.print(f"  - {item.get('book_title') or item.get('book_id')} p. {item.get('page_start')}: {reasons}")
+
+    query = shlex.quote(str(data.get("query") or ""))
+    output.console.print("")
+    output.console.print(f"Run: backet --json rules query . {query}")
+
+
 def emit_rules_units_report(result: CommandResult) -> None:
     data = result.data
     unit = data.get("unit") if isinstance(data.get("unit"), dict) else None

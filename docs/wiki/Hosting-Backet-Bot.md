@@ -2,7 +2,7 @@
 
 This is the friendly path for getting your private Backet Bot into your Discord server.
 
-This page describes the v0.2.0 bot hosting model. The default path still works on a low-resource Oracle VM, but the release now makes answer quality an explicit runtime choice instead of an accidental side effect of the first free-hosting setup.
+This page describes the v0.3.0 bot hosting model. The default path still works on a low-resource Oracle VM, but the release now makes answer quality an explicit runtime choice instead of an accidental side effect of the first free-hosting setup.
 
 The main command is:
 
@@ -469,7 +469,9 @@ backet bot qa /path/to/vault \
   --report-output .backet/reports/answer-quality/fresh-run
 ```
 
-Current answers are generated from an evidence-aware packet and validated answer claims rather than raw retrieval snippets. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. If retrieved chunks are related but do not answer the question, the bot should say what evidence is missing instead of bluffing. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
+Current answers are generated from an evidence-aware packet and validated answer claims rather than raw retrieval snippets. Rules questions are framed as scenarios where possible, then matched to an evidence contract such as definition, procedure, cost, resource quantity, targeting, restriction, interaction, or exception. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. If retrieved chunks are related but do not satisfy the contract, the bot should say what facets are missing instead of bluffing. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
+
+For difficult rules failures, inspect the answer trace. The useful fields are `scenario_frame`, `evidence_contract`, `answerability_status`, `satisfied_facets`, `missing_facets`, `selected_evidence_ids`, `failure_stage`, and bounded `rejected_candidates`. A failure in `evidence_assembly` or `answerability` means the model is probably not the first thing to tune; the retrieval packet did not prove the answer yet.
 
 ## Answer Logs
 

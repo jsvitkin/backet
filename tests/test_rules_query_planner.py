@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from backet.rules_query_planner import (
+    CONTRACT_DEFINITION,
+    CONTRACT_RESTRICTION,
+    CONTRACT_TARGETING,
     INTENT_ADVANCEMENT,
     INTENT_BROAD_EXPLANATION,
     INTENT_DEFINITION,
@@ -50,11 +53,14 @@ def test_rules_query_plan_warns_for_dementation_alias() -> None:
 def test_rules_query_plan_serializes_diagnostics() -> None:
     payload = plan_rules_query("what are bloodbonds").to_dict()
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["raw_question"] == "what are bloodbonds"
     assert payload["normalized_question"] == "what are blood bonds"
     assert payload["entities"]["mechanics"] == ["blood bond"]
     assert payload["resolved_entities"][0]["canonical_name"] == "blood bond"
+    assert payload["scenario_frame"]["question_archetype"] == "definition"
+    assert payload["scenario_frame"]["requires_scenario"] is False
+    assert payload["evidence_contract"]["contract_id"] == CONTRACT_DEFINITION
     assert payload["retrieval_queries"][-1]["role"] == "raw_fallback"
 
 
@@ -98,3 +104,31 @@ def test_rules_query_plan_adds_base_mending_damage_query() -> None:
 
     assert "mending damage" in query.terms
     assert "rouse check" in query.terms
+
+
+def test_rules_query_plan_frames_targeting_contract() -> None:
+    payload = plan_rules_query("can malkavians use dementation on other vampires").to_dict()
+
+    frame = payload["scenario_frame"]
+    contract = payload["evidence_contract"]
+    assert frame["question_archetype"] == "targeting"
+    assert frame["requested_answer_shape"] == "yes_no"
+    assert frame["actor"] == "malkavian"
+    assert frame["target"] == "vampire"
+    assert frame["mechanic"] == "Dementation"
+    assert frame["requires_scenario"] is True
+    assert any(item["code"] == "ambiguous_power_alias" for item in frame["ambiguity_warnings"])
+    assert contract["contract_id"] == CONTRACT_TARGETING
+    assert {"target", "effect", "source_reference"}.issubset(set(contract["required_facets"]))
+
+
+def test_rules_query_plan_frames_negative_restriction_contract() -> None:
+    payload = plan_rules_query("can I use Dominate on another vampire without eye contact").to_dict()
+
+    frame = payload["scenario_frame"]
+    contract = payload["evidence_contract"]
+    assert frame["question_archetype"] == "restriction"
+    assert frame["polarity"] == "negative"
+    assert "eye_contact" in frame["conditions"]
+    assert contract["contract_id"] == CONTRACT_RESTRICTION
+    assert contract["requires_explicit_negative_evidence"] is True

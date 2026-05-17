@@ -883,20 +883,30 @@ def _trace_answerability(evidence_packet: Any, answer_packet: Any = None) -> dic
             return {
                 "status": "available",
                 "evidence_status": answer_packet.get("evidence_status"),
+                "answerability_status": answer_packet.get("answerability_status"),
                 "selected_evidence_count": answer_packet.get("selected_evidence_count", 0),
                 "fallback_context_count": answer_packet.get("fallback_context_count", 0),
                 "missing_evidence": list(answer_packet.get("missing_evidence") or []),
                 "satisfied_evidence": [],
+                "missing_facets": [],
+                "satisfied_facets": [],
             }
         return _unavailable_stage("not_available")
     diagnostics = evidence_packet.get("retrieval_diagnostics") if isinstance(evidence_packet.get("retrieval_diagnostics"), dict) else {}
     return {
         "status": "available",
         "evidence_status": evidence_packet.get("evidence_status"),
+        "answerability_status": evidence_packet.get("answerability_status"),
         "selected_evidence_count": len(evidence_packet.get("selected_evidence") or []),
         "fallback_context_count": len(evidence_packet.get("fallback_context") or []),
         "missing_evidence": list(evidence_packet.get("missing_evidence") or []),
         "satisfied_evidence": list(evidence_packet.get("satisfied_evidence") or []),
+        "scenario_frame": evidence_packet.get("scenario_frame"),
+        "evidence_contract": evidence_packet.get("evidence_contract"),
+        "selected_evidence_ids": list(evidence_packet.get("selected_evidence_ids") or []),
+        "missing_facets": list(evidence_packet.get("missing_facets") or []),
+        "satisfied_facets": list(evidence_packet.get("satisfied_facets") or []),
+        "failure_stage": evidence_packet.get("failure_stage"),
         "entity_anchor_status": diagnostics.get("entity_anchor_status"),
         "entity_first": diagnostics.get("entity_first"),
         "target_group_status": diagnostics.get("target_group_status"),
