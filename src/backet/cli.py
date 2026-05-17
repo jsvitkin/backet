@@ -736,6 +736,14 @@ def bot_qa_command(
         list[str] | None,
         typer.Option("--suite", help="Run only cases from this suite name. Can be repeated."),
     ] = None,
+    archetypes: Annotated[
+        list[str] | None,
+        typer.Option("--archetype", help="Run only cases with this rules-question archetype. Can be repeated."),
+    ] = None,
+    difficulties: Annotated[
+        list[str] | None,
+        typer.Option("--difficulty", help="Run only cases with this difficulty label. Can be repeated."),
+    ] = None,
     command: Annotated[
         str,
         typer.Option("--command", help="Default command route when a case does not specify one."),
@@ -771,6 +779,8 @@ def bot_qa_command(
             case_files=case_files,
             questions=questions or [],
             suites=suites or [],
+            archetypes=archetypes or [],
+            difficulties=difficulties or [],
             command=command,
             user_id=user_id,
             role_ids=role_ids or [],

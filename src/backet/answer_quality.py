@@ -24,15 +24,45 @@ FAILURE_STAGE_ORDER = (
 )
 CASE_REQUIRED_FIELDS = ("id", "question")
 CASE_SEVERITIES = ("required", "exploratory", "calibration", "private")
+CASE_ARCHETYPES = {
+    "definition",
+    "procedure",
+    "cost",
+    "resource_quantity",
+    "targeting",
+    "restriction",
+    "interaction",
+    "base-vs-specific",
+    "cross-reference",
+    "conflict",
+    "insufficiency",
+    "advancement",
+    "timing",
+    "consequence",
+    "feeding",
+    "mechanic",
+    "ambiguity",
+    "ad-hoc",
+    "uncategorized",
+}
+CASE_DIFFICULTIES = {"very-easy", "easy", "medium", "hard", "very-hard", "ungraded"}
+SOURCE_ROLES = {"base", "specific", "exception", "optional", "example", "flavor", "chunk", "unknown"}
 CASE_FIELD_TYPES = {
     "suite": str,
     "category": str,
+    "archetype": str,
     "severity": str,
     "expected_failure_stage": str,
     "expected_first_failure_stage": str,
     "expected_scenario_archetype": str,
     "expected_contract_id": str,
+    "evidence_contract_id": str,
     "expected_answerability_status": str,
+    "required_facets": list,
+    "accepted_source_roles": list,
+    "forbidden_source_roles": list,
+    "required_source_roles": list,
+    "variants": list,
     "direct_answer_contains": list,
     "required_direct_answer_contains": list,
     "direct_answer_patterns": list,
@@ -75,8 +105,12 @@ def load_answer_quality_cases(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"cases[{index}].{field} is required")
         current = dict(case)
         _validate_case_shape(current, index)
+        if "evidence_contract_id" in current and "expected_contract_id" not in current:
+            current["expected_contract_id"] = current["evidence_contract_id"]
         current.setdefault("suite", suite_name)
         current.setdefault("category", default_category)
+        current.setdefault("archetype", current.get("category") or "uncategorized")
+        current.setdefault("difficulty", "ungraded")
         if "severity" in current and current.get("severity") is not None:
             severity = str(current.get("severity"))
         elif "required" in current:
@@ -84,6 +118,10 @@ def load_answer_quality_cases(path: Path) -> list[dict[str, Any]]:
         else:
             severity = default_severity
         _validate_severity(severity, f"cases[{index}].severity")
+        _validate_archetype(str(current.get("archetype")), f"cases[{index}].archetype")
+        _validate_difficulty(str(current.get("difficulty")), f"cases[{index}].difficulty")
+        _validate_source_roles(current, index)
+        _validate_variants(current, index)
         current["severity"] = severity
         current["required"] = bool(current.get("required")) if "required" in current else severity == "required"
         if stage := current.get("expected_first_failure_stage"):
@@ -91,6 +129,7 @@ def load_answer_quality_cases(path: Path) -> list[dict[str, Any]]:
         if stage := current.get("expected_failure_stage"):
             current["expected_failure_stage"] = _normalize_stage_name(str(stage), f"cases[{index}].expected_failure_stage")
         validated.append(current)
+        validated.extend(_expand_case_variants(current, index))
     return validated
 
 
@@ -123,8 +162,11 @@ def evaluate_answer_quality_case(answer: Mapping[str, Any], case: Mapping[str, A
         "question": case.get("question"),
         "suite": case.get("suite"),
         "category": case.get("category"),
+        "archetype": case.get("archetype"),
         "severity": case.get("severity"),
         "difficulty": case.get("difficulty"),
+        "evidence_contract_id": case.get("expected_contract_id") or case.get("evidence_contract_id"),
+        "required_facets": _text_list(case.get("required_facets")),
         "required": bool(case.get("required", case.get("severity") == "required")),
         "passed": passed,
         "failure_stage": first_failed,
@@ -157,6 +199,7 @@ def summarize_answer_trace(answer: Mapping[str, Any]) -> dict[str, Any]:
         "contract_id": evidence_contract.get("contract_id"),
         "satisfied_facets": _text_list(answerability.get("satisfied_facets")),
         "missing_facets": _text_list(answerability.get("missing_facets")),
+        "selected_source_roles": _selected_source_roles(answer),
         "answer_mode": generation.get("mode"),
         "fallback_used": generation.get("fallback_used"),
         "fallback_reason": generation.get("fallback_reason"),
@@ -250,7 +293,11 @@ def _evaluate_answerability(answer: Mapping[str, Any], case: Mapping[str, Any]) 
     expected_class = case.get("expected_answer_class") or case.get("expected_response_class")
     expected_evidence = case.get("expected_evidence_status")
     expected_answerability = case.get("expected_answerability_status")
+    required_facets = _text_list(case.get("required_facets"))
     expected_missing_facets = _text_list(case.get("expected_missing_facets"))
+    accepted_source_roles = _text_list(case.get("accepted_source_roles"))
+    forbidden_source_roles = _text_list(case.get("forbidden_source_roles"))
+    required_source_roles = _text_list(case.get("required_source_roles"))
     trace = _answer_trace(answer)
     answer_packet = _mapping(_mapping(trace.get("stages")).get("answer_packet"))
     answerability = _mapping(_mapping(trace.get("stages")).get("answerability"))
@@ -258,6 +305,8 @@ def _evaluate_answerability(answer: Mapping[str, Any], case: Mapping[str, Any]) 
     actual_evidence = answer_packet.get("evidence_status")
     actual_answerability = answerability.get("answerability_status")
     missing_facets = set(_text_list(answerability.get("missing_facets")))
+    satisfied_facets = set(_text_list(answerability.get("satisfied_facets")))
+    source_roles = set(_selected_source_roles(answer))
     insufficient = _looks_insufficient(str(answer.get("text") or ""))
     if expects_insufficient and not insufficient:
         failures.append("answer did not report insufficient permitted sources")
@@ -274,8 +323,26 @@ def _evaluate_answerability(answer: Mapping[str, Any], case: Mapping[str, Any]) 
     for facet in expected_missing_facets:
         if facet not in missing_facets:
             failures.append(f"missing_facets did not include expected facet: {facet}")
+    for facet in required_facets:
+        if facet not in satisfied_facets:
+            failures.append(f"satisfied_facets did not include required facet: {facet}")
+    if accepted_source_roles and source_roles and not source_roles.intersection(set(accepted_source_roles)):
+        failures.append(f"selected source roles {sorted(source_roles)!r} did not include accepted roles {accepted_source_roles!r}")
+    for role in forbidden_source_roles:
+        if role in source_roles:
+            failures.append(f"selected source role is forbidden: {role}")
+    for role in required_source_roles:
+        if role not in source_roles:
+            failures.append(f"selected source roles did not include required role: {role}")
     if not expects_insufficient and not expects_answerable and expected_class is None and expected_evidence is None:
-        if expected_answerability is None and not expected_missing_facets:
+        if (
+            expected_answerability is None
+            and not expected_missing_facets
+            and not required_facets
+            and not accepted_source_roles
+            and not forbidden_source_roles
+            and not required_source_roles
+        ):
             return {"status": STAGE_NOT_APPLICABLE, "failures": []}
     return _stage_result(failures)
 
@@ -426,6 +493,34 @@ def _answer_sources(answer: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if not isinstance(selected, list):
         return []
     return [source for source in selected if isinstance(source, Mapping)]
+
+
+def _selected_source_roles(answer: Mapping[str, Any]) -> list[str]:
+    roles: list[str] = []
+    for source in _answer_sources(answer):
+        for role in _source_roles(source):
+            if role not in roles:
+                roles.append(role)
+    return roles
+
+
+def _source_roles(source: Mapping[str, Any]) -> list[str]:
+    roles = _text_list(source.get("rule_unit_authority_roles"))
+    units = source.get("rule_units")
+    if isinstance(units, Iterable) and not isinstance(units, (str, bytes, bytearray, Mapping)):
+        for unit in units:
+            if isinstance(unit, Mapping):
+                roles.extend(_text_list(unit.get("authority_role")))
+    if not roles:
+        cues = set(_text_list(source.get("evidence_cues")))
+        section_kind = str(source.get("section_kind") or "")
+        if "lore" in cues or section_kind == "lore":
+            roles.append("flavor")
+        elif "example" in cues:
+            roles.append("example")
+        else:
+            roles.append("chunk")
+    return _dedupe_text(role if role in SOURCE_ROLES else "unknown" for role in roles)
 
 
 def _answer_claims(answer: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -596,6 +691,63 @@ def _validate_case_shape(case: Mapping[str, Any], index: int) -> None:
             continue
         if not isinstance(value, expected_type):
             raise ValueError(f"cases[{index}].{field} must be {expected_type.__name__}")
+
+
+def _validate_archetype(archetype: str, field_path: str) -> None:
+    if archetype not in CASE_ARCHETYPES:
+        raise ValueError(f"{field_path} must be one of {', '.join(sorted(CASE_ARCHETYPES))}")
+
+
+def _validate_difficulty(difficulty: str, field_path: str) -> None:
+    if difficulty not in CASE_DIFFICULTIES:
+        raise ValueError(f"{field_path} must be one of {', '.join(sorted(CASE_DIFFICULTIES))}")
+
+
+def _validate_source_roles(case: Mapping[str, Any], index: int) -> None:
+    for field in ("accepted_source_roles", "forbidden_source_roles", "required_source_roles"):
+        for role in _text_list(case.get(field)):
+            if role not in SOURCE_ROLES:
+                raise ValueError(f"cases[{index}].{field} contains unsupported source role: {role}")
+
+
+def _validate_variants(case: Mapping[str, Any], index: int) -> None:
+    variants = case.get("variants")
+    if variants is None:
+        return
+    if not isinstance(variants, list):
+        raise ValueError(f"cases[{index}].variants must be list")
+    for variant_index, variant in enumerate(variants):
+        if not isinstance(variant, Mapping):
+            raise ValueError(f"cases[{index}].variants[{variant_index}] must be object")
+        if "question" in variant and not isinstance(variant["question"], str):
+            raise ValueError(f"cases[{index}].variants[{variant_index}].question must be str")
+        if "id" in variant and not str(variant.get("id") or "").strip():
+            raise ValueError(f"cases[{index}].variants[{variant_index}].id is required when provided")
+
+
+def _expand_case_variants(case: Mapping[str, Any], index: int) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for variant_index, variant in enumerate(case.get("variants") or [], start=1):
+        if not isinstance(variant, Mapping):
+            continue
+        variant_id = str(variant.get("id") or variant.get("seed") or variant_index)
+        current = dict(case)
+        current.pop("variants", None)
+        current.update({key: value for key, value in variant.items() if key not in {"id", "seed", "metadata"}})
+        current["id"] = f"{case.get('id')}::{variant_id}"
+        current["base_case_id"] = case.get("id")
+        current["variant_id"] = variant_id
+        current["variant_metadata"] = {
+            "case_index": index,
+            "variant_index": variant_index,
+            **(dict(variant.get("metadata", {}) or {}) if isinstance(variant.get("metadata"), Mapping) else {}),
+        }
+        if "evidence_contract_id" in current and "expected_contract_id" not in current:
+            current["expected_contract_id"] = current["evidence_contract_id"]
+        _validate_archetype(str(current.get("archetype")), f"cases[{index}].variants[{variant_index - 1}].archetype")
+        _validate_difficulty(str(current.get("difficulty")), f"cases[{index}].variants[{variant_index - 1}].difficulty")
+        expanded.append(current)
+    return expanded
 
 
 def _validate_severity(severity: str, field_path: str) -> None:

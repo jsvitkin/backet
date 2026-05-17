@@ -579,6 +579,10 @@ def retrieve_rule_sources(bundle: BotBundle, question: str, limit: int) -> list[
                 "evidence_status": evidence_packet.get("evidence_status") if evidence_packet else None,
                 "evidence_cues": source.get("evidence_cues", []),
                 "retrieval_channels": source.get("retrieval_channels", []),
+                "rule_units": source.get("rule_units", []),
+                "rule_unit_kinds": source.get("rule_unit_kinds", []),
+                "rule_unit_authority_roles": source.get("rule_unit_authority_roles", []),
+                "rule_unit_answer_facets": source.get("rule_unit_answer_facets", []),
             }
         )
     return sources
@@ -792,6 +796,9 @@ def _trace_source(source: dict[str, Any]) -> dict[str, Any]:
                 "evidence_status": source.get("evidence_status"),
                 "evidence_cues": list(source.get("evidence_cues") or []),
                 "retrieval_channels": list(source.get("retrieval_channels") or []),
+                "rule_unit_kinds": list(source.get("rule_unit_kinds") or []),
+                "rule_unit_authority_roles": list(source.get("rule_unit_authority_roles") or []),
+                "rule_unit_answer_facets": list(source.get("rule_unit_answer_facets") or []),
             }
         )
     return traced

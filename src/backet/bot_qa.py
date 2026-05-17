@@ -23,6 +23,8 @@ def run_bot_qa(
     case_files: list[Path] | None = None,
     questions: list[str] | None = None,
     suites: list[str] | None = None,
+    archetypes: list[str] | None = None,
+    difficulties: list[str] | None = None,
     command: str = "rules.ask",
     user_id: str | None = None,
     role_ids: list[str] | None = None,
@@ -33,7 +35,13 @@ def run_bot_qa(
     report_output: Path | None = None,
     force: bool = False,
 ) -> CommandResult:
-    cases = _load_cases(case_files, questions=questions or [], suites=suites or [])
+    cases = _load_cases(
+        case_files,
+        questions=questions or [],
+        suites=suites or [],
+        archetypes=archetypes or [],
+        difficulties=difficulties or [],
+    )
     resolved_target = target.expanduser().resolve()
     if bundle or _looks_like_bundle(resolved_target):
         return _run_qa_with_bundle(
@@ -47,6 +55,11 @@ def run_bot_qa(
             use_model=use_model,
             report_output=report_output,
             target_kind="bundle",
+            active_filters={
+                "suites": suites or [],
+                "archetypes": archetypes or [],
+                "difficulties": difficulties or [],
+            },
         )
 
     if not resolved_target.exists() or not resolved_target.is_dir():
@@ -72,6 +85,11 @@ def run_bot_qa(
             report_output=report_output,
             target_kind="vault",
             vault_root=resolved_target,
+            active_filters={
+                "suites": suites or [],
+                "archetypes": archetypes or [],
+                "difficulties": difficulties or [],
+            },
         )
         result.issues.extend(export.issues)
         result.data["export_summary"] = export.data.get("summary", {})
@@ -96,6 +114,7 @@ def _run_qa_with_bundle(
     use_model: bool,
     report_output: Path | None,
     target_kind: str,
+    active_filters: dict[str, list[str]],
     vault_root: Path | None = None,
 ) -> CommandResult:
     bundle_obj = BotBundle.load(bundle_root)
@@ -105,13 +124,18 @@ def _run_qa_with_bundle(
         skip_reason = _skip_reason(case)
         if skip_reason is not None:
             case_results.append(
-                {
-                    "case_id": case.get("id"),
-                    "question": case.get("question"),
-                    "suite": case.get("suite"),
-                    "category": case.get("category"),
-                    "severity": case.get("severity"),
-                    "difficulty": case.get("difficulty"),
+            {
+                "case_id": case.get("id"),
+                "base_case_id": case.get("base_case_id"),
+                "variant_id": case.get("variant_id"),
+                "variant_metadata": case.get("variant_metadata", {}),
+                "question": case.get("question"),
+                "suite": case.get("suite"),
+                "category": case.get("category"),
+                "archetype": case.get("archetype"),
+                "evidence_contract_id": case.get("expected_contract_id") or case.get("evidence_contract_id"),
+                "severity": case.get("severity"),
+                "difficulty": case.get("difficulty"),
                     "required": _case_required(case),
                     "skipped": True,
                     "skip_reason": skip_reason,
@@ -137,11 +161,19 @@ def _run_qa_with_bundle(
                 **evaluation,
                 "suite": case.get("suite"),
                 "category": case.get("category"),
+                "archetype": case.get("archetype"),
+                "evidence_contract_id": case.get("expected_contract_id") or case.get("evidence_contract_id"),
+                "required_facets": case.get("required_facets", []),
+                "answerability_status": (evaluation.get("trace_summary") or {}).get("answerability_status"),
+                "base_case_id": case.get("base_case_id"),
+                "variant_id": case.get("variant_id"),
+                "variant_metadata": case.get("variant_metadata", {}),
                 "severity": case.get("severity"),
                 "required": _case_required(case),
                 "skipped": False,
                 "command": case_command,
                 "answer": _answer_summary(answer.to_dict()),
+                "next_debug_command": _next_debug_command(target_kind, vault_root or bundle_root, case),
             }
         )
 
@@ -161,7 +193,16 @@ def _run_qa_with_bundle(
         "skipped_count": len(skipped),
         "by_suite": _summary_counts(case_results, "suite"),
         "by_category": _summary_counts(case_results, "category"),
+        "by_archetype": _summary_counts(case_results, "archetype"),
         "by_difficulty": _summary_counts(case_results, "difficulty"),
+        "by_contract": _summary_counts(case_results, "evidence_contract_id"),
+        "by_answerability": _summary_counts(case_results, "answerability_status"),
+        "by_failure_stage": _summary_counts(case_results, "failure_stage"),
+        "active_filters": {
+            "suites": active_filters.get("suites", []),
+            "archetypes": active_filters.get("archetypes", []),
+            "difficulties": active_filters.get("difficulties", []),
+        },
         "ok": not failed_required,
         "cases": case_results,
     }
@@ -175,7 +216,14 @@ def _run_qa_with_bundle(
     )
 
 
-def _load_cases(case_files: list[Path] | None, *, questions: list[str], suites: list[str]) -> list[dict[str, Any]]:
+def _load_cases(
+    case_files: list[Path] | None,
+    *,
+    questions: list[str],
+    suites: list[str],
+    archetypes: list[str],
+    difficulties: list[str],
+) -> list[dict[str, Any]]:
     paths = case_files or ([] if questions else [default_answer_quality_case_file()])
     cases: list[dict[str, Any]] = []
     for path in paths:
@@ -198,6 +246,7 @@ def _load_cases(case_files: list[Path] | None, *, questions: list[str], suites: 
                 "id": f"ad-hoc-{index}",
                 "suite": "ad-hoc",
                 "category": "ad-hoc",
+                "archetype": "ad-hoc",
                 "severity": "exploratory",
                 "required": False,
                 "difficulty": "ungraded",
@@ -208,6 +257,12 @@ def _load_cases(case_files: list[Path] | None, *, questions: list[str], suites: 
     suite_filter = {str(suite) for suite in suites if str(suite)}
     if suite_filter:
         cases = [case for case in cases if str(case.get("suite") or "") in suite_filter]
+    archetype_filter = {str(archetype) for archetype in archetypes if str(archetype)}
+    if archetype_filter:
+        cases = [case for case in cases if str(case.get("archetype") or "") in archetype_filter]
+    difficulty_filter = {str(difficulty) for difficulty in difficulties if str(difficulty)}
+    if difficulty_filter:
+        cases = [case for case in cases if str(case.get("difficulty") or "") in difficulty_filter]
     return cases
 
 
@@ -231,12 +286,34 @@ def _case_required(case: dict[str, Any]) -> bool:
     return str(case.get("severity") or "required") == "required"
 
 
+def _next_debug_command(target_kind: str, target: Path, case: dict[str, Any]) -> str:
+    parts = ["backet", "bot", "qa", str(target)]
+    if target_kind == "bundle":
+        parts.append("--bundle")
+    if case.get("suite"):
+        parts.extend(["--suite", str(case.get("suite"))])
+    if case.get("archetype"):
+        parts.extend(["--archetype", str(case.get("archetype"))])
+    if case.get("difficulty"):
+        parts.extend(["--difficulty", str(case.get("difficulty"))])
+    parts.append("--no-fail-on-failure")
+    return " ".join(_shell_quote(part) for part in parts)
+
+
+def _shell_quote(value: str) -> str:
+    text = str(value)
+    if not text or any(char.isspace() for char in text):
+        return '"' + text.replace('"', '\\"') + '"'
+    return text
+
+
 def _answer_summary(answer: dict[str, Any]) -> dict[str, Any]:
     trace = answer.get("answer_trace") if isinstance(answer.get("answer_trace"), dict) else {}
     generation = trace.get("generation") if isinstance(trace.get("generation"), dict) else {}
     retrieval = trace.get("retrieval") if isinstance(trace.get("retrieval"), dict) else {}
     stages = trace.get("stages") if isinstance(trace.get("stages"), dict) else {}
     synthesis = stages.get("synthesis") if isinstance(stages.get("synthesis"), dict) else {}
+    answerability = stages.get("answerability") if isinstance(stages.get("answerability"), dict) else {}
     return {
         "text": str(answer.get("text") or "")[:900],
         "answer_mode": generation.get("mode"),
@@ -244,6 +321,10 @@ def _answer_summary(answer: dict[str, Any]) -> dict[str, Any]:
         "synthesis_mode": synthesis.get("mode"),
         "synthesis_validation_status": synthesis.get("validation_status"),
         "answer_shape": synthesis.get("answer_shape"),
+        "answerability_status": answerability.get("answerability_status"),
+        "missing_facets": list(answerability.get("missing_facets") or []),
+        "satisfied_facets": list(answerability.get("satisfied_facets") or []),
+        "failure_stage": answerability.get("failure_stage"),
         "source_count": retrieval.get("source_count"),
         "rules_retrieval_mode": retrieval.get("rules_retrieval_mode"),
         "rules_evidence_status": retrieval.get("rules_evidence_status"),
@@ -256,6 +337,8 @@ def _answer_summary(answer: dict[str, Any]) -> dict[str, Any]:
                 "page_start": source.get("page_start"),
                 "page_end": source.get("page_end"),
                 "section_label": source.get("section_label"),
+                "rule_unit_authority_roles": source.get("rule_unit_authority_roles", []),
+                "rule_unit_answer_facets": source.get("rule_unit_answer_facets", []),
             }
             for source in list(answer.get("sources") or [])[:6]
             if isinstance(source, dict)
@@ -306,11 +389,18 @@ def _markdown_report(data: dict[str, Any]) -> str:
         "## Summary",
         "",
     ]
-    for label, payload in sorted(dict(data.get("by_suite", {}) or {}).items()):
-        if isinstance(payload, dict):
-            lines.append(
-                f"- Suite `{label}`: {payload.get('passed', 0)} passed, {payload.get('failed', 0)} failed, {payload.get('skipped', 0)} skipped"
-            )
+    for title, key in (
+        ("Suite", "by_suite"),
+        ("Archetype", "by_archetype"),
+        ("Difficulty", "by_difficulty"),
+        ("Contract", "by_contract"),
+        ("Failure stage", "by_failure_stage"),
+    ):
+        for label, payload in sorted(dict(data.get(key, {}) or {}).items()):
+            if isinstance(payload, dict):
+                lines.append(
+                    f"- {title} `{label}`: {payload.get('passed', 0)} passed, {payload.get('failed', 0)} failed, {payload.get('skipped', 0)} skipped"
+                )
     lines.extend(
         [
             "",
@@ -324,7 +414,14 @@ def _markdown_report(data: dict[str, Any]) -> str:
         status = "skipped" if case.get("skipped") else ("passed" if case.get("passed") else "failed")
         meta = ", ".join(
             str(value)
-            for value in (case.get("suite"), case.get("category"), case.get("difficulty"), case.get("severity"))
+            for value in (
+                case.get("suite"),
+                case.get("category"),
+                case.get("archetype"),
+                case.get("difficulty"),
+                case.get("evidence_contract_id"),
+                case.get("severity"),
+            )
             if value
         )
         suffix = f" ({meta})" if meta else ""
@@ -333,5 +430,11 @@ def _markdown_report(data: dict[str, Any]) -> str:
             lines.append(f"  - Stage: {case.get('failure_stage')}")
         if case.get("skip_reason"):
             lines.append(f"  - Skip: {case.get('skip_reason')}")
+        answer = case.get("answer") if isinstance(case.get("answer"), dict) else {}
+        missing_facets = ", ".join(str(item) for item in answer.get("missing_facets", []) or [])
+        if missing_facets:
+            lines.append(f"  - Missing facets: {missing_facets}")
+        if case.get("next_debug_command") and not case.get("passed"):
+            lines.append(f"  - Debug: `{case.get('next_debug_command')}`")
     lines.append("")
     return "\n".join(lines)

@@ -85,9 +85,21 @@ def test_answer_quality_case_file_validates_new_fields(tmp_path: Path) -> None:
                         "id": "direct-answer",
                         "question": "what is a rouse check?",
                         "category": "definition",
+                        "archetype": "definition",
+                        "difficulty": "very-easy",
+                        "evidence_contract_id": "definition",
+                        "required_facets": ["effect"],
+                        "accepted_source_roles": ["base", "chunk"],
                         "expected_first_failure_stage": "claim-support",
                         "required_direct_answer_patterns": ["rouse"],
                         "required_claim_patterns": ["hunger"],
+                        "variants": [
+                            {
+                                "id": "table-wording",
+                                "question": "at the table, what does a rouse check do?",
+                                "metadata": {"style": "table"},
+                            }
+                        ],
                     }
                 ],
             }
@@ -101,6 +113,33 @@ def test_answer_quality_case_file_validates_new_fields(tmp_path: Path) -> None:
     assert cases[0]["severity"] == "exploratory"
     assert cases[0]["required"] is False
     assert cases[0]["expected_failure_stage"] == "claim_support"
+    assert cases[0]["expected_contract_id"] == "definition"
+    variant = next(case for case in cases if case["id"] == "direct-answer::table-wording")
+    assert variant["base_case_id"] == "direct-answer"
+    assert variant["question"].startswith("at the table")
+    assert variant["variant_metadata"]["style"] == "table"
+
+
+def test_answer_quality_case_file_rejects_bad_archetype_fields(tmp_path: Path) -> None:
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cases": [
+                    {
+                        "id": "bad-archetype",
+                        "question": "what is a rouse check?",
+                        "archetype": "magic",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"cases\[0\]\.archetype"):
+        load_answer_quality_cases(path)
 
 
 def test_answer_quality_case_file_rejects_bad_stage(tmp_path: Path) -> None:
@@ -134,10 +173,15 @@ def test_answer_quality_evaluator_checks_planner_and_answerability() -> None:
         "expected_intents": ["targeting"],
         "expected_response_class": "answer",
         "expected_evidence_status": "answerable",
+        "expected_scenario_archetype": "targeting",
+        "expected_contract_id": "targeting",
+        "expected_answerability_status": "enough",
+        "required_facets": ["target", "effect"],
+        "accepted_source_roles": ["base", "chunk"],
     }
     answer = {
         "text": "Yes. Sources: Core Rulebook p. 258",
-        "sources": [],
+        "sources": [{"source_type": "rules", "rule_unit_authority_roles": ["base"], "content": "Dementation targets vampires."}],
         "answer_trace": {
             "stages": {
                 "query_plan": {
@@ -146,9 +190,16 @@ def test_answer_quality_evaluator_checks_planner_and_answerability() -> None:
                         "expanded_terms": ["dominate"],
                         "raw_unknown_terms": ["vampires"],
                         "intents": ["targeting"],
+                        "scenario_frame": {"question_archetype": "targeting"},
+                        "evidence_contract": {"contract_id": "targeting"},
                     }
                 },
                 "answer_packet": {"response_class": "answer", "evidence_status": "answerable"},
+                "answerability": {
+                    "answerability_status": "enough",
+                    "satisfied_facets": ["target", "effect", "source_reference"],
+                    "missing_facets": [],
+                },
             },
             "retrieval": {"source_count": 1},
             "generation": {"mode": "template"},
@@ -159,6 +210,32 @@ def test_answer_quality_evaluator_checks_planner_and_answerability() -> None:
 
     assert result["passed"] is True
     assert result["trace_summary"]["planner_terms"]
+
+
+def test_answer_quality_evaluator_rejects_forbidden_source_roles() -> None:
+    case = {
+        "id": "base-rule",
+        "question": "what is the base rule?",
+        "required_facets": ["effect"],
+        "forbidden_source_roles": ["example"],
+        "expected_answerability_status": "enough",
+    }
+    answer = {
+        "text": "The rule works this way.",
+        "sources": [{"source_type": "rules", "content": "Example only.", "rule_unit_authority_roles": ["example"]}],
+        "answer_trace": {
+            "stages": {
+                "answer_packet": {"response_class": "answer", "evidence_status": "answerable"},
+                "answerability": {"answerability_status": "enough", "satisfied_facets": ["effect"], "missing_facets": []},
+            }
+        },
+    }
+
+    result = evaluate_answer_quality_case(answer, case)
+
+    assert result["passed"] is False
+    assert result["failure_stage"] == "answerability"
+    assert "forbidden" in result["stages"]["answerability"]["failures"][0]
 
 
 def test_answer_quality_evaluator_checks_direct_answer_and_claims() -> None:

@@ -8,8 +8,18 @@
       "id": "learn-obfuscate-advancement",
       "suite": "screenshot-regression",
       "category": "advancement",
+      "archetype": "advancement",
       "description": "A question about learning Obfuscate needs advancement or acquisition evidence, not a character page that happens to contain the word learn and the discipline name.",
       "difficulty": "easy",
+      "evidence_contract_id": "procedure",
+      "required_facets": [
+        "effect"
+      ],
+      "accepted_source_roles": [
+        "base",
+        "specific",
+        "chunk"
+      ],
       "command": "rules.ask",
       "question": "how do I learn obfuscate",
       "expected_answerable": true,
@@ -39,10 +49,30 @@
       "id": "malkavian-dementation-targeting",
       "suite": "screenshot-regression",
       "category": "targeting",
+      "archetype": "targeting",
       "description": "A Malkavian Dementation targeting question needs system or applicability evidence, not a nearby clan discipline mention.",
       "difficulty": "medium",
+      "evidence_contract_id": "targeting",
+      "required_facets": [
+        "target",
+        "effect"
+      ],
+      "accepted_source_roles": [
+        "base",
+        "specific",
+        "chunk"
+      ],
       "command": "rules.ask",
       "question": "can malkavians use dementation on other vampires",
+      "variants": [
+        {
+          "id": "kindred-wording",
+          "question": "at the table, can a Malkavian use Dementation against another Kindred?",
+          "metadata": {
+            "style": "table"
+          }
+        }
+      ],
       "expected_answerable": true,
       "required_planner_terms": [
         "malkavian",
@@ -77,10 +107,24 @@
       "id": "blood-bond-definition",
       "suite": "screenshot-regression",
       "category": "definition",
+      "archetype": "definition",
       "description": "A blood bond question needs Blood Bond definition or mechanics evidence and must not answer from unrelated Second Inquisition text.",
       "difficulty": "easy",
+      "evidence_contract_id": "definition",
+      "required_facets": [
+        "effect"
+      ],
       "command": "rules.ask",
       "question": "what are blood bonds and how do I make use of it",
+      "variants": [
+        {
+          "id": "plain-definition",
+          "question": "what does a blood bond do?",
+          "metadata": {
+            "style": "plain"
+          }
+        }
+      ],
       "expected_answerable": true,
       "required_planner_terms": [
         "blood bond"
@@ -104,8 +148,13 @@
       "id": "ritual-timing",
       "suite": "screenshot-regression",
       "category": "timing",
+      "archetype": "procedure",
       "description": "Ritual timing should retrieve and answer from the general ritual procedure.",
       "difficulty": "very-easy",
+      "evidence_contract_id": "procedure",
+      "required_facets": [
+        "effect"
+      ],
       "command": "rules.ask",
       "question": "how long does it take to cast a ritual",
       "expected_answerable": true,
@@ -129,8 +178,13 @@
       "id": "messy-critical-feeding-masquerade",
       "suite": "screenshot-regression",
       "category": "consequence",
+      "archetype": "procedure",
       "description": "A messy critical question asks for consequences, not a generic dice-pool example.",
       "difficulty": "hard",
+      "evidence_contract_id": "procedure",
+      "required_facets": [
+        "effect"
+      ],
       "command": "rules.ask",
       "question": "does a messy critical on a feeding roll cause a masquerade breach",
       "expected_answerable": true,
@@ -155,9 +209,14 @@
       "id": "rouse-check-definition-fresh",
       "suite": "standard-fresh",
       "category": "definition",
+      "archetype": "definition",
       "severity": "exploratory",
       "description": "A very easy table question should explain the basic Rouse Check mechanic rather than only a Blood Potency modifier.",
       "difficulty": "very-easy",
+      "evidence_contract_id": "definition",
+      "required_facets": [
+        "effect"
+      ],
       "command": "rules.ask",
       "question": "what is a rouse check?",
       "expected_answerable": true,
@@ -175,9 +234,15 @@
       "id": "bagged-blood-slake-fresh",
       "suite": "standard-fresh",
       "category": "feeding",
+      "archetype": "resource_quantity",
       "severity": "exploratory",
       "description": "A simple feeding question should answer the bagged blood slaking rule directly.",
       "difficulty": "easy",
+      "evidence_contract_id": "resource_quantity",
+      "required_facets": [
+        "resource",
+        "cost"
+      ],
       "command": "rules.ask",
       "question": "how much hunger does bagged blood slake?",
       "expected_answerable": true,
@@ -193,9 +258,14 @@
       "id": "blush-of-life-scene-fresh",
       "suite": "standard-fresh",
       "category": "mechanic",
+      "archetype": "procedure",
       "severity": "exploratory",
       "description": "A named mechanic should resolve to Blush of Life and not to unrelated one-scene powers.",
       "difficulty": "medium",
+      "evidence_contract_id": "procedure",
+      "required_facets": [
+        "effect"
+      ],
       "command": "rules.ask",
       "question": "can my vampire use blush of life to pass as alive for a scene?",
       "expected_answerable": true,
@@ -215,9 +285,15 @@
       "id": "hunger-five-forced-rouse-fresh",
       "suite": "standard-fresh",
       "category": "consequence",
+      "archetype": "procedure",
       "severity": "exploratory",
       "description": "A hard Hunger 5 edge case should include the forced hunger frenzy test consequence.",
       "difficulty": "hard",
+      "evidence_contract_id": "procedure",
+      "required_facets": [
+        "effect",
+        "consequence"
+      ],
       "command": "rules.ask",
       "question": "what happens if I fail a rouse check while already at hunger 5?",
       "expected_answerable": true,
@@ -233,9 +309,19 @@
       "id": "dominate-eye-contact-fresh",
       "suite": "standard-fresh",
       "category": "targeting",
+      "archetype": "restriction",
       "severity": "exploratory",
       "description": "A very hard targeting question should answer base Dominate eye-contact requirements instead of a special Famulus delivery power.",
       "difficulty": "very-hard",
+      "evidence_contract_id": "restriction",
+      "required_facets": [
+        "limit",
+        "target"
+      ],
+      "forbidden_source_roles": [
+        "example",
+        "flavor"
+      ],
       "command": "rules.ask",
       "question": "can I use dominate on someone in a fight if they are not making eye contact with me?",
       "expected_answerable": true,
@@ -253,24 +339,98 @@
       ]
     },
     {
+      "id": "auspex-obfuscate-interaction-fresh",
+      "suite": "standard-fresh",
+      "category": "interaction",
+      "archetype": "interaction",
+      "severity": "exploratory",
+      "description": "An interaction question should retrieve evidence for both the detecting power and the hidden condition instead of answering from one isolated mention.",
+      "difficulty": "very-hard",
+      "evidence_contract_id": "interaction",
+      "required_facets": [
+        "effect",
+        "target"
+      ],
+      "command": "rules.ask",
+      "question": "can Auspex Sense the Unseen spot someone using Obfuscate?",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "auspex",
+        "obfuscate",
+        "sense",
+        "unseen"
+      ]
+    },
+    {
+      "id": "base-dominate-not-special-case-fresh",
+      "suite": "standard-fresh",
+      "category": "base-vs-specific",
+      "archetype": "base-vs-specific",
+      "severity": "exploratory",
+      "description": "A base rule question should not be answered only from a specific exception or delivery power.",
+      "difficulty": "hard",
+      "evidence_contract_id": "restriction",
+      "required_facets": [
+        "limit",
+        "target"
+      ],
+      "forbidden_source_roles": [
+        "example",
+        "flavor"
+      ],
+      "command": "rules.ask",
+      "question": "what is the base Dominate eye contact requirement?",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "dominate",
+        "eye contact"
+      ]
+    },
+    {
+      "id": "ritual-cross-reference-fresh",
+      "suite": "standard-fresh",
+      "category": "cross-reference",
+      "archetype": "cross-reference",
+      "severity": "exploratory",
+      "description": "A cross-reference question should retrieve procedure or source-reference evidence rather than a broad discipline mention.",
+      "difficulty": "medium",
+      "evidence_contract_id": "procedure",
+      "required_facets": [
+        "effect",
+        "source_reference"
+      ],
+      "command": "rules.ask",
+      "question": "where do ritual casting rules tell me to look for the roll?",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "ritual",
+        "roll"
+      ]
+    },
+    {
       "id": "unknown-power-insufficient-fresh",
       "suite": "standard-negative",
       "category": "insufficient",
+      "archetype": "insufficiency",
       "severity": "exploratory",
       "description": "A made-up or unavailable power name should not be answered from generic discipline text.",
       "difficulty": "medium",
+      "evidence_contract_id": "insufficiency",
       "command": "rules.ask",
       "question": "can my vampire use moonlit ledger to hide a feeding?",
       "expected_insufficient": true,
+      "expected_answerability_status": "insufficient",
       "expected_response_class": "insufficient"
     },
     {
       "id": "ambiguous-book-scope-fresh",
       "suite": "standard-negative",
       "category": "ambiguity",
+      "archetype": "conflict",
       "severity": "exploratory",
       "description": "When comparable sources conflict or scope is unclear, the bot should surface ambiguity instead of picking silently.",
       "difficulty": "hard",
+      "evidence_contract_id": "conflict",
       "command": "rules.ask",
       "question": "which version of the oblivion ceremony rule should we use?",
       "expected_response_class": "ambiguous"

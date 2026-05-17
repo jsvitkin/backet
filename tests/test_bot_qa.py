@@ -143,6 +143,80 @@ def test_bot_qa_cli_accepts_question_and_suite_filter(tmp_path: Path, monkeypatc
     assert payload["data"]["cases"][0]["suite"] == "ad-hoc"
 
 
+def test_bot_qa_human_output_groups_archetypes_without_raw_payloads(tmp_path: Path, monkeypatch, runner) -> None:
+    bundle = _fake_bundle(tmp_path)
+    case_file = _case_file(tmp_path, required_term="dementation")
+    monkeypatch.setattr(bot_qa.BotBundle, "load", lambda _path: object())
+    monkeypatch.setattr(bot_qa, "answer_bot_query", lambda *_args, **_kwargs: FakeAnswer(_answer_payload("unrelated text")))
+
+    result = runner.invoke(
+        app,
+        [
+            "bot",
+            "qa",
+            str(bundle),
+            "--bundle",
+            "--case-file",
+            str(case_file),
+            "--no-fail-on-failure",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Archetypes:" in result.stdout
+    assert "Difficulties:" in result.stdout
+    assert "debug:" in result.stdout
+    assert "{" not in result.stdout
+    assert "trace_summary" not in result.stdout
+    assert "answer_trace" not in result.stdout
+    assert "source_pdf" not in result.stdout
+
+
+def test_bot_qa_filters_by_archetype_and_difficulty(tmp_path: Path, monkeypatch) -> None:
+    bundle = _fake_bundle(tmp_path)
+    case_file = tmp_path / "archetypes.json"
+    case_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "suite": "archetype-smoke",
+                "severity": "exploratory",
+                "cases": [
+                    {
+                        "id": "definition-case",
+                        "question": "what is a rouse check?",
+                        "archetype": "definition",
+                        "difficulty": "very-easy",
+                    },
+                    {
+                        "id": "targeting-case",
+                        "question": "can I use dominate on a vampire?",
+                        "archetype": "targeting",
+                        "difficulty": "hard",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bot_qa.BotBundle, "load", lambda _path: object())
+    monkeypatch.setattr(bot_qa, "answer_bot_query", lambda *_args, **_kwargs: FakeAnswer(_answer_payload("Rouse Check rules.")))
+
+    result = bot_qa.run_bot_qa(
+        bundle,
+        case_files=[case_file],
+        archetypes=["targeting"],
+        difficulties=["hard"],
+        bundle=True,
+    )
+
+    assert result.data["case_count"] == 1
+    assert result.data["cases"][0]["case_id"] == "targeting-case"
+    assert result.data["cases"][0]["archetype"] == "targeting"
+    assert result.data["active_filters"]["archetypes"] == ["targeting"]
+    assert result.data["by_archetype"]["targeting"]["total"] == 1
+
+
 def test_packaged_standard_cases_avoid_long_source_excerpts() -> None:
     cases = bot_qa.default_answer_quality_case_file()
     payload = json.loads(cases.read_text(encoding="utf-8"))
@@ -171,6 +245,8 @@ def _case_file(tmp_path: Path, *, required_term: str) -> Path:
                     {
                         "id": "case-1",
                         "question": "what is this rule?",
+                        "archetype": "definition",
+                        "difficulty": "easy",
                         "required_planner_terms": [required_term],
                         "expected_sources": [{"source_type": "rules", "text_contains": required_term}],
                         "required_answer_contains": [required_term],

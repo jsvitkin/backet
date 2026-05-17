@@ -457,7 +457,20 @@ Run the QA workbench before redeploying answer-quality changes:
 backet bot qa /path/to/vault --case-file docs/qa/prague-rules-answer-cases.json --limit 6
 ```
 
-The QA report groups failures by runtime, planner, retrieval, answerability, claim support, synthesis, citation, or output policy so you can tell which layer needs work before changing the live Discord bot. Cases can be required, exploratory, or private calibration; only required failures block validation by default.
+The QA report groups failures by runtime, planner, scenario framing, contract selection, retrieval, evidence assembly, answerability, claim support, synthesis, citation, or output policy so you can tell which layer needs work before changing the live Discord bot. Cases can be required, exploratory, or private calibration; only required failures block validation by default.
+
+Archetype QA cases add another layer on top of fixed prompt regressions. Each case can declare an archetype (`definition`, `procedure`, `cost`, `resource_quantity`, `targeting`, `restriction`, `interaction`, `base-vs-specific`, `cross-reference`, `conflict`, or `insufficiency`), a difficulty, an expected evidence contract, required facets, accepted or forbidden source roles, and deterministic prompt variants. This lets you ask whether the bot handles a class of table questions rather than only whether one old screenshot prompt still passes.
+
+Focused archetype runs:
+
+```bash
+backet bot qa /path/to/vault \
+  --archetype targeting \
+  --difficulty hard \
+  --limit 8
+```
+
+When a case fails, human output shows the archetype, difficulty, contract, failure stage, missing facets, and a next debug command. JSON reports include the same fields plus bounded selected-source summaries and variant metadata. Source PDFs, full rulebook passages, secrets, and unbounded prompts should not appear in committed QA artifacts.
 
 For fresh local checks, run ad hoc exploratory cases without editing a committed case file:
 

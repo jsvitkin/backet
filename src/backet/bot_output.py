@@ -232,14 +232,29 @@ def emit_bot_qa_report(result: CommandResult) -> None:
     _line("Failed", data.get("failed_count"))
     _line("Skipped", data.get("skipped_count"))
     _line("Required failures", data.get("failed_required_count"))
-    summaries = dict(data.get("by_suite", {}) or {})
-    if summaries:
-        console.print("Suites:")
-        for name, payload in sorted(summaries.items()):
-            if isinstance(payload, dict):
-                console.print(
-                    f"  - {name}: {payload.get('passed', 0)} passed, {payload.get('failed', 0)} failed, {payload.get('skipped', 0)} skipped"
-                )
+    filters = dict(data.get("active_filters", {}) or {})
+    active_filters = []
+    for key in ("suites", "archetypes", "difficulties"):
+        values = [str(value) for value in filters.get(key, []) or [] if str(value)]
+        if values:
+            active_filters.append(f"{key}={', '.join(values)}")
+    if active_filters:
+        _line("Filters", "; ".join(active_filters))
+    for title, key in (
+        ("Suites", "by_suite"),
+        ("Archetypes", "by_archetype"),
+        ("Difficulties", "by_difficulty"),
+        ("Contracts", "by_contract"),
+        ("Failure stages", "by_failure_stage"),
+    ):
+        summaries = dict(data.get(key, {}) or {})
+        if summaries:
+            console.print(f"{title}:")
+            for name, payload in sorted(summaries.items()):
+                if isinstance(payload, dict):
+                    console.print(
+                        f"  - {name}: {payload.get('passed', 0)} passed, {payload.get('failed', 0)} failed, {payload.get('skipped', 0)} skipped"
+                    )
     _print_issues(result.issues)
     cases = list(data.get("cases") or [])
     if cases:
@@ -254,17 +269,27 @@ def emit_bot_qa_report(result: CommandResult) -> None:
                 line += f" [{case.get('suite')}]"
             if case.get("category"):
                 line += f" {case.get('category')}"
+            if case.get("archetype") and case.get("archetype") != case.get("category"):
+                line += f" <{case.get('archetype')}>"
             if case.get("difficulty"):
                 line += f" ({case.get('difficulty')})"
+            if case.get("evidence_contract_id"):
+                line += f" contract={case.get('evidence_contract_id')}"
             if case.get("severity") and case.get("severity") != "required":
                 line += f" {case.get('severity')}"
             if case.get("failure_stage"):
                 line += f" at {case.get('failure_stage')}"
             console.print(line)
+            answer = dict(case.get("answer", {}) or {})
+            missing_facets = ", ".join(str(item) for item in answer.get("missing_facets", []) or [])
+            if missing_facets:
+                console.print(f"    missing facets: {missing_facets}")
             if case.get("skip_reason"):
                 console.print(f"    skip: {case.get('skip_reason')}")
             if not case.get("passed"):
                 _print_case_failure(case)
+                if case.get("next_debug_command"):
+                    console.print(f"    debug: {case.get('next_debug_command')}", markup=False)
     _print_created(result.created)
     if ok:
         _print_next("Run the same QA suite after retrieval or model changes to catch regressions.")
