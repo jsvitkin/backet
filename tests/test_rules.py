@@ -725,6 +725,40 @@ def test_rules_rag_v2_marks_missing_contract_facets(runner, tmp_path: Path) -> N
     assert "missing_contract_facet:target" in rejected_reasons
 
 
+def test_rules_rag_v2_contract_selection_failure_is_insufficient(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "generic-discipline-targeting.pdf",
+        [
+            _rule_page(
+                "Discipline Powers",
+                "System: A discipline power affects a victim only as described by that specific power text.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(
+        app,
+        [
+            "--json",
+            "rules",
+            "query",
+            str(vault),
+            "if a discipline power says it affects a victim, does that automatically include other vampires",
+            "--limit",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    packet = json.loads(result.stdout)["data"]["evidence_packet"]
+    assert packet["evidence_status"] == "insufficient"
+    assert packet["answerability_status"] == "insufficient"
+    assert "evidence_contract" in packet["missing_evidence"]
+    assert packet["failure_stage"] in {"scenario_framing", "contract_selection"}
+
+
 def test_rules_query_human_output_summarizes_evidence_packet(runner, tmp_path: Path) -> None:
     vault = _make_bootstrapped_vault(runner, tmp_path)
     pdf_path = _create_text_pdf(

@@ -5699,6 +5699,8 @@ def _answerability_status(
     missing: list[str],
     candidate_pool: list[RuleSearchCandidate],
 ) -> str:
+    if "evidence_contract" in missing or (missing and not required_facets):
+        return ANSWERABILITY_INSUFFICIENT
     if not missing and required_facets <= satisfied_facets:
         return ANSWERABILITY_ENOUGH
     if candidate_pool and satisfied_facets:

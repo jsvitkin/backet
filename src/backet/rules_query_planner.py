@@ -565,7 +565,7 @@ def _build_scenario_frame(
     archetype = _question_archetype(normalized, intents, requested_shape, entities, target_groups)
     mechanic = _scenario_mechanic(entities, canonical_terms, resolved_entities)
     actor = _scenario_actor(normalized, entities)
-    target = target_groups[0] if target_groups else _target_from_question_text(normalized)
+    target = _scenario_target(normalized, actor=actor, target_groups=target_groups)
     conditions = _scenario_conditions(normalized, situational_constraints)
     requires_scenario = _scenario_required(archetype, intents)
     confidence = _scenario_confidence(
@@ -739,6 +739,52 @@ def _scenario_action(normalized: str, intents: list[str], requested_shape: str) 
         return "define"
     if requested_shape != "explanation":
         return requested_shape
+    return None
+
+
+def _scenario_target(normalized: str, *, actor: str | None, target_groups: list[str]) -> str | None:
+    explicit = _explicit_target_group(normalized)
+    if explicit:
+        return explicit
+    textual = _target_from_question_text(normalized)
+    if textual:
+        return _canonical_target_group(textual) or textual
+    for group in target_groups:
+        if actor == "player_character" and group == "vampire" and len(target_groups) > 1:
+            continue
+        if actor in {"vampire", "mortal", "ghoul", "animal"} and group == actor:
+            continue
+        return group
+    return None
+
+
+def _explicit_target_group(normalized: str) -> str | None:
+    target_patterns = (
+        r"\b(?:on|against|to|affect|affects|include|includes|target|targets)\s+(?:another|other|a|an|the|some)?\s*(vampires?|kindred|mortals?|humans?|kine|ghouls?|animals?)\b",
+        r"\b(?:with|around|near|before)\s+(?:another|other|a|an|the|some)?\s*(vampires?|kindred|mortals?|humans?|kine|ghouls?|animals?)\b",
+        r"\bpass(?:ing)?\s+as\s+(humans?|mortals?|kine)\b",
+        r"\blook(?:ing)?\s+alive\b.*\b(?:with|around|near|before)\s+(mortals?|humans?|kine)\b",
+    )
+    for pattern in target_patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            canonical = _canonical_target_group(match.group(1))
+            if canonical:
+                return canonical
+    return None
+
+
+def _canonical_target_group(value: str) -> str | None:
+    normalized = normalize_rules_query_text(value)
+    aliases = {
+        "vampire": ("vampire", "vampires", "kindred"),
+        "mortal": ("mortal", "mortals", "human", "humans", "kine"),
+        "ghoul": ("ghoul", "ghouls"),
+        "animal": ("animal", "animals"),
+    }
+    for canonical, values in aliases.items():
+        if normalized in values:
+            return canonical
     return None
 
 

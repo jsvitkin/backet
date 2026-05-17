@@ -132,3 +132,12 @@ def test_rules_query_plan_frames_negative_restriction_contract() -> None:
     assert "eye_contact" in frame["conditions"]
     assert contract["contract_id"] == CONTRACT_RESTRICTION
     assert contract["requires_explicit_negative_evidence"] is True
+
+
+def test_rules_query_plan_does_not_treat_my_vampire_as_target() -> None:
+    payload = plan_rules_query("Can my vampire use Blush of Life to look alive while speaking with mortals?").to_dict()
+
+    frame = payload["scenario_frame"]
+    assert frame["actor"] == "player_character"
+    assert frame["mechanic"] == "blush of life"
+    assert frame["target"] == "mortal"
