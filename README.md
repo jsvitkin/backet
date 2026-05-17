@@ -22,7 +22,7 @@ Run the installer from any terminal location. It does not need to run inside an 
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
@@ -30,7 +30,7 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on PATH yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
 ```
 
 After the first install, update the CLI through Backet itself:
@@ -182,10 +182,28 @@ Run `backet rules index /path/to/vault` after installing or changing the optiona
 
 `backet` stores the ingested rules corpus under `.backet/rules/` so it can travel with the vault backup.
 
-OCR fallback needs Tesseract on the local machine. On macOS:
+OCR fallback needs Tesseract on the local machine. Check system dependencies with:
+
+```bash
+backet setup check
+```
+
+Backet can install or update supported system dependencies through the local platform package manager:
+
+```bash
+backet setup install --yes
+```
+
+On macOS, Backet uses Homebrew:
 
 ```bash
 brew install tesseract
+```
+
+On Windows, Backet uses WinGet and the UB Mannheim Tesseract package:
+
+```powershell
+winget install --id UB-Mannheim.TesseractOCR --exact --source winget
 ```
 
 For higher-quality local semantic retrieval, install the optional Sentence Transformers backend into the `pipx` environment:
@@ -280,6 +298,7 @@ Confirm the local CLI is available:
 
 ```bash
 backet --help
+backet setup check
 ```
 
 Run tests:
@@ -297,13 +316,13 @@ python -m build --wheel
 Run the install smoke test against a built wheel on macOS, Linux, WSL, or Git Bash:
 
 ```bash
-scripts/smoke-install.sh dist/backet-0.1.27-py3-none-any.whl "$PWD"
+scripts/smoke-install.sh dist/backet-0.1.28-py3-none-any.whl "$PWD"
 ```
 
 On native Windows PowerShell, validate the built wheel with `pipx`:
 
 ```powershell
-py -3 -m pipx install --force .\dist\backet-0.1.27-py3-none-any.whl
+py -3 -m pipx install --force .\dist\backet-0.1.28-py3-none-any.whl
 backet --version
 py -3 -m pipx uninstall backet
 ```

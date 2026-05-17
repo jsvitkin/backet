@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import sqlite3
 import subprocess
-import sys
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +37,7 @@ from backet.rules_scope import (
     parse_manifest_pages,
     status_for_confidence,
 )
+from backet.system_dependencies import has_tesseract, tesseract_command, tesseract_install_hint
 from backet.vault import ensure_bootstrapped_vault
 
 RULES_SCHEMA_VERSION = 4
@@ -1938,7 +1937,7 @@ def _ocr_page_with_options(page, *, page_number: int, dpi: int, psm: str) -> str
         pixmap = page.get_pixmap(dpi=dpi, alpha=False)
         pixmap.save(str(image_path))
         process = subprocess.run(
-            ["tesseract", str(image_path), "stdout", "--psm", psm],
+            [tesseract_command(), str(image_path), "stdout", "--psm", psm],
             check=False,
             capture_output=True,
             text=True,
@@ -3866,26 +3865,6 @@ def timestamp_now() -> str:
 def fts_rank_to_score(rank: float) -> float:
     positive_rank = abs(rank)
     return positive_rank / (positive_rank + 8.0)
-
-
-def has_tesseract() -> bool:
-    return shutil_which("tesseract") is not None
-
-
-def shutil_which(program: str) -> str | None:
-    for path in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = Path(path) / program
-        if candidate.exists() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return None
-
-
-def tesseract_install_hint() -> str:
-    if sys.platform == "darwin":
-        return "Install Tesseract first, for example with `brew install tesseract`, then rerun the command."
-    if sys.platform.startswith("linux"):
-        return "Install Tesseract first, for example with `sudo apt-get install tesseract-ocr`, then rerun the command."
-    return "Install Tesseract on this machine and rerun the command."
 
 
 def document_page_count(pdf_path: Path) -> int:

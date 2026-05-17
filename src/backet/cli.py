@@ -97,9 +97,11 @@ from backet.rules_output import (
     emit_rules_scope_audit_report,
 )
 from backet.skills import install_skills, skills_status, update_skills
+from backet.system_dependencies import check_system_dependencies, install_system_dependencies
 from backet.vault import diagnose_vault, initialize_vault
 
 app = typer.Typer(no_args_is_help=True, help="backet CLI")
+setup_app = typer.Typer(help="Check and install local system dependencies.")
 skills_app = typer.Typer(help="Manage the backet Codex skill pack.")
 memory_app = typer.Typer(help="Manage derived vault memory capsules.")
 rules_app = typer.Typer(help="Manage ingested rulebook PDFs and raw rules retrieval.")
@@ -108,6 +110,7 @@ blueprint_app = typer.Typer(help="Manage workflow blueprint scaffolding and stat
 update_app = typer.Typer(help="Manage the installed backet CLI package.")
 bot_app = typer.Typer(invoke_without_command=True, help="Manage private Backet bot configuration and exports.")
 bot_visibility_app = typer.Typer(invoke_without_command=True, help="Inspect and update bot visibility metadata.")
+app.add_typer(setup_app, name="setup")
 app.add_typer(skills_app, name="skills")
 app.add_typer(memory_app, name="memory")
 app.add_typer(rules_app, name="rules")
@@ -291,6 +294,27 @@ def doctor_command(
     try:
         result = diagnose_vault(vault.resolve(), fix=fix)
         emit_success(state, result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@setup_app.command("check")
+def setup_check_command(ctx: typer.Context) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, check_system_dependencies())
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@setup_app.command("install")
+def setup_install_command(
+    ctx: typer.Context,
+    yes: Annotated[bool, typer.Option("--yes", help="Confirm installing or upgrading supported system dependencies.")] = False,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        emit_success(state, install_system_dependencies(yes=yes))
     except AppError as error:
         _handle_error(ctx, error)
 

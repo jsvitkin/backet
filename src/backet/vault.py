@@ -17,6 +17,7 @@ from backet.paths import (
     gitignore_path,
     index_ignore_path,
 )
+from backet.system_dependencies import issues_for_tesseract, tesseract_status
 
 GITIGNORE_CONTENT = """cache/
 temp/
@@ -177,6 +178,9 @@ def diagnose_vault(vault_root: Path, fix: bool) -> CommandResult:
                 path.mkdir(parents=True, exist_ok=True)
                 fixed.append(str(path.relative_to(vault_root)))
 
+    tesseract = tesseract_status()
+    issues.extend(issues_for_tesseract(tesseract))
+
     message = "Vault health check complete"
     if fix and fixed:
         message = "Vault health check complete with safe repairs"
@@ -189,5 +193,8 @@ def diagnose_vault(vault_root: Path, fix: bool) -> CommandResult:
             "vault": str(vault_root),
             "backet_root": str(root),
             "safe_fix_applied": bool(fixed),
+            "system_dependencies": {
+                "tesseract": tesseract.to_dict(),
+            },
         },
     )

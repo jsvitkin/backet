@@ -2,7 +2,7 @@
 
 Welcome to the `backet` wiki.
 
-Current release: `v0.1.27`.
+Current release: `v0.1.28`.
 
 Start here:
 

@@ -73,12 +73,10 @@ def export_bot_bundle(vault_root: Path, output_path: Path, force: bool = False) 
         "decisions": decisions_payload,
         "access_policy_hash": access_policy_hash,
     }
-    (output_root / "access-policy.json").write_text(
-        json.dumps(access_policy_payload, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    access_policy_path = output_root / "access-policy.json"
+    _write_json_file(access_policy_path, access_policy_payload)
     file_fingerprints = {
-        "access-policy.json": _fingerprint_file_bytes(output_root / "access-policy.json"),
+        "access-policy.json": _fingerprint_file_bytes(access_policy_path),
         "indexes/player-vault-index.sqlite3": _fingerprint_file_bytes(indexes_dir / "player-vault-index.sqlite3"),
         "indexes/storyteller-vault-index.sqlite3": _fingerprint_file_bytes(indexes_dir / "storyteller-vault-index.sqlite3"),
     }
@@ -111,7 +109,7 @@ def export_bot_bundle(vault_root: Path, output_path: Path, force: bool = False) 
         "rules": rules_meta,
         "model": _portable_model_meta(config.to_dict()),
     }
-    (output_root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    _write_json_file(output_root / "manifest.json", manifest)
 
     issues = []
     if summary["player_index_notes"] == 0:
@@ -328,6 +326,10 @@ def _append_fingerprint_issue(
 
 def _fingerprint_json(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _write_json_file(path: Path, value: Any) -> None:
+    path.write_bytes(json.dumps(value, indent=2, sort_keys=True).encode("utf-8"))
 
 
 def _fingerprint_file_bytes(path: Path) -> str:

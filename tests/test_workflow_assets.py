@@ -117,6 +117,19 @@ def test_private_discord_bot_docs_cover_setup_and_troubleshooting() -> None:
     assert "Incompatible bundle" in docs
 
 
+def test_rule_ingestion_docs_cover_system_dependency_setup() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    installation = Path("docs/wiki/Installation.md").read_text(encoding="utf-8")
+    rules_guide = Path("docs/wiki/Adding-Rules-to-a-Vault.md").read_text(encoding="utf-8")
+
+    combined = "\n".join([readme, installation, rules_guide])
+    assert "backet setup check" in combined
+    assert "backet setup install --yes" in combined
+    assert "UB-Mannheim.TesseractOCR" in combined
+    assert "brew install tesseract" in combined
+    assert "OCR fallback is required for this PDF" in rules_guide
+
+
 def _ingest_book(
     runner,
     vault: Path,

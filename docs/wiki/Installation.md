@@ -20,12 +20,12 @@ You need:
 Optional:
 
 - Git, if you install from source or work on the project locally.
-- Tesseract, if you want OCR fallback for scanned or image-only rulebook PDFs.
+- Tesseract, if you want OCR fallback for scanned or image-only rulebook PDFs. Backet can check and install this with `backet setup`.
 - Sentence Transformers, if you want higher-quality local semantic retrieval.
 
 ## Current Release
 
-The current release is `v0.1.27`.
+The current release is `v0.1.28`.
 
 Use the release installer for normal macOS/Linux installs. Use direct `pipx` installs on Windows or when you already have `pipx` set up. Use the source install path only when you want the current `main` branch instead of the latest release.
 
@@ -57,7 +57,7 @@ bash install-backet.sh
 To install the current release explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash -s -- --version 0.1.27
+curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash -s -- --version 0.1.28
 ```
 
 If your default `python3` is not Python 3.11 or newer, point the installer at the right interpreter:
@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/instal
 On any platform with `pipx` already available, install the release wheel directly:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
 ```
 
 On Windows PowerShell, use the Python launcher if `pipx` is not on `PATH` yet:
@@ -79,13 +79,13 @@ On Windows PowerShell, use the Python launcher if `pipx` is not on `PATH` yet:
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
 ```
 
 If you need to choose a specific Python interpreter for `pipx`:
 
 ```bash
-pipx install --python /path/to/python3.11 https://github.com/jsvitkin/backet/releases/download/v0.1.27/backet-0.1.27-py3-none-any.whl
+pipx install --python /path/to/python3.11 https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
 ```
 
 After installation, open a new terminal if `backet` is not found immediately.
@@ -97,6 +97,7 @@ Check the CLI:
 ```bash
 backet --version
 backet --help
+backet setup check
 ```
 
 ## Install From Source
@@ -193,7 +194,19 @@ backet doctor --fix /path/to/vault
 
 Rulebook PDF ingestion can read normal embedded PDF text directly. Scanned or image-only PDFs may need OCR.
 
-Install Tesseract on macOS:
+Check whether OCR support is ready:
+
+```bash
+backet setup check
+```
+
+Install or update supported system dependencies through Backet:
+
+```bash
+backet setup install --yes
+```
+
+On macOS, Backet uses Homebrew:
 
 ```bash
 brew install tesseract
@@ -205,7 +218,13 @@ Install Tesseract on Debian or Ubuntu:
 sudo apt-get install tesseract-ocr
 ```
 
-On Windows, install Tesseract and make sure the `tesseract` command is available on `PATH`.
+On Windows, Backet uses WinGet and the UB Mannheim Tesseract package:
+
+```powershell
+winget install --id UB-Mannheim.TesseractOCR --exact --source winget
+```
+
+After installing Tesseract on Windows, open a new terminal if PATH changes are not visible yet. Backet also checks the normal `C:\Program Files\Tesseract-OCR\tesseract.exe` install location.
 
 ## Optional: Better Local Semantic Retrieval
 
@@ -343,4 +362,13 @@ Run:
 
 ```bash
 backet skills install
+```
+
+`OCR fallback is required for this PDF, but Tesseract is not available.`
+
+Run:
+
+```bash
+backet setup check
+backet setup install --yes
 ```

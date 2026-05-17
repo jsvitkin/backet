@@ -261,9 +261,9 @@ def _relative_to_vault(path_value: Any, vault: str) -> str | None:
         return None
     path = Path(str(path_value))
     try:
-        return str(path.relative_to(Path(vault)))
+        return path.relative_to(Path(vault)).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def _format_vault_placeholder(value: str, vault_arg: str) -> str:

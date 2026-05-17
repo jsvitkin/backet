@@ -967,8 +967,8 @@ def setup_doctor(vault_root: Path) -> CommandResult:
         "ok": not any(issue.severity == "error" for issue in issues),
         "workflow_file": workflow.as_posix(),
         "missing_deploy_assets": missing_assets,
-        "runtime_config_path": str(bot_config_path(vault_root).relative_to(vault_root)),
-        "setup_state_path": str(bot_setup_path(vault_root).relative_to(vault_root)),
+        "runtime_config_path": bot_config_path(vault_root).relative_to(vault_root).as_posix(),
+        "setup_state_path": bot_setup_path(vault_root).relative_to(vault_root).as_posix(),
     }
     return CommandResult(message="Backet bot setup doctor complete", issues=issues, data=data)
 
@@ -1074,10 +1074,8 @@ def _prerequisites_phase(vault_root: Path, state: dict[str, Any], repo_root: Pat
         warnings.append("The private bot deployment workflow is not present in this repository checkout.")
     if missing_files:
         next_actions.append("Run `backet bot setup files <vault>` from the private vault repository to install deploy files.")
-    if shutil.which("gh") is None:
-        next_actions.append("Install GitHub CLI so Backet can configure repository secrets and dispatch deployment.")
-    if shutil.which("ssh") is None:
-        next_actions.append("Install OpenSSH client so Backet can validate the Oracle VM.")
+    gh_path = shutil.which("gh")
+    ssh_path = shutil.which("ssh")
     status = PHASE_DONE if not next_actions else PHASE_NEEDS_ACTION
     result = SetupPhaseResult(
         phase="prerequisites",
@@ -1088,8 +1086,8 @@ def _prerequisites_phase(vault_root: Path, state: dict[str, Any], repo_root: Pat
         data={
             "vault": str(vault_root),
             "repo_root": str(resolved_repo_root),
-            "gh_available": shutil.which("gh") is not None,
-            "ssh_available": shutil.which("ssh") is not None,
+            "gh_available": gh_path is not None,
+            "ssh_available": ssh_path is not None,
             "workflow_present": (resolved_repo_root / ".github/workflows/deploy-backet-bot.yml").exists(),
             "missing_deploy_files": missing_files,
         },
@@ -1174,8 +1172,8 @@ def _setup_status_payload(vault_root: Path, state: dict[str, Any]) -> dict[str, 
     safe_state = Redactor().data(state)
     return {
         "vault": str(vault_root),
-        "setup_state_path": str(bot_setup_path(vault_root)),
-        "runtime_config_path": str(bot_config_path(vault_root)),
+        "setup_state_path": bot_setup_path(vault_root).as_posix(),
+        "runtime_config_path": bot_config_path(vault_root).as_posix(),
         "schema_version": safe_state.get("schema_version"),
         "phases": phase_payload,
         "completed_phases": dict(safe_state.get("setup", {}) or {}).get("completed_phases", []),

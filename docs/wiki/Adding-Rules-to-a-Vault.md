@@ -48,6 +48,18 @@ PDF text extraction uses PyMuPDF, which is installed with `backet`.
 
 If a PDF is image-only or has poor embedded text, `backet` may need OCR. OCR fallback requires Tesseract on the local machine.
 
+Check the local system dependency state with:
+
+```bash
+backet setup check
+```
+
+Install or update supported system dependencies with:
+
+```bash
+backet setup install --yes
+```
+
 On macOS:
 
 ```bash
@@ -60,7 +72,11 @@ On Debian or Ubuntu Linux:
 sudo apt-get install tesseract-ocr
 ```
 
-On Windows, install Tesseract and make sure the `tesseract` command is available on `PATH`.
+On Windows, Backet uses WinGet and the UB Mannheim Tesseract package. If PATH has not refreshed yet, Backet also checks the normal `C:\Program Files\Tesseract-OCR\tesseract.exe` install location.
+
+```powershell
+winget install --id UB-Mannheim.TesseractOCR --exact --source winget
+```
 
 ## Ingest a core rulebook
 
@@ -257,7 +273,7 @@ Check the PDF path. The source PDF must be readable from the machine running `ba
 
 `OCR fallback is required for this PDF, but Tesseract is not available.`
 
-Install Tesseract, then rerun the ingestion or repair command.
+Run `backet setup check` to confirm the missing dependency. On supported platforms, run `backet setup install --yes`, then open a new terminal if the installer changed `PATH` and rerun the ingestion or repair command.
 
 `Multiple supplement-specific rulebooks match this query with comparable precedence.`
 

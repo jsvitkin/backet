@@ -62,7 +62,8 @@ def test_doctor_reports_missing_safe_state_and_can_fix_it(runner, tmp_path: Path
     issue_codes = {issue["code"] for issue in dry_payload["issues"]}
 
     assert dry_run.exit_code == 0
-    assert issue_codes == {"missing_rebuildable_dir", "missing_gitignore", "missing_index_ignore"}
+    assert {"missing_rebuildable_dir", "missing_gitignore", "missing_index_ignore"}.issubset(issue_codes)
+    assert "tesseract" in dry_payload["data"]["system_dependencies"]
 
     fixed_run = runner.invoke(app, ["--json", "doctor", "--fix", str(vault)])
     fixed_payload = json.loads(fixed_run.stdout)
