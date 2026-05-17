@@ -109,3 +109,19 @@ def test_runtime_doctor_rejects_third_party_hosted_model_apis() -> None:
     assert health["ok"] is False
     assert health["services"]["embedding"]["status"] == "unsupported"
     assert issues[0].code == "bot_runtime_service_embedding_unsupported"
+
+
+def test_runtime_profile_imports_ollama_answer_mode_as_answer_service() -> None:
+    profile = parse_runtime_profile_config(
+        {
+            "runtime_profile": "rag-standard",
+            "answer_mode": "ollama-local",
+            "model": {"model": "llama3.2:3b", "endpoint": "http://127.0.0.1:11434"},
+            "model_services": {
+                "embedding": {"provider": "ollama", "endpoint": "http://127.0.0.1:11434", "model": "nomic-embed-text"}
+            },
+        }
+    )
+
+    assert profile.services["answer"].provider == "ollama"
+    assert profile.services["answer"].model == "llama3.2:3b"

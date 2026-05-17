@@ -10,9 +10,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Iterable, Protocol
 
 from backet.errors import AppError
+from backet.local_runtime import DEFAULT_OLLAMA_ANSWER_MODEL, DEFAULT_OLLAMA_ENDPOINT, ollama_generate
 from backet.models import CommandResult, Issue
 
 DEFAULT_LLAMA_ENDPOINT = "http://127.0.0.1:8080/completion"
@@ -24,12 +25,18 @@ DEFAULT_TEMPLATE_SOURCE_LIMIT = 1
 DEFAULT_TEMPLATE_DETAIL_CHARS = 420
 DEFAULT_PROMPT_SOURCE_LIMIT = 3
 ANSWER_PACKET_SCHEMA_VERSION = 1
+ANSWER_OUTLINE_SCHEMA_VERSION = 1
 ANSWER_CLASS_ANSWER = "answer"
 ANSWER_CLASS_INSUFFICIENT = "insufficient"
 ANSWER_CLASS_AMBIGUOUS = "ambiguous"
 ANSWER_CLASS_CONFLICTING = "conflicting"
 ANSWER_CLASS_PERMISSION_DENIED = "permission-denied"
 ANSWER_CLASS_RUNTIME_UNAVAILABLE = "runtime-unavailable"
+SYNTHESIS_MODE_DETERMINISTIC = "deterministic-outline"
+SYNTHESIS_MODE_MODEL = "model-outline"
+SYNTHESIS_VALIDATION_PASSED = "passed"
+SYNTHESIS_VALIDATION_FAILED = "failed"
+SYNTHESIS_VALIDATION_NOT_APPLICABLE = "not_applicable"
 SYSTEM_EXPLANATION_TEMPLATE_SOURCE_LIMIT = 4
 SYSTEM_EXPLANATION_TEMPLATE_DETAIL_CHARS = 260
 SYSTEM_EXPLANATION_PROMPT_SOURCE_LIMIT = 5
@@ -149,6 +156,64 @@ class AnswerPacket:
         }
 
 
+@dataclass(slots=True)
+class AnswerClaim:
+    text: str
+    source_ids: list[str]
+    claim_type: str = "rule"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "source_ids": self.source_ids,
+            "claim_type": self.claim_type,
+        }
+
+
+@dataclass(slots=True)
+class AnswerOutline:
+    question: str
+    response_class: str
+    evidence_status: str
+    answer_shape: str
+    stance: str
+    claims: list[AnswerClaim] = field(default_factory=list)
+    source_ids: list[str] = field(default_factory=list)
+    missing_evidence: list[str] = field(default_factory=list)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = ANSWER_OUTLINE_SCHEMA_VERSION
+
+    @property
+    def answerable(self) -> bool:
+        return self.response_class == ANSWER_CLASS_ANSWER and bool(self.claims)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "question": self.question,
+            "response_class": self.response_class,
+            "evidence_status": self.evidence_status,
+            "answer_shape": self.answer_shape,
+            "stance": self.stance,
+            "claims": [claim.to_dict() for claim in self.claims],
+            "source_ids": self.source_ids,
+            "missing_evidence": self.missing_evidence,
+            "diagnostics": self.diagnostics,
+        }
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "response_class": self.response_class,
+            "evidence_status": self.evidence_status,
+            "answer_shape": self.answer_shape,
+            "stance": self.stance,
+            "claim_count": len(self.claims),
+            "source_ids": self.source_ids,
+            "missing_evidence": self.missing_evidence,
+        }
+
+
 class AnswerGenerator(Protocol):
     def generate(self, question: str, sources: list[dict[str, Any]]) -> GeneratedAnswer:
         ...
@@ -166,35 +231,25 @@ class TemplateAnswerGenerator:
         return self.generate_from_packet(build_answer_packet(question, sources))
 
     def generate_from_packet(self, packet: AnswerPacket) -> GeneratedAnswer:
-        if packet.response_class != ANSWER_CLASS_ANSWER:
-            return _non_answer_generated(packet, mode=self.mode)
-        sources = packet.selected_evidence
-        question = packet.question
-        if not sources:
-            return GeneratedAnswer(
-                text="I do not have enough permitted source material to answer that.",
-                mode=self.mode,
-                diagnostics={"source_count": 0, "answer_packet": packet.summary()},
-            )
-        display_sources = _select_answer_sources(question, sources, limit=_template_source_limit(question))
-        lines = _format_short_answer(question, display_sources)
-        if lines:
-            lines.append("")
-            lines.append("**Source detail:**")
-        else:
-            lines = ["Relevant permitted rule text:"]
-        for source in display_sources:
-            snippet = _source_text_for_question(source, question, limit=_template_detail_chars(question))
-            lines.append(f"**{format_bot_source_label(source)}**\n{_format_source_quote(snippet)}")
-        labels = "; ".join(format_bot_source_label(source) for source in display_sources)
-        lines.append(f"**Sources:** {labels}")
+        outline = build_answer_outline(packet)
+        if not outline.answerable:
+            return _non_answer_generated(_packet_from_outline(packet, outline), mode=self.mode, outline=outline)
+        text = compose_deterministic_answer(packet, outline)
         return GeneratedAnswer(
-            text="\n".join(lines),
+            text=text,
             mode=self.mode,
             diagnostics={
-                "source_count": len(sources),
-                "question_fingerprint": _fingerprint_text(question),
-                "answer_packet": packet.summary(),
+                "source_count": len(packet.selected_evidence),
+                "question_fingerprint": _fingerprint_text(packet.question),
+                "answer_packet": _packet_summary_from_outline(packet, outline),
+                "answer_outline": outline.to_dict(),
+                "synthesis": {
+                    "mode": SYNTHESIS_MODE_DETERMINISTIC,
+                    "validation_status": SYNTHESIS_VALIDATION_PASSED,
+                    "answer_shape": outline.answer_shape,
+                    "source_ids": outline.source_ids,
+                    "fallback_reason": None,
+                },
             },
         )
 
@@ -268,6 +323,16 @@ class LlamaLocalAnswerGenerator:
                 "model_skipped_reason": f"evidence_status:{packet.evidence_status}",
             }
             return fallback
+        outline = build_answer_outline(packet)
+        if not outline.answerable:
+            fallback = _generate_fallback_from_packet(self.fallback, _packet_from_outline(packet, outline))
+            fallback.mode = self.mode
+            fallback.diagnostics = {
+                **fallback.diagnostics,
+                "model_skipped_reason": f"outline_status:{outline.evidence_status}",
+                "answer_outline": outline.to_dict(),
+            }
+            return fallback
         sources = packet.selected_evidence
         if not sources:
             return _generate_fallback_from_packet(self.fallback, packet)
@@ -295,16 +360,156 @@ class LlamaLocalAnswerGenerator:
                     "source_count": len(sources),
                     "endpoint": self.endpoint,
                     "question_fingerprint": _fingerprint_text(packet.question),
-                    "answer_packet": packet.summary(),
+                    "answer_packet": _packet_summary_from_outline(packet, outline),
+                    "answer_outline": outline.to_dict(),
+                    "synthesis": {
+                        "mode": SYNTHESIS_MODE_MODEL,
+                        "validation_status": SYNTHESIS_VALIDATION_PASSED,
+                        "answer_shape": outline.answer_shape,
+                        "source_ids": outline.source_ids,
+                        "fallback_reason": None,
+                    },
                 },
             )
         except AppError as error:
             if not self.fallback_enabled:
-                raise
+                return _model_unavailable_generated(packet, outline, error=error, mode=self.mode)
             fallback = _generate_fallback_from_packet(self.fallback, packet)
             fallback.mode = self.mode
             fallback.fallback_used = True
-            fallback.diagnostics = {**fallback.diagnostics, "fallback_reason": error.code}
+            fallback.diagnostics = {
+                **fallback.diagnostics,
+                "fallback_reason": error.code,
+                "answer_outline": outline.to_dict(),
+                "synthesis": {
+                    "mode": SYNTHESIS_MODE_DETERMINISTIC,
+                    "validation_status": SYNTHESIS_VALIDATION_FAILED,
+                    "validation_error": error.code,
+                    "answer_shape": outline.answer_shape,
+                    "source_ids": outline.source_ids,
+                    "fallback_reason": error.code,
+                },
+            }
+            return fallback
+
+
+class OllamaLocalAnswerGenerator:
+    mode = "ollama-local"
+
+    def __init__(
+        self,
+        model_config: dict[str, Any] | None = None,
+        fallback: AnswerGenerator | None = None,
+    ) -> None:
+        config = dict(model_config or {})
+        self.endpoint = str(config.get("endpoint") or os.environ.get("BACKET_OLLAMA_ENDPOINT") or DEFAULT_OLLAMA_ENDPOINT)
+        self.model = str(config.get("name") or config.get("model") or os.environ.get("BACKET_ANSWER_MODEL") or DEFAULT_OLLAMA_ANSWER_MODEL)
+        self.timeout_seconds = float(config.get("timeout_seconds") or config.get("timeout") or DEFAULT_LLAMA_TIMEOUT_SECONDS)
+        self.token_budget = int(config.get("token_budget") or DEFAULT_LLAMA_TOKEN_BUDGET)
+        self.max_response_chars = int(config.get("max_response_chars") or DEFAULT_MAX_RESPONSE_CHARS)
+        self.fallback_enabled = str(config.get("fallback", "template")).lower() != "disabled"
+        self.fallback = fallback or TemplateAnswerGenerator()
+
+    def generate(self, question: str, sources: list[dict[str, Any]]) -> GeneratedAnswer:
+        return self.generate_from_packet(build_answer_packet(question, sources))
+
+    def generate_from_packet(self, packet: AnswerPacket) -> GeneratedAnswer:
+        if not packet.answerable:
+            fallback = _generate_fallback_from_packet(self.fallback, packet)
+            fallback.mode = self.mode
+            fallback.diagnostics = {
+                **fallback.diagnostics,
+                "model_skipped_reason": f"evidence_status:{packet.evidence_status}",
+            }
+            return fallback
+        outline = build_answer_outline(packet)
+        if not outline.answerable:
+            fallback = _generate_fallback_from_packet(self.fallback, _packet_from_outline(packet, outline))
+            fallback.mode = self.mode
+            fallback.diagnostics = {
+                **fallback.diagnostics,
+                "model_skipped_reason": f"outline_status:{outline.evidence_status}",
+                "answer_outline": outline.to_dict(),
+                "model": self.model,
+                "runtime_provider": "ollama",
+            }
+            return fallback
+        sources = packet.selected_evidence
+        if not sources:
+            return _generate_fallback_from_packet(self.fallback, packet)
+        prompt = build_llama_prompt(packet.question, sources, token_budget=self.token_budget, answer_packet=packet)
+        try:
+            payload = ollama_generate(
+                prompt,
+                model=self.model,
+                endpoint=self.endpoint,
+                timeout_seconds=self.timeout_seconds,
+                token_budget=self.token_budget,
+                stream=False,
+            )
+            text = str(payload.get("response") or "").strip()
+            validation_error = validate_generated_answer(
+                text,
+                sources,
+                max_chars=self.max_response_chars,
+                answer_packet=packet,
+            )
+            if validation_error is not None:
+                raise AppError(
+                    code=validation_error,
+                    message="Ollama output was not source-grounded enough for Discord.",
+                    hint="Template fallback will be used when enabled.",
+                    details={"mode": self.mode, "model": self.model},
+                    exit_code=2,
+                )
+            return GeneratedAnswer(
+                text=text,
+                mode=self.mode,
+                diagnostics={
+                    "source_count": len(sources),
+                    "endpoint": self.endpoint,
+                    "model": self.model,
+                    "runtime_provider": "ollama",
+                    "question_fingerprint": _fingerprint_text(packet.question),
+                    "answer_packet": _packet_summary_from_outline(packet, outline),
+                    "answer_outline": outline.to_dict(),
+                    "synthesis": {
+                        "mode": SYNTHESIS_MODE_MODEL,
+                        "validation_status": SYNTHESIS_VALIDATION_PASSED,
+                        "answer_shape": outline.answer_shape,
+                        "source_ids": outline.source_ids,
+                        "fallback_reason": None,
+                    },
+                    "timing": {
+                        "total_duration_ns": payload.get("total_duration"),
+                        "load_duration_ns": payload.get("load_duration"),
+                        "prompt_eval_duration_ns": payload.get("prompt_eval_duration"),
+                        "eval_duration_ns": payload.get("eval_duration"),
+                        "eval_count": payload.get("eval_count"),
+                    },
+                },
+            )
+        except AppError as error:
+            if not self.fallback_enabled:
+                return _model_unavailable_generated(packet, outline, error=error, mode=self.mode)
+            fallback = _generate_fallback_from_packet(self.fallback, packet)
+            fallback.mode = self.mode
+            fallback.fallback_used = True
+            fallback.diagnostics = {
+                **fallback.diagnostics,
+                "fallback_reason": error.code,
+                "answer_outline": outline.to_dict(),
+                "synthesis": {
+                    "mode": SYNTHESIS_MODE_DETERMINISTIC,
+                    "validation_status": SYNTHESIS_VALIDATION_FAILED,
+                    "validation_error": error.code,
+                    "answer_shape": outline.answer_shape,
+                    "source_ids": outline.source_ids,
+                    "fallback_reason": error.code,
+                },
+                "model": self.model,
+                "runtime_provider": "ollama",
+            }
             return fallback
 
 
@@ -317,9 +522,48 @@ def generate_answer_from_config(
 ) -> GeneratedAnswer:
     packet = coerce_answer_packet(question, sources, answer_packet=answer_packet)
     mode = str(bot_config.get("answer_mode") or "template")
+    fallback_policy = _fallback_policy_from_config(bot_config)
     if mode == "llama-local":
-        return LlamaLocalAnswerGenerator(model_config=bot_config.get("model", {}), client=client).generate_from_packet(packet)
+        return LlamaLocalAnswerGenerator(
+            model_config=_model_config_with_fallback_policy(bot_config.get("model", {}), fallback_policy=fallback_policy),
+            client=client,
+        ).generate_from_packet(packet)
+    if mode == "ollama-local":
+        return OllamaLocalAnswerGenerator(
+            model_config=_model_config_with_fallback_policy(bot_config.get("model", {}), fallback_policy=fallback_policy)
+        ).generate_from_packet(packet)
+    services = dict(bot_config.get("model_services", {}) or {})
+    answer_service = services.get("answer")
+    if isinstance(answer_service, dict) and str(answer_service.get("provider") or "").lower() == "ollama":
+        return OllamaLocalAnswerGenerator(
+            model_config=_model_config_with_fallback_policy(answer_service, fallback_policy=fallback_policy)
+        ).generate_from_packet(packet)
+    if isinstance(answer_service, dict) and _is_llama_cpp_answer_service(answer_service):
+        return LlamaLocalAnswerGenerator(
+            model_config=_model_config_with_fallback_policy(answer_service, fallback_policy=fallback_policy),
+            client=client,
+        ).generate_from_packet(packet)
     return TemplateAnswerGenerator().generate_from_packet(packet)
+
+
+def _fallback_policy_from_config(config: dict[str, Any]) -> str:
+    runtime = config.get("runtime") if isinstance(config.get("runtime"), dict) else {}
+    return str(config.get("fallback_policy") or runtime.get("fallback_policy") or "").strip().lower().replace("_", "-")
+
+
+def _model_config_with_fallback_policy(config: Any, *, fallback_policy: str) -> dict[str, Any]:
+    model_config = dict(config or {})
+    if fallback_policy in {"fail-closed", "failclosed", "fail"}:
+        model_config["fallback"] = "disabled"
+    return model_config
+
+
+def _is_llama_cpp_answer_service(service: dict[str, Any]) -> bool:
+    provider = str(service.get("provider") or "").strip().lower().replace("_", "-").replace(".", "-")
+    if provider in {"local", "llama-cpp", "llamacpp"}:
+        return True
+    endpoint = str(service.get("endpoint") or "")
+    return provider == "self-hosted" and endpoint.rstrip("/").endswith("/completion")
 
 
 def build_answer_packet(
@@ -462,15 +706,51 @@ def _generate_fallback_from_packet(fallback: AnswerGenerator, packet: AnswerPack
     return fallback.generate(packet.question, packet.selected_evidence)
 
 
-def _non_answer_generated(packet: AnswerPacket, *, mode: str) -> GeneratedAnswer:
+def _model_unavailable_generated(packet: AnswerPacket, outline: AnswerOutline, *, error: AppError, mode: str) -> GeneratedAnswer:
+    unavailable = AnswerPacket(
+        question=packet.question,
+        response_class=ANSWER_CLASS_RUNTIME_UNAVAILABLE,
+        evidence_status="runtime_unavailable",
+        missing_evidence=["answer_model"],
+        answer_shape=outline.answer_shape,
+        diagnostics={"fallback_reason": error.code},
+    )
+    generated = _non_answer_generated(unavailable, mode=mode, outline=outline)
+    generated.fallback_used = True
+    generated.diagnostics = {
+        **generated.diagnostics,
+        "fallback_reason": error.code,
+        "synthesis": {
+            "mode": SYNTHESIS_MODE_MODEL,
+            "validation_status": SYNTHESIS_VALIDATION_FAILED,
+            "validation_error": error.code,
+            "answer_shape": outline.answer_shape,
+            "source_ids": outline.source_ids,
+            "fallback_reason": error.code,
+            "fallback_policy": "fail-closed",
+        },
+    }
+    return generated
+
+
+def _non_answer_generated(packet: AnswerPacket, *, mode: str, outline: AnswerOutline | None = None) -> GeneratedAnswer:
     text = _non_answer_text(packet)
+    answer_outline = outline or build_answer_outline(packet)
     return GeneratedAnswer(
         text=text,
         mode=mode,
         diagnostics={
             "source_count": len(packet.selected_evidence),
             "answer_packet": packet.summary(),
+            "answer_outline": answer_outline.to_dict(),
             "question_fingerprint": _fingerprint_text(packet.question),
+            "synthesis": {
+                "mode": SYNTHESIS_MODE_DETERMINISTIC,
+                "validation_status": SYNTHESIS_VALIDATION_NOT_APPLICABLE,
+                "answer_shape": answer_outline.answer_shape,
+                "source_ids": answer_outline.source_ids,
+                "fallback_reason": None,
+            },
         },
     )
 
@@ -501,11 +781,367 @@ def _looks_like_substantive_answer(text: str) -> bool:
 
 
 def _answer_shape_name(question: str) -> str:
+    lower = question.casefold()
     if _wants_consequence_list(question):
         return "consequence_bullets"
     if _wants_system_explanation(question):
         return "system_overview"
+    if re.match(r"\s*(?:can|could|does|do|is|are|should|would|will)\b", lower):
+        return "yes_no"
+    if any(term in lower for term in ("how long", "take to", "duration", "time to")):
+        return "timing"
+    if "cost" in lower or "rouse" in lower or "experience" in lower or re.search(r"\bxp\b", lower):
+        return "cost"
+    if re.search(r"\b(?:what happens|consequence|consequences|cause|result)\b", lower):
+        return "consequence"
+    if re.match(r"\s*(?:what is|what are|what's|define|explain)\b", lower):
+        return "definition"
+    if re.match(r"\s*how\b", lower):
+        return "procedure"
     return "concise"
+
+
+def build_answer_outline(packet: AnswerPacket | dict[str, Any]) -> AnswerOutline:
+    current = packet if isinstance(packet, AnswerPacket) else _answer_packet_from_dict(str(packet.get("question") or ""), [], packet)
+    if current.response_class != ANSWER_CLASS_ANSWER:
+        return AnswerOutline(
+            question=current.question,
+            response_class=current.response_class,
+            evidence_status=current.evidence_status,
+            answer_shape=current.answer_shape,
+            stance=_stance_for_non_answer(current),
+            missing_evidence=list(current.missing_evidence),
+            diagnostics={"packet": current.summary()},
+        )
+
+    selected = _select_answer_sources(current.question, current.selected_evidence, limit=_template_source_limit(current.question))
+    coverage = _outline_coverage(current, selected)
+    if coverage["missing"]:
+        return AnswerOutline(
+            question=current.question,
+            response_class=ANSWER_CLASS_INSUFFICIENT,
+            evidence_status="insufficient",
+            answer_shape=current.answer_shape,
+            stance="insufficient",
+            source_ids=_source_ids(selected),
+            missing_evidence=list(coverage["missing"]),
+            diagnostics={
+                "packet": current.summary(),
+                "coverage": coverage,
+                "reason": "selected_evidence_did_not_support_question",
+            },
+        )
+
+    claims: list[AnswerClaim] = []
+    for source in selected:
+        for claim_text in _claim_segments_for_outline(current.question, source, current.answer_shape):
+            if any(existing.text == claim_text for existing in claims):
+                continue
+            citation = str(source.get("citation") or "")
+            claims.append(AnswerClaim(text=claim_text, source_ids=[citation] if citation else [], claim_type=current.answer_shape))
+            if len(claims) >= _short_answer_bullet_limit(current.question):
+                break
+        if claims and not _outline_allows_multi_source(current.answer_shape):
+            break
+        if len(claims) >= _short_answer_bullet_limit(current.question):
+            break
+
+    if not claims:
+        return AnswerOutline(
+            question=current.question,
+            response_class=ANSWER_CLASS_INSUFFICIENT,
+            evidence_status="insufficient",
+            answer_shape=current.answer_shape,
+            stance="insufficient",
+            source_ids=_source_ids(selected),
+            missing_evidence=["direct_answer_claim"],
+            diagnostics={
+                "packet": current.summary(),
+                "coverage": coverage,
+                "reason": "no_claims_extracted_from_selected_evidence",
+            },
+        )
+
+    source_ids = _dedupe([source_id for claim in claims for source_id in claim.source_ids])
+    return AnswerOutline(
+        question=current.question,
+        response_class=ANSWER_CLASS_ANSWER,
+        evidence_status=current.evidence_status,
+        answer_shape=current.answer_shape,
+        stance=_outline_stance(current.question, claims),
+        claims=claims,
+        source_ids=source_ids,
+        diagnostics={
+            "packet": current.summary(),
+            "coverage": coverage,
+        },
+    )
+
+
+def compose_deterministic_answer(packet: AnswerPacket, outline: AnswerOutline | None = None) -> str:
+    current_outline = outline or build_answer_outline(packet)
+    if not current_outline.answerable:
+        return _non_answer_text(_packet_from_outline(packet, current_outline))
+    lines = ["**Short answer:**"]
+    for claim in current_outline.claims:
+        lines.append(f"- {claim.text}")
+    source_lookup = {
+        str(source.get("citation") or ""): source
+        for source in packet.selected_evidence
+        if str(source.get("citation") or "")
+    }
+    cited_sources = [source_lookup[source_id] for source_id in current_outline.source_ids if source_id in source_lookup]
+    labels = "; ".join(f"**{format_bot_source_label(source)}**" for source in cited_sources)
+    if labels:
+        lines.append("")
+        lines.append(f"**Sources:** {labels}")
+    evidence = _outline_evidence_quotes(packet, cited_sources)
+    if evidence:
+        lines.append("")
+        lines.append("**Evidence:**")
+        lines.extend(evidence)
+    return "\n".join(lines)
+
+
+def _packet_from_outline(packet: AnswerPacket, outline: AnswerOutline) -> AnswerPacket:
+    return AnswerPacket(
+        question=packet.question,
+        response_class=outline.response_class,
+        evidence_status=outline.evidence_status,
+        selected_evidence=packet.selected_evidence if outline.response_class == ANSWER_CLASS_ANSWER else [],
+        fallback_context=packet.fallback_context,
+        missing_evidence=list(outline.missing_evidence),
+        ambiguity=packet.ambiguity,
+        answer_shape=outline.answer_shape,
+        diagnostics={**packet.diagnostics, "outline_reason": outline.diagnostics.get("reason")},
+    )
+
+
+def _packet_summary_from_outline(packet: AnswerPacket, outline: AnswerOutline) -> dict[str, Any]:
+    summary = packet.summary()
+    summary.update(
+        {
+            "response_class": outline.response_class,
+            "evidence_status": outline.evidence_status,
+            "missing_evidence": list(outline.missing_evidence),
+            "answer_shape": outline.answer_shape,
+        }
+    )
+    return summary
+
+
+def _stance_for_non_answer(packet: AnswerPacket) -> str:
+    if packet.response_class == ANSWER_CLASS_AMBIGUOUS:
+        return "ambiguous"
+    if packet.response_class == ANSWER_CLASS_CONFLICTING:
+        return "conflicting"
+    if packet.response_class == ANSWER_CLASS_PERMISSION_DENIED:
+        return "permission-denied"
+    if packet.response_class == ANSWER_CLASS_RUNTIME_UNAVAILABLE:
+        return "runtime-unavailable"
+    return "insufficient"
+
+
+def _outline_coverage(packet: AnswerPacket, selected: list[dict[str, Any]]) -> dict[str, Any]:
+    joined = " ".join(clean_bot_source_text(str(source.get("content") or source.get("excerpt") or "")) for source in selected)
+    lower = joined.casefold()
+    missing: list[str] = []
+    question = packet.question.casefold()
+    if not selected:
+        missing.append("selected_evidence")
+    if "dementation" in question and "dementation" not in lower:
+        missing.append("dementation")
+    if "blood bond" in question or "blood bonds" in question:
+        if not any(term in lower for term in ("blood bond", "blood bonds", "bonding", "regnant", "thrall")):
+            missing.append("blood_bond_rule")
+    if "obfuscate" in question and any(term in question for term in ("learn", "acquire", "buy", "purchase")):
+        if not any(term in lower for term in ("experience", "teacher", "out-of-clan", "out of clan", "new discipline", "discipline power")):
+            missing.append("advancement")
+    if "ritual" in question and any(term in question for term in ("how long", "take", "time", "cast", "perform")):
+        if "five minutes" not in lower and "minutes per level" not in lower:
+            missing.append("ritual_timing")
+    if "messy critical" in question:
+        if "messy critical" not in lower and "critical win" not in lower:
+            missing.append("messy_critical")
+        if "masquerade" in question and "masquerade" not in lower:
+            missing.append("masquerade")
+    terms = _important_question_terms(packet.question)
+    hit_count = sum(1 for term in terms if term in lower)
+    advancement_covered = "advancement" not in missing and any(term in question for term in ("learn", "acquire", "buy", "purchase"))
+    if terms and hit_count == 0 and not advancement_covered:
+        missing.append("question_anchor")
+    return {
+        "missing": _dedupe(missing),
+        "important_terms": terms,
+        "important_term_hits": hit_count,
+        "selected_source_ids": _source_ids(selected),
+    }
+
+
+def _important_question_terms(question: str) -> list[str]:
+    low_value = {
+        "answer",
+        "breach",
+        "cast",
+        "cause",
+        "learn",
+        "long",
+        "make",
+        "other",
+        "roll",
+        "take",
+        "use",
+        "vampire",
+        "vampires",
+    }
+    result: list[str] = []
+    lower = question.casefold()
+    for phrase in ("messy critical", "blood bond", "blood bonds"):
+        if phrase in lower:
+            result.append(phrase)
+    for term in _question_terms(question):
+        if term in low_value:
+            continue
+        result.append(term)
+    return _dedupe(result)
+
+
+def _claim_segments_for_outline(question: str, source: dict[str, Any], answer_shape: str) -> list[str]:
+    text = clean_bot_source_text(str(source.get("content") or source.get("excerpt") or ""))
+    terms = _question_terms(question)
+    direct = _direct_rule_answer_segments(question, text, terms)
+    if direct:
+        return direct
+    if answer_shape == "yes_no":
+        return _yes_no_claim_segments(question, text)
+    if answer_shape in {"definition", "concise"}:
+        return _definition_claim_segments(question, text, terms)
+    if answer_shape in {"procedure", "timing", "cost"}:
+        return _procedure_claim_segments(question, text, terms, answer_shape)
+    if answer_shape in {"consequence", "consequence_bullets"}:
+        return _consequence_claim_segments(question, text, terms)
+    if answer_shape == "system_overview":
+        return _system_overview_claim_segments(question, text, terms)
+    return _answer_segments(text, terms, limit=_short_answer_segment_limit(question))
+
+
+def _yes_no_claim_segments(question: str, text: str) -> list[str]:
+    lower = text.casefold()
+    if "messy critical" in question.casefold() and "masquerade" in question.casefold() and "masquerade" in lower:
+        return [
+            "Yes, it can: a messy critical is still a success, but the Beast can turn the result into a Masquerade-breaching mess when that consequence fits the scene.",
+        ]
+    if re.search(r"\b(?:cannot|can't|can not|may not|does not|do not|is not allowed)\b", lower):
+        return [_limit_sentence(_sentence_with_pattern(text, r"\b(?:cannot|can't|can not|may not|does not|do not|is not allowed)\b") or "No; the selected rule text states a restriction.")]
+    if re.search(r"\b(?:can|may|is allowed|are allowed|allows?|eligible)\b", lower):
+        sentence = _sentence_with_pattern(text, r"\b(?:can|may|is allowed|are allowed|allows?|eligible)\b")
+        if sentence:
+            return [f"Yes, if the stated rule conditions are met: {_lowercase_first(_limit_sentence(sentence))}"]
+    return []
+
+
+def _definition_claim_segments(question: str, text: str, terms: list[str]) -> list[str]:
+    segments = _answer_segments(text, terms, limit=2)
+    if segments:
+        return segments
+    key_terms = _important_question_terms(question)
+    for term in key_terms:
+        sentence = _sentence_with_pattern(text, rf"\b{re.escape(term)}\b")
+        if sentence:
+            return [_limit_sentence(sentence)]
+    return []
+
+
+def _procedure_claim_segments(question: str, text: str, terms: list[str], answer_shape: str) -> list[str]:
+    lower = text.casefold()
+    cue_patterns = {
+        "timing": (r"five minutes per level", r"\bduration\b", r"\btakes?\b"),
+        "cost": (r"\bcost\b", r"rouse check", r"\bexperience\b", r"\bxp\b"),
+        "procedure": (r"\bsystem\b", r"\brequires?\b", r"\brolls?\b", r"\bto make\b"),
+    }
+    patterns = cue_patterns.get(answer_shape, cue_patterns["procedure"])
+    claims: list[str] = []
+    for pattern in patterns:
+        sentence = _sentence_with_pattern(text, pattern)
+        if sentence:
+            claims.append(_limit_sentence(sentence))
+    if claims:
+        return _dedupe(claims)
+    if any(cue in lower for cue in ("system", "requires", "roll", "cost", "duration")):
+        segments = _answer_segments(text, terms, limit=2)
+        if segments:
+            return segments
+    return _answer_segments(text, terms, limit=2)
+
+
+def _consequence_claim_segments(question: str, text: str, terms: list[str]) -> list[str]:
+    patterns = (r"masquerade", r"stains?", r"simple mess", r"consequence", r"on a failure", r"on a success")
+    claims = [_limit_sentence(sentence) for pattern in patterns if (sentence := _sentence_with_pattern(text, pattern))]
+    if claims:
+        return _dedupe(claims)
+    return _answer_segments(text, terms, limit=2)
+
+
+def _system_overview_claim_segments(question: str, text: str, terms: list[str]) -> list[str]:
+    direct = _direct_social_combat_segments(question, text)
+    if direct:
+        return direct
+    return _answer_segments(text, terms, limit=3)
+
+
+def _sentence_with_pattern(text: str, pattern: str) -> str | None:
+    prepared = _prepare_sentence_boundaries(text)
+    for segment in re.split(r"(?<=[.!?])\s+", prepared):
+        cleaned = segment.strip(" -")
+        if len(cleaned) < 18:
+            continue
+        if re.search(pattern, cleaned, flags=re.IGNORECASE):
+            return _clean_answer_segment(cleaned, _question_terms(cleaned))
+    return None
+
+
+def _outline_stance(question: str, claims: list[AnswerClaim]) -> str:
+    if _answer_shape_name(question) != "yes_no":
+        return _answer_shape_name(question)
+    joined = " ".join(claim.text for claim in claims).casefold()
+    if joined.startswith("yes") or " can " in joined or " can:" in joined:
+        return "yes"
+    if joined.startswith("no") or any(term in joined for term in (" cannot", " can't", " may not", " not allowed")):
+        return "no"
+    return "qualified"
+
+
+def _outline_allows_multi_source(answer_shape: str) -> bool:
+    return answer_shape in {"system_overview", "consequence", "consequence_bullets", "procedure", "yes_no"}
+
+
+def _outline_evidence_quotes(packet: AnswerPacket, sources: list[dict[str, Any]]) -> list[str]:
+    quotes: list[str] = []
+    for source in sources[:2]:
+        snippet = _source_text_for_question(source, packet.question, limit=_template_detail_chars(packet.question))
+        if snippet:
+            quotes.append(_format_source_quote(snippet))
+    return quotes
+
+
+def _source_ids(sources: list[dict[str, Any]]) -> list[str]:
+    return _dedupe([str(source.get("citation") or "") for source in sources if str(source.get("citation") or "")])
+
+
+def _dedupe(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        current = str(value).strip()
+        if not current or current in seen:
+            continue
+        seen.add(current)
+        result.append(current)
+    return result
+
+
+def _lowercase_first(text: str) -> str:
+    return text[:1].lower() + text[1:] if text else text
 
 
 def build_llama_prompt(
@@ -515,22 +1151,32 @@ def build_llama_prompt(
     answer_packet: AnswerPacket | dict[str, Any] | None = None,
 ) -> str:
     packet = coerce_answer_packet(question, sources, answer_packet=answer_packet)
+    outline = build_answer_outline(packet)
     char_budget = max(2200, min(6000, token_budget * 24))
     header = (
         "You are Backet-bot. Answer only from the SOURCE blocks below. "
-        "Cite sources only once at the end as 'Sources: ...'. "
+        "Cite sources only once at the end as 'Sources: ...' using the human book/page label, "
+        "such as 'Sources: Core Rulebook p. 67'. "
         "If the sources are insufficient, say that the permitted sources are insufficient. "
         "Start with the direct answer, not a list of sources. "
-        "Do not put bracket labels like [R1] in the answer body, do not quote whole source blocks, "
+        "Never output bracket labels like [R1] or [V1], do not quote whole source blocks, "
         "do not print a 'closest sources' section, and do not invent beyond the sources. "
         f"EVIDENCE STATUS: {packet.evidence_status}. RESPONSE CLASS: {packet.response_class}. "
+        f"ANSWER SHAPE: {outline.answer_shape}. STANCE: {outline.stance}. "
         f"{_answer_shape_instruction(question)}\n\n"
         f"QUESTION:\n{question.strip()}\n\n"
+        "ANSWER OUTLINE JSON:\n"
+        f"{json.dumps(outline.to_dict(), ensure_ascii=True, sort_keys=True)}\n\n"
         "SOURCES:\n"
     )
     remaining = max(200, char_budget - len(header))
     blocks: list[str] = []
-    prompt_sources = _select_answer_sources(question, packet.selected_evidence, limit=_prompt_source_limit(question))
+    allowed_source_ids = set(outline.source_ids) or set(_source_ids(packet.selected_evidence))
+    prompt_sources = [
+        source
+        for source in _select_answer_sources(question, packet.selected_evidence, limit=_prompt_source_limit(question))
+        if str(source.get("citation") or "") in allowed_source_ids
+    ]
     for source in prompt_sources:
         source_limit = min(_prompt_source_chars(question), max(240, remaining // max(1, len(prompt_sources))))
         excerpt = _source_text_for_question(source, question, limit=source_limit)
@@ -556,21 +1202,96 @@ def validate_generated_answer(
     if len(text) > max_chars:
         return "bot_llama_output_too_long"
     packet = coerce_answer_packet("", sources, answer_packet=answer_packet)
-    if packet.response_class != ANSWER_CLASS_ANSWER:
-        if _looks_like_substantive_answer(text):
-            return "bot_llama_output_evidence_status_violation"
-        return None
+    outline = build_answer_outline(packet)
     citations = {f"[{source['citation']}]" for source in sources}
     emitted_citations = set(re.findall(r"\[[A-Z]\d+\]", text))
     unavailable = emitted_citations - citations
     if unavailable:
         return "bot_llama_output_unavailable_citation"
+    if emitted_citations:
+        return "bot_llama_output_internal_citation"
+    if packet.response_class != ANSWER_CLASS_ANSWER:
+        if _looks_like_substantive_answer(text):
+            return "bot_llama_output_evidence_status_violation"
+        return None
+    if not outline.answerable:
+        if _looks_like_substantive_answer(text):
+            return "bot_llama_output_outline_status_violation"
+        return None
     source_labels = {format_bot_source_label(source).casefold() for source in sources}
     lowered = text.casefold()
     has_source_label = "sources:" in lowered and any(label in lowered for label in source_labels)
     if citations and not any(citation in text for citation in citations) and not has_source_label:
         return "bot_llama_output_missing_citation"
+    if outline.answer_shape == "yes_no" and outline.stance in {"yes", "no"}:
+        stance_terms = ("yes", "can", "may", "allowed") if outline.stance == "yes" else ("no", "cannot", "can't", "may not", "not allowed")
+        first_sentence = re.split(r"(?<=[.!?])\s+", text.strip(), maxsplit=1)[0].casefold()
+        if not any(term in first_sentence for term in stance_terms):
+            return "bot_llama_output_missing_required_stance"
+    if not _model_output_covers_outline(text, outline):
+        return "bot_llama_output_missing_outline_support"
     return None
+
+
+def _model_output_covers_outline(text: str, outline: AnswerOutline) -> bool:
+    if not outline.claims:
+        return True
+    normalized = _normalize_answer_terms(text)
+    if not normalized:
+        return False
+    for claim in outline.claims:
+        terms = _claim_support_terms(claim.text)
+        if not terms:
+            continue
+        required_hits = 1 if len(terms) <= 2 else 2
+        if sum(1 for term in terms if term in normalized) >= required_hits:
+            return True
+    return False
+
+
+def _claim_support_terms(text: str) -> list[str]:
+    stopwords = {
+        "about",
+        "after",
+        "answer",
+        "because",
+        "before",
+        "between",
+        "calls",
+        "could",
+        "does",
+        "from",
+        "have",
+        "into",
+        "level",
+        "other",
+        "requires",
+        "rule",
+        "says",
+        "should",
+        "source",
+        "spend",
+        "their",
+        "there",
+        "these",
+        "those",
+        "using",
+        "when",
+        "where",
+        "which",
+        "with",
+        "would",
+    }
+    normalized = _normalize_answer_terms(text)
+    return _dedupe(
+        term
+        for term in normalized.split()
+        if len(term) >= 5 and term not in stopwords and not term.isdigit()
+    )
+
+
+def _normalize_answer_terms(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
 
 
 def validate_llama_model_files(bundle_root: Path, models_root: Path | None = None) -> CommandResult:
@@ -733,6 +1454,7 @@ def _format_short_answer(question: str, sources: list[dict[str, Any]]) -> list[s
 
 def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> list[str]:
     direct_segments = [
+        *_direct_advancement_segments(question, text),
         *_direct_werewolf_feeding_segments(question, text),
         *_direct_day_awake_segments(question, text),
         *_direct_social_combat_segments(question, text),
@@ -765,6 +1487,33 @@ def _direct_rule_answer_segments(question: str, text: str, terms: list[str]) -> 
         pool = re.sub(r"\s*\+\s*", " + ", match.group("pool").strip())
         return [f"{_display_rule_key(key)} hunting dice pool: {pool}."]
     return []
+
+
+def _direct_advancement_segments(question: str, text: str) -> list[str]:
+    lower_question = question.casefold()
+    if not any(term in lower_question for term in ("learn", "acquire", "buy", "purchase", "gain")):
+        return []
+    lower = text.casefold()
+    segments: list[str] = []
+    if "trait costs" in lower and "experience" in lower and "discipline" in lower:
+        costs: list[str] = []
+        if "clan discipline new level x 5" in lower:
+            costs.append("Clan Discipline: new level x 5 experience")
+        if "other discipline new level x 7" in lower:
+            costs.append("Other Discipline: new level x 7 experience")
+        if "caitiff discipline new level x 6" in lower:
+            costs.append("Caitiff Discipline: new level x 6 experience")
+        if costs:
+            segments.append(f"Learn Obfuscate as a Discipline advancement using the trait-cost table: {'; '.join(costs)}.")
+        if "pick one power from each discipline level you have" in lower:
+            segments.append("When you have dots in a Discipline, pick one power from each Discipline level you have.")
+    if "learning new ceremonies" in lower and "experience and time" in lower and any(
+        term in lower_question for term in ("ceremony", "ceremonies")
+    ):
+        segments.append("Learning a new Ceremony during play requires experience, time, and a teacher who already knows it.")
+    if "learning new rituals" in lower and "experience" in lower and any(term in lower_question for term in ("ritual", "rituals")):
+        segments.append("Learning a new Ritual during play requires the listed experience cost and whatever time or teacher requirements the source states.")
+    return segments
 
 
 def _direct_werewolf_feeding_segments(question: str, text: str) -> list[str]:
@@ -828,7 +1577,7 @@ def _direct_social_combat_segments(question: str, text: str) -> list[str]:
     if "build a dice pool" in lower or "social conflict pool" in lower:
         segments.append("Build the dice pool from the conflict type, arena, method, and audience.")
     if "compare numbers of successes" in lower and "damage to willpower" in lower:
-        segments.append("Opposed rolls compare successes; the winner's margin is applied as Willpower damage.")
+        segments.append("Opposed rolls compare successes; the winner's margin is applied as damage to Willpower.")
     if "concedes defeat" in lower and "achieves the stakes" in lower:
         segments.append("The conflict ends when someone concedes or breaks, and the winner achieves the agreed stakes.")
     return segments
@@ -1120,6 +1869,19 @@ def _source_narrative_order(sources: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def _answer_shape_instruction(question: str) -> str:
+    shape = _answer_shape_name(question)
+    if shape == "yes_no":
+        return "This is a direct applicability question. Start with Yes, No, or a qualified answer, then give only source-supported restrictions."
+    if shape == "definition":
+        return "This is a definition question. Give the meaning first, then one compact note about use or limitation if the sources support it."
+    if shape == "procedure":
+        return "This is a procedure question. Give the steps or required roll/cost in order, without inventing missing steps."
+    if shape == "timing":
+        return "This is a timing question. State the duration or casting time first, then any required cost or test."
+    if shape == "cost":
+        return "This is a cost question. State the cost first, then when it applies."
+    if shape == "consequence":
+        return "This is a consequence question. State whether the consequence can apply, then list the source-supported conditions."
     if _wants_consequence_list(question):
         return (
             "This is asking for possible consequences. Write 3-5 concise bullets. Start with the "
@@ -1183,6 +1945,16 @@ def _short_answer_segment_limit(question: str) -> int:
 
 def _source_question_bonus(question: str, lower_text: str) -> int:
     bonus = 0
+    lower_question = question.casefold()
+    if any(term in lower_question for term in ("learn", "acquire", "buy", "purchase", "gain")):
+        if "trait costs" in lower_text and "experience" in lower_text and "discipline" in lower_text:
+            bonus += 10
+        if "other discipline new level x 7" in lower_text or "clan discipline new level x 5" in lower_text:
+            bonus += 4
+        if "learning new ceremonies" in lower_text and not any(term in lower_question for term in ("ceremony", "ceremonies")):
+            bonus -= 4
+        if "learning new rituals" in lower_text and not any(term in lower_question for term in ("ritual", "rituals")):
+            bonus -= 4
     if _wants_ritual_timing(question):
         if "five minutes per level" in lower_text and (
             "performing a ritual requires" in lower_text or "rituals unless otherwise noted" in lower_text

@@ -7,14 +7,18 @@ from pathlib import Path
 import pytest
 
 from backet.bot_answers import (
+    ANSWER_CLASS_ANSWER,
     ANSWER_CLASS_AMBIGUOUS,
     ANSWER_CLASS_CONFLICTING,
     ANSWER_CLASS_INSUFFICIENT,
     ANSWER_CLASS_RUNTIME_UNAVAILABLE,
     AnswerPacket,
     LlamaLocalAnswerGenerator,
+    OllamaLocalAnswerGenerator,
     TemplateAnswerGenerator,
+    build_answer_outline,
     build_llama_prompt,
+    generate_answer_from_config,
     validate_generated_answer,
     validate_llama_model_files,
 )
@@ -30,7 +34,7 @@ def test_llama_runtime_prompt_receives_only_permitted_player_sources(runner, tmp
     _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nCourt customs are public.")
     _write(vault / "Plot.md", "storyteller", ["plotline"], "# Plot\n\nHidden betrayal by Sabine.")
     output = _export_bundle(runner, vault, tmp_path)
-    client = _FakeModelClient("Court customs are public. [V1]")
+    client = _FakeModelClient("Court customs are public.\n\nSources: Player Primer (Player Primer.md)")
     bundle = BotBundle.load(output)
 
     answer = answer_bot_query(
@@ -41,7 +45,7 @@ def test_llama_runtime_prompt_receives_only_permitted_player_sources(runner, tmp
         model_client=client,
     )
 
-    assert answer.text == "Court customs are public. [V1]"
+    assert answer.text == "Court customs are public.\n\nSources: Player Primer (Player Primer.md)"
     assert answer.diagnostics["answer_generation"]["mode"] == "llama-local"
     assert answer.diagnostics["answer_generation"]["fallback_used"] is False
     assert "Court customs are public" in client.prompts[0]
@@ -139,6 +143,7 @@ def test_llama_prompt_consumes_answer_packet_selected_evidence_only() -> None:
     prompt = build_llama_prompt(packet.question, selected, token_budget=96, answer_packet=packet)
 
     assert "EVIDENCE STATUS: answerable" in prompt
+    assert "Never output bracket labels" in prompt
     assert "costs experience" in prompt
     assert "character sheet" not in prompt
 
@@ -153,15 +158,51 @@ def test_llama_validation_blocks_unavailable_citations_and_status_violations() -
     )
 
     assert validate_generated_answer("Blood Bonds work like this. [R2]", sources) == "bot_llama_output_unavailable_citation"
+    assert validate_generated_answer("Blood Bonds work like this. [R1]", sources) == "bot_llama_output_internal_citation"
+    assert validate_generated_answer("Blood Bonds work like this.\n\nSources: Core Rulebook p. 70 (Advanced Systems)", sources) is None
     assert (
         validate_generated_answer(
             "Yes, you can learn it by spending experience and finding a teacher. [R1]",
             sources,
             answer_packet=insufficient_packet,
         )
-        == "bot_llama_output_evidence_status_violation"
+        == "bot_llama_output_internal_citation"
     )
     assert validate_generated_answer("The permitted sources are insufficient.", sources, answer_packet=insufficient_packet) is None
+
+
+def test_llama_validation_requires_outline_supporting_claim() -> None:
+    sources = [
+        _rule_source(
+            citation="R1",
+            page=208,
+            content=(
+                "Messy Critical A critical win with Hunger can become a messy critical. "
+                "The player may accept a Masquerade breach or a Stain as the messy consequence."
+            ),
+        )
+    ]
+    packet = AnswerPacket(
+        question="does a messy critical on a feeding roll cause a masquerade breach",
+        response_class=ANSWER_CLASS_ANSWER,
+        evidence_status="answerable",
+        selected_evidence=sources,
+        answer_shape="yes_no",
+    )
+
+    assert (
+        validate_generated_answer("Yes.\n\nSources: Core Rulebook p. 208 (Advanced Systems)", sources, answer_packet=packet)
+        == "bot_llama_output_missing_outline_support"
+    )
+    assert (
+        validate_generated_answer(
+            "Yes, a messy critical can become a Masquerade breach when that consequence fits the scene.\n\n"
+            "Sources: Core Rulebook p. 208 (Advanced Systems)",
+            sources,
+            answer_packet=packet,
+        )
+        is None
+    )
 
 
 def test_llama_generator_does_not_call_model_for_insufficient_packet() -> None:
@@ -178,6 +219,145 @@ def test_llama_generator_does_not_call_model_for_insufficient_packet() -> None:
     assert client.prompts == []
     assert "missing the evidence" in answer.text
     assert answer.diagnostics["model_skipped_reason"] == "evidence_status:insufficient"
+
+
+@pytest.mark.parametrize(
+    ("question", "source_text", "shape", "stance", "expected"),
+    [
+        (
+            "can vampires feed on werewolf blood",
+            "A werewolf's blood is so rich that every drink from its veins slakes twice the normal amount of Hunger.",
+            "yes_no",
+            "yes",
+            "can feed on werewolf blood",
+        ),
+        (
+            "what are Blood Bonds?",
+            "Blood Bonds create a supernatural tie between a regnant and a thrall through repeated draughts.",
+            "definition",
+            "definition",
+            "supernatural tie",
+        ),
+        (
+            "how do I roll a frenzy test?",
+            "Frenzy test. System: The vampire rolls Willpower against a Difficulty set by the provocation.",
+            "procedure",
+            "procedure",
+            "rolls Willpower",
+        ),
+        (
+            "how long does it take to cast a ritual",
+            "Rituals Unless otherwise noted, performing a ritual requires a Rouse Check, five minutes per level to cast.",
+            "timing",
+            "timing",
+            "five minutes per ritual level",
+        ),
+        (
+            "what does this power cost?",
+            "Cost: One Rouse Check. System: The vampire rolls Resolve + Blood Sorcery.",
+            "cost",
+            "cost",
+            "Cost: One Rouse Check",
+        ),
+        (
+            "what happens on a messy critical?",
+            "Messy Critical: The character gains one or more Stains from their monstrous action.",
+            "consequence_bullets",
+            "consequence_bullets",
+            "Stains",
+        ),
+    ],
+)
+def test_answer_outline_shapes(question: str, source_text: str, shape: str, stance: str, expected: str) -> None:
+    outline = build_answer_outline(
+        AnswerPacket(
+            question=question,
+            response_class="answer",
+            evidence_status="answerable",
+            selected_evidence=[_rule_source(citation="R1", page=1, content=source_text)],
+            answer_shape=shape,
+        )
+    )
+
+    assert outline.response_class == "answer"
+    assert outline.answer_shape == shape
+    assert outline.stance == stance
+    assert outline.source_ids == ["R1"]
+    assert expected in " ".join(claim.text for claim in outline.claims)
+
+
+def test_answer_outline_abstains_when_selected_evidence_lacks_required_anchor() -> None:
+    outline = build_answer_outline(
+        AnswerPacket(
+            question="can malkavians use dementation on other vampires",
+            response_class="answer",
+            evidence_status="answerable",
+            selected_evidence=[
+                _rule_source(
+                    citation="R1",
+                    page=185,
+                    content="Social interaction can be demanding for the Malkavians and their coterie.",
+                )
+            ],
+            answer_shape="yes_no",
+        )
+    )
+
+    assert outline.response_class == ANSWER_CLASS_INSUFFICIENT
+    assert "dementation" in outline.missing_evidence
+
+
+def test_template_advancement_answer_uses_trait_costs_table() -> None:
+    answer = TemplateAnswerGenerator().generate(
+        "how do I learn obfuscate",
+        [
+            _rule_source(
+                citation="R1",
+                page=67,
+                content=(
+                    "TRAIT COSTS: EXPERIENCE TRAIT EXPERIENCE POINTS "
+                    "Clan Discipline New level x 5 Other Discipline New level x 7 "
+                    "Caitiff Discipline New level x 6"
+                ),
+            )
+        ],
+    )
+
+    assert "Other Discipline: new level x 7 experience" in answer.text
+    assert "Core Rulebook p. 67" in answer.text
+
+
+def test_advancement_answer_prefers_trait_cost_table_over_learning_distractor() -> None:
+    answer = TemplateAnswerGenerator().generate(
+        "how do I learn obfuscate",
+        [
+            _rule_source(
+                citation="R1",
+                page=67,
+                content=(
+                    "TRAIT COSTS: EXPERIENCE TRAIT EXPERIENCE POINTS "
+                    "Clan Discipline New level x 5 Other Discipline New level x 7 "
+                    "Caitiff Discipline New level x 6. "
+                    "Pick one power from each Discipline level you have."
+                ),
+                score=0.8,
+            ),
+            _rule_source(
+                citation="R2",
+                page=94,
+                content=(
+                    "Learning new Ceremonies during play requires both experience and time, "
+                    "as well as a teacher who knows the Ceremony already."
+                ),
+                score=1.2,
+            ),
+        ],
+    )
+
+    assert "Learn Obfuscate as a Discipline advancement" in answer.text
+    assert "Other Discipline: new level x 7 experience" in answer.text
+    assert "Core Rulebook p. 67" in answer.text
+    assert "Core Rulebook p. 94" not in answer.text
 
 
 def test_answer_context_windows_use_full_source_content_near_question_terms() -> None:
@@ -516,6 +696,78 @@ def test_llama_generator_uses_endpoint_from_environment(monkeypatch: pytest.Monk
     generator = LlamaLocalAnswerGenerator(model_config={})
 
     assert generator.endpoint == "http://llama:8080/completion"
+
+
+def test_ollama_generator_records_model_timing_and_citations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "backet.bot_answers.ollama_generate",
+        lambda prompt, model, endpoint, timeout_seconds, token_budget, stream: {
+            "response": "Blood Bonds create a supernatural tie through repeated draughts.\n\nSources: Core Rulebook p. 1 (Blood Bonds)",
+            "total_duration": 2_000_000_000,
+            "load_duration": 100_000_000,
+            "eval_count": 12,
+            "eval_duration": 300_000_000,
+        },
+    )
+    generator = OllamaLocalAnswerGenerator(model_config={"model": "llama3.2:3b", "endpoint": "http://ollama:11434"})
+
+    answer = generator.generate(
+        "What are Blood Bonds?",
+        [
+            {
+                "source_type": "rules",
+                "citation": "R1",
+                "book_title": "Core Rulebook",
+                "page_start": 1,
+                "page_end": 1,
+                "section_label": "Blood Bonds",
+                "content": "Blood Bonds create a supernatural tie through repeated draughts.",
+                "excerpt": "Blood Bonds create a supernatural tie through repeated draughts.",
+                "score": 1.0,
+                "match_reasons": ["exact"],
+            }
+        ],
+    )
+
+    assert answer.mode == "ollama-local"
+    assert answer.fallback_used is False
+    assert answer.diagnostics["model"] == "llama3.2:3b"
+    assert answer.diagnostics["runtime_provider"] == "ollama"
+    assert answer.diagnostics["timing"]["eval_count"] == 12
+
+
+def test_model_service_answer_can_use_llama_cpp_endpoint() -> None:
+    answer = generate_answer_from_config(
+        {
+            "model_services": {
+                "answer": {
+                    "provider": "llama.cpp",
+                    "endpoint": "http://127.0.0.1:8080/completion",
+                    "timeout_seconds": 30,
+                }
+            }
+        },
+        "How do Blood Bonds work?",
+        [
+            {
+                "source_type": "rules",
+                "citation": "R1",
+                "book_title": "Core Rulebook",
+                "page_start": 1,
+                "page_end": 1,
+                "section_label": "Blood Bonds",
+                "content": "Blood Bonds create a supernatural tie through repeated draughts.",
+                "excerpt": "Blood Bonds create a supernatural tie through repeated draughts.",
+                "score": 1.0,
+                "match_reasons": ["exact"],
+            }
+        ],
+        client=_FakeModelClient("Blood Bonds create a supernatural tie through repeated draughts.\n\nSources: Core Rulebook p. 1 (Blood Bonds)"),
+    )
+
+    assert answer.mode == "llama-local"
+    assert answer.text == "Blood Bonds create a supernatural tie through repeated draughts.\n\nSources: Core Rulebook p. 1 (Blood Bonds)"
+    assert answer.diagnostics["endpoint"] == "http://127.0.0.1:8080/completion"
 
 
 def test_llama_model_check_validates_vm_local_path_and_checksum(runner, tmp_path: Path) -> None:

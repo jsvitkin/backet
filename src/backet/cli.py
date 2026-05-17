@@ -29,11 +29,15 @@ from backet.bot_output import (
     emit_bot_model_check_report,
     emit_bot_policy_report,
     emit_bot_playground_report,
+    emit_bot_qa_report,
     emit_bot_visibility_audit_report,
     emit_bot_visibility_list_report,
     emit_bot_visibility_update_report,
+    emit_local_runtime_benchmark_report,
+    emit_local_runtime_doctor_report,
 )
 from backet.bot_playground import run_bot_playground
+from backet.bot_qa import run_bot_qa
 from backet.bot_runtime import answer_bot_query_result, inspect_bot_bundle
 from backet.bot_setup import (
     capture_secret_from_stdin_or_prompt,
@@ -72,6 +76,7 @@ from backet.cli_update import (
 )
 from backet.errors import AppError
 from backet.indexing import index_vault
+from backet.local_runtime import local_runtime_doctor, run_local_runtime_benchmark
 from backet.memory import build_memory_capsules
 from backet.models import CommandResult
 from backet.output import CLIState, emit_error, emit_success, emit_version, ensure_state
@@ -111,6 +116,7 @@ blueprint_app = typer.Typer(help="Manage workflow blueprint scaffolding and stat
 update_app = typer.Typer(help="Manage the installed backet CLI package.")
 bot_app = typer.Typer(invoke_without_command=True, help="Manage private Backet bot configuration and exports.")
 bot_visibility_app = typer.Typer(invoke_without_command=True, help="Inspect and update bot visibility metadata.")
+bot_runtime_app = typer.Typer(help="Inspect and benchmark local model runtime services.")
 app.add_typer(setup_app, name="setup")
 app.add_typer(skills_app, name="skills")
 app.add_typer(memory_app, name="memory")
@@ -120,6 +126,7 @@ app.add_typer(update_app, name="update")
 app.add_typer(bot_app, name="bot")
 rules_app.add_typer(rules_scope_app, name="scope")
 bot_app.add_typer(bot_visibility_app, name="visibility")
+bot_app.add_typer(bot_runtime_app, name="runtime")
 
 
 @bot_app.callback(invoke_without_command=True)
@@ -702,6 +709,149 @@ def bot_playground_command(
             emit_success(state, result)
         else:
             emit_bot_playground_report(result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_app.command("qa")
+def bot_qa_command(
+    ctx: typer.Context,
+    target: Annotated[
+        Path,
+        typer.Argument(help="Vault path or exported bot bundle to run QA against.", file_okay=False, dir_okay=True),
+    ] = Path("."),
+    case_files: Annotated[
+        list[Path] | None,
+        typer.Option("--case-file", help="Answer QA case file. Can be repeated. Defaults to packaged standard cases."),
+    ] = None,
+    command: Annotated[
+        str,
+        typer.Option("--command", help="Default command route when a case does not specify one."),
+    ] = "rules.ask",
+    user_id: Annotated[str | None, typer.Option("--user-id", help="Discord user ID for access simulation.")] = None,
+    role_ids: Annotated[
+        list[str] | None,
+        typer.Option("--role-id", help="Repeatable Discord role ID for access simulation."),
+    ] = None,
+    private: Annotated[
+        bool | None,
+        typer.Option("--private/--public", help="Override response visibility for QA answers."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of sources per corpus.")] = 4,
+    use_model: Annotated[
+        bool,
+        typer.Option("--use-model/--template-only", help="Use the configured local model instead of fast template mode."),
+    ] = False,
+    bundle: Annotated[bool, typer.Option("--bundle", help="Treat TARGET as an exported bot bundle.")] = False,
+    report_output: Annotated[
+        Path | None,
+        typer.Option("--report-output", help="Write JSON and Markdown QA reports to a file or directory."),
+    ] = None,
+    fail_on_failure: Annotated[
+        bool,
+        typer.Option("--fail-on-failure/--no-fail-on-failure", help="Exit non-zero when required cases fail."),
+    ] = True,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = run_bot_qa(
+            target=target,
+            case_files=case_files or [],
+            command=command,
+            user_id=user_id,
+            role_ids=role_ids or [],
+            private=private,
+            limit=limit,
+            use_model=use_model,
+            bundle=bundle,
+            report_output=report_output,
+        )
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_bot_qa_report(result)
+        if fail_on_failure and not result.data.get("ok"):
+            raise typer.Exit(1)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_runtime_app.command("doctor")
+def bot_runtime_doctor_command(
+    ctx: typer.Context,
+    endpoint: Annotated[str | None, typer.Option("--endpoint", help="Ollama API base URL.")] = None,
+    embedding_model: Annotated[str | None, typer.Option("--embedding-model", help="Embedding model ID to require.")] = None,
+    answer_model: Annotated[str | None, typer.Option("--answer-model", help="Answer model ID to require.")] = None,
+    model_cache: Annotated[Path | None, typer.Option("--model-cache", help="Machine-local model cache path.")] = None,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = local_runtime_doctor(
+            endpoint=endpoint,
+            embedding_model=embedding_model,
+            answer_model=answer_model,
+            model_cache=model_cache,
+        )
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_local_runtime_doctor_report(result)
+    except AppError as error:
+        _handle_error(ctx, error)
+
+
+@bot_runtime_app.command("benchmark")
+def bot_runtime_benchmark_command(
+    ctx: typer.Context,
+    target: Annotated[
+        Path | None,
+        typer.Argument(help="Optional vault path or exported bundle for QA-backed benchmarking.", file_okay=False, dir_okay=True),
+    ] = None,
+    case_files: Annotated[
+        list[Path] | None,
+        typer.Option("--case-file", help="Answer QA case file. Can be repeated. Defaults to packaged standard cases."),
+    ] = None,
+    endpoint: Annotated[str | None, typer.Option("--endpoint", help="Ollama API base URL.")] = None,
+    embedding_model: Annotated[str | None, typer.Option("--embedding-model", help="Embedding model ID to benchmark.")] = None,
+    answer_model: Annotated[str | None, typer.Option("--answer-model", help="Answer model ID to benchmark.")] = None,
+    model_cache: Annotated[Path | None, typer.Option("--model-cache", help="Machine-local model cache path.")] = None,
+    command: Annotated[str, typer.Option("--command", help="Default bot command route for QA cases.")] = "rules.ask",
+    user_id: Annotated[str | None, typer.Option("--user-id", help="Discord user ID for access simulation.")] = None,
+    role_ids: Annotated[
+        list[str] | None,
+        typer.Option("--role-id", help="Repeatable Discord role ID for access simulation."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum number of sources per corpus.")] = 4,
+    report_output: Annotated[
+        Path | None,
+        typer.Option("--report-output", help="Write JSON and Markdown benchmark reports to a file or directory."),
+    ] = None,
+    fail_on_failure: Annotated[
+        bool,
+        typer.Option("--fail-on-failure/--no-fail-on-failure", help="Exit non-zero when benchmark or required QA fails."),
+    ] = True,
+) -> None:
+    state = ensure_state(ctx)
+    try:
+        result = run_local_runtime_benchmark(
+            target=target,
+            case_files=case_files or [],
+            endpoint=endpoint,
+            embedding_model=embedding_model,
+            answer_model=answer_model,
+            model_cache=model_cache,
+            command=command,
+            user_id=user_id,
+            role_ids=role_ids or [],
+            limit=limit,
+            report_output=report_output,
+        )
+        if state.json_output:
+            emit_success(state, result)
+        else:
+            emit_local_runtime_benchmark_report(result)
+        if fail_on_failure and not result.data.get("ok"):
+            raise typer.Exit(1)
     except AppError as error:
         _handle_error(ctx, error)
 

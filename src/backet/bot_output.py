@@ -55,6 +55,78 @@ def emit_bot_bundle_doctor_report(result: CommandResult) -> None:
         _print_next("Fix the issues above, then re-export the bundle.")
 
 
+def emit_local_runtime_doctor_report(result: CommandResult) -> None:
+    data = result.data
+    console.print("[bold green]Local RAG runtime doctor[/bold green]")
+    platform_data = dict(data.get("platform", {}) or {})
+    hardware = dict(data.get("hardware", {}) or {})
+    ollama = dict(data.get("ollama", {}) or {})
+    llama_cpp = dict(data.get("llama_cpp", {}) or {})
+    _line("Platform", f"{platform_data.get('system')} {platform_data.get('release')}".strip())
+    cpu = dict(hardware.get("cpu", {}) or {})
+    if cpu:
+        _line("CPU", cpu.get("Name") or hardware.get("cpu"))
+    system = dict(hardware.get("system", {}) or {})
+    if system.get("TotalPhysicalMemory"):
+        _line("RAM", f"{int(system['TotalPhysicalMemory']) / (1024 ** 3):.1f} GB")
+    gpus = list(hardware.get("gpus") or [])
+    if gpus:
+        console.print("GPUs:")
+        for gpu in gpus:
+            if isinstance(gpu, dict):
+                console.print(f"  - {gpu.get('Name')} ({gpu.get('DriverVersion')})")
+    _line("Ollama", "available" if ollama.get("api_available") else "not reachable")
+    _line("Ollama path", ollama.get("command_path"))
+    _line("Ollama endpoint", ollama.get("endpoint"))
+    _line("Model cache", ollama.get("model_cache"))
+    models = list(ollama.get("models") or [])
+    if models:
+        console.print("Ollama models:")
+        for model in models:
+            if isinstance(model, dict):
+                size = model.get("size")
+                size_text = f", {int(size) / (1024 ** 3):.1f} GB" if isinstance(size, int) else ""
+                console.print(f"  - {model.get('name')} ({model.get('parameter_size')}, {model.get('quantization_level')}{size_text})")
+    _line("llama.cpp fallback", "available" if llama_cpp.get("api_available") else "not active")
+    compatibility = dict(data.get("profile_compatibility", {}) or {})
+    profiles = dict(compatibility.get("profiles", {}) or {})
+    if profiles:
+        console.print("Profile compatibility:")
+        for profile, payload in sorted(profiles.items()):
+            if isinstance(payload, dict):
+                missing = payload.get("missing_roles") or []
+                suffix = f"; missing {', '.join(missing)}" if missing else ""
+                console.print(f"  - {profile}: {'compatible' if payload.get('compatible') else 'not compatible'}{suffix}")
+    _print_issues(result.issues)
+    actions = list(ollama.get("install_actions") or []) + list(llama_cpp.get("install_actions") or [])
+    if actions:
+        console.print("Actions:")
+        for action in actions[:5]:
+            console.print(f"  - {action}")
+
+
+def emit_local_runtime_benchmark_report(result: CommandResult) -> None:
+    data = result.data
+    benchmarks = dict(data.get("benchmarks", {}) or {})
+    recommendation = dict(data.get("hardware_recommendation", {}) or {})
+    console.print("[bold green]Local RAG runtime benchmark[/bold green]")
+    _line("Status", "ok" if data.get("ok") else "needs attention")
+    embedding = dict(benchmarks.get("embedding", {}) or {})
+    answer = dict(benchmarks.get("answer", {}) or {})
+    _line("Embedding", f"{embedding.get('model')} ({embedding.get('latency_seconds')}s, {embedding.get('dimensions')} dims)")
+    _line("Answer", f"{answer.get('model')} ({answer.get('latency_seconds')}s, {answer.get('tokens_per_second')} tok/s)")
+    if answer.get("response_preview"):
+        _line("Answer preview", answer.get("response_preview"))
+    qa = data.get("qa")
+    if isinstance(qa, dict):
+        _line("QA", f"{qa.get('passed_count')}/{qa.get('case_count')} passed, {qa.get('failed_required_count')} required failures")
+    _line("Recommendation", recommendation.get("status"))
+    if recommendation.get("summary"):
+        console.print(str(recommendation["summary"]))
+    _print_created(result.created)
+    _print_issues(result.issues)
+
+
 def emit_bot_bundle_inspect_report(result: CommandResult) -> None:
     data = result.data
     console.print("[bold green]Bot bundle[/bold green]")
@@ -146,6 +218,44 @@ def emit_bot_playground_report(result: CommandResult) -> None:
             console.print()
             console.print("[bold]Retrieved Sources[/bold]")
             console.print("  None")
+
+
+def emit_bot_qa_report(result: CommandResult) -> None:
+    data = result.data
+    ok = bool(data.get("ok"))
+    console.print("[bold green]Bot answer QA[/bold green]" if ok else "[bold red]Bot answer QA[/bold red]")
+    _line("Target", data.get("target"))
+    _line("Target kind", data.get("target_kind"))
+    _line("Mode", data.get("mode"))
+    _line("Cases", data.get("case_count"))
+    _line("Passed", data.get("passed_count"))
+    _line("Failed", data.get("failed_count"))
+    _line("Skipped", data.get("skipped_count"))
+    _line("Required failures", data.get("failed_required_count"))
+    _print_issues(result.issues)
+    cases = list(data.get("cases") or [])
+    if cases:
+        console.print()
+        console.print("[bold]Case Results[/bold]")
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            status = "skipped" if case.get("skipped") else ("pass" if case.get("passed") else "fail")
+            line = f"  - {case.get('case_id')}: {status}"
+            if case.get("difficulty"):
+                line += f" ({case.get('difficulty')})"
+            if case.get("failure_stage"):
+                line += f" at {case.get('failure_stage')}"
+            console.print(line)
+            if case.get("skip_reason"):
+                console.print(f"    skip: {case.get('skip_reason')}")
+            if not case.get("passed"):
+                _print_case_failure(case)
+    _print_created(result.created)
+    if ok:
+        _print_next("Run the same QA suite after retrieval or model changes to catch regressions.")
+    else:
+        _print_next("Inspect the first failed stage, then rerun QA after fixing that layer.")
 
 
 def emit_bot_model_check_report(result: CommandResult) -> None:
@@ -399,3 +509,11 @@ def _print_source_debug(source: dict[str, Any]) -> None:
             console.print(f"    {line}", markup=False)
         if len(wrapped) > 3:
             console.print("    ...")
+
+
+def _print_case_failure(case: dict[str, Any]) -> None:
+    stages = dict(case.get("stages", {}) or {})
+    stage_name = str(case.get("failure_stage") or "")
+    stage = dict(stages.get(stage_name, {}) or {})
+    for failure in list(stage.get("failures") or [])[:3]:
+        console.print(f"    {failure}", markup=False)

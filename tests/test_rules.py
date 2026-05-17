@@ -12,6 +12,7 @@ from backet.cli import app
 from backet.embeddings import EmbeddingResult
 from backet.errors import AppError
 from backet.rules import (
+    _rules_corpus_action_for_book,
     build_rules_fts_query,
     classify_rule_chunk,
     classify_rule_chunk_rag_metadata,
@@ -139,6 +140,55 @@ def test_rules_index_reports_semantic_schema_and_refreshes_stale_chunks(runner, 
     assert index_payload["data"]["stale_metadata_before"] > 0
     assert index_payload["data"]["refreshed_embeddings"] > 0
     assert index_payload["data"]["refreshed_metadata"] > 0
+    assert index_payload["data"]["source_pdf_required"] is False
+    assert index_payload["data"]["source_operation"] == "stored_chunk_text"
+
+
+def test_rules_corpus_health_action_categories() -> None:
+    base_book = {
+        "book_id": "core-v5",
+        "book_title": "Core",
+        "page_count": 10,
+        "chunk_count": 20,
+        "source_status": {"status": "available", "pdf_path": "core.pdf", "stored_fingerprint": "abc"},
+        "review_summary": {"pending_pages": 0, "blocked": 0},
+        "suspect_pages": [],
+        "suspect_chunks": [],
+    }
+    clean_index = {"missing_embeddings": 0, "missing_metadata": 0, "stale_embeddings": 0, "stale_metadata": 0}
+    stale_index = {"missing_embeddings": 1, "missing_metadata": 0, "stale_embeddings": 0, "stale_metadata": 1}
+
+    assert _rules_corpus_action_for_book(base_book, semantic_index=clean_index, vault_label="/vault")["action"] == "none"
+    assert _rules_corpus_action_for_book(base_book, semantic_index=stale_index, vault_label="/vault")["action"] == "reindex"
+
+    repair_book = {**base_book, "review_summary": {"pending_pages": 1, "blocked": 0}}
+    repair = _rules_corpus_action_for_book(repair_book, semantic_index=clean_index, vault_label="/vault")
+    assert repair["action"] == "repair"
+    assert repair["source_pdf_required"] is True
+
+    resolved_noise_book = {
+        **base_book,
+        "review_summary": {"pending_pages": 0, "blocked": 8, "pending_blocked": 0},
+        "suspect_pages": [{"review_state": "excluded"} for _ in range(8)],
+    }
+    assert _rules_corpus_action_for_book(resolved_noise_book, semantic_index=stale_index, vault_label="/vault")[
+        "action"
+    ] == "reindex"
+
+    unresolved_noise_book = {
+        **base_book,
+        "source_status": {"status": "missing", "pdf_path": "core.pdf"},
+        "review_summary": {"pending_pages": 1, "blocked": 8, "pending_blocked": 1},
+        "suspect_pages": [{"review_state": "pending"} for _ in range(8)],
+    }
+    unresolved = _rules_corpus_action_for_book(unresolved_noise_book, semantic_index=clean_index, vault_label="/vault")
+    assert unresolved["action"] == "reingest"
+    assert unresolved["source_pdf_required"] is True
+
+    reingest_book = {**base_book, "chunk_count": 0, "source_status": {"status": "missing", "pdf_path": "core.pdf"}}
+    reingest = _rules_corpus_action_for_book(reingest_book, semantic_index=clean_index, vault_label="/vault")
+    assert reingest["action"] == "reingest"
+    assert reingest["source_pdf_required"] is True
 
 
 def test_rules_query_can_return_semantic_only_matches_with_diagnostics(
@@ -335,6 +385,58 @@ def test_rules_query_planner_prefers_advancement_for_learning_obfuscate(runner, 
     assert payload["data"]["primary_results"][0]["section_label"] == "Advancement"
 
 
+def test_rules_query_planner_does_not_treat_casting_time_as_advancement(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "ritual-time.pdf",
+        [
+            _rule_page(
+                "Rituals",
+                "Rituals Unless otherwise noted, performing a ritual requires a Rouse Check, five minutes per level to cast.",
+            )
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "ritual-time", "Ritual Time", "core")
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "how long does it take to cast a ritual"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert "advancement" not in payload["data"]["query_plan"]["intents"]
+    assert "five minutes per level" in payload["data"]["evidence_packet"]["selected_evidence"][0]["content"]
+
+
+def test_rules_query_planner_prefers_ritual_timing_over_ceremony_timing(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "ritual-vs-ceremony-time.pdf",
+        [
+            _rule_page(
+                "Oblivion Ceremonies",
+                (
+                    "Ceremonies are Oblivion's equivalent to Blood Sorcery Rituals. "
+                    "Unless otherwise noted, performing a Ceremony requires a Rouse Check, five minutes per level to cast."
+                ),
+            ),
+            _rule_page(
+                "D I S C I P L I N E S",
+                (
+                    "D I S C I P L I N E S 2 7 5 Rituals Unless otherwise noted, performing a ritual requires a Rouse Check, "
+                    "five minutes per level to cast, and a winning Intelligence + Blood Sorcery test."
+                ),
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "ritual-time", "Ritual Time", "core")
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "how long does it take to cast a ritual", "--limit", "1"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["data"]["primary_results"][0]["section_label"] == "D I S C I P L I N E S"
+    assert "performing a ritual requires" in payload["data"]["evidence_packet"]["selected_evidence"][0]["content"]
+
+
 def test_rules_query_planner_prefers_dementation_targeting_system(runner, tmp_path: Path) -> None:
     vault = _make_bootstrapped_vault(runner, tmp_path)
     pdf_path = _create_text_pdf(
@@ -371,6 +473,77 @@ def test_rules_query_planner_prefers_dementation_targeting_system(runner, tmp_pa
     assert payload["data"]["evidence_status"] == "answerable"
     assert "targeting" in payload["data"]["evidence_packet"]["selected_evidence"][0]["evidence_cues"]
     assert payload["data"]["primary_results"][0]["section_label"] == "Dementation System"
+
+    typo_result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "can malkavians use dementia on other vampires", "--limit", "1"],
+    )
+    assert typo_result.exit_code == 0, typo_result.stdout
+    typo_payload = json.loads(typo_result.stdout)
+    assert typo_payload["data"]["query_plan"]["entities"]["powers"] == ["Dementation"]
+    assert typo_payload["data"]["evidence_status"] == "answerable"
+    assert typo_payload["data"]["primary_results"][0]["section_label"] == "Dementation System"
+
+
+def test_rules_rag_v2_requires_entity_and_intent_cooccurrence(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "targeting-without-entity.pdf",
+        [
+            _rule_page(
+                "Malkavian Clan",
+                "Malkavians sometimes unsettle a victim's mind, but this clan text gives no procedure.",
+            ),
+            _rule_page(
+                "Generic Targeting System",
+                "System: choose a target vampire or other Kindred within conversation range. The roll affects that target on a win.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "can malkavians use dementation on other vampires", "--limit", "1"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    packet = payload["data"]["evidence_packet"]
+    assert payload["data"]["evidence_status"] == "insufficient"
+    assert packet["selected_evidence"] == []
+    assert "entity_anchor" in packet["missing_evidence"] or "targeting" in packet["missing_evidence"]
+    rejected_reasons = {reason for candidate in packet["rejected_candidates"] for reason in candidate["rejection_reasons"]}
+    assert "missing_entity_anchor" in rejected_reasons
+    assert "missing_intent_evidence" in rejected_reasons
+
+
+def test_rules_rag_v2_uses_bounded_neighbor_expansion_for_split_system_text(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    anchor_paragraph = "Dementation is a Malkavian Dominate power. " + ("Malkavian memory " * 105)
+    system_paragraph = (
+        "System: choose a target vampire or other Kindred within conversation range. "
+        "The power affects that target if the user's roll succeeds."
+    )
+    pdf_path = _create_text_pdf(
+        tmp_path / "split-system.pdf",
+        [_rule_page("Dementation", f"{anchor_paragraph}\n\n{system_paragraph}")],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "can malkavians use dementation on other vampires", "--limit", "1"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    packet = payload["data"]["evidence_packet"]
+    assert payload["data"]["evidence_status"] == "answerable"
+    assert packet["candidate_counts"]["selected_evidence"] >= 1
+    assert "neighbor_expansion" in packet["retrieval_diagnostics"]
+    if packet["retrieval_diagnostics"]["neighbor_expansion"]["candidate_count"]:
+        assert any("neighbor_expansion" in result["retrieval_channels"] for result in packet["selected_evidence"])
 
 
 def test_rules_rag_v2_selects_cost_and_consequence_evidence(runner, tmp_path: Path) -> None:
@@ -502,6 +675,30 @@ def test_rules_query_downranks_suspect_ocr_when_clean_text_also_matches(runner, 
     assert "suspect_ocr" in results[1]["retrieval_flags"]
 
 
+def test_rules_query_excerpt_window_skips_page_furniture(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "window.pdf",
+        [
+            _rule_page(
+                "Core Book",
+                (
+                    "V A M P I R E : T H E M A S Q U E R A D E 2 0 5 " * 6
+                    + "Blood Surge. Cost: One Rouse Check. System: add dice to a single test for the scene."
+                ),
+            )
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "what does blood surge cost", "--limit", "1"])
+
+    assert result.exit_code == 0, result.stdout
+    excerpt = json.loads(result.stdout)["data"]["primary_results"][0]["excerpt"]
+    assert "Blood Surge" in excerpt
+    assert not excerpt.startswith("V A M P I R E")
+
+
 def test_rule_retrieval_metadata_classifies_common_non_answer_chunks() -> None:
     assert classify_rule_chunk("Index", "Index domain feeding page references", 5, 0.95, "direct") == (
         "index",
@@ -510,6 +707,10 @@ def test_rule_retrieval_metadata_classifies_common_non_answer_chunks() -> None:
     assert classify_rule_chunk("Character Sheet", "Name clan predator ambition desire health willpower", 7, 0.95, "direct") == (
         "sheet",
         ["navigational", "very_short"],
+    )
+    assert classify_rule_chunk("V A M P I R E", "Core Book 2 0 5", 4, 0.95, "direct") == (
+        "furniture",
+        ["navigational", "page_furniture", "very_short"],
     )
     assert classify_rule_chunk("Page 4", "12 13 -- ..", 3, 0.4, "ocr") == (
         "art",
@@ -529,7 +730,7 @@ def test_rag_v2_metadata_detects_aliases_locations_and_evidence_cues() -> None:
         "direct",
     )
 
-    assert metadata.rag_schema_version == 1
+    assert metadata.rag_schema_version == 2
     assert "Advancement" in metadata.heading_path
     assert "obfuscate" in metadata.aliases
     assert {"advancement", "cost", "prerequisite"}.issubset(set(metadata.evidence_cues))

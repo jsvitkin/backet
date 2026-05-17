@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from backet.embeddings import HashEmbeddingBackend, cosine_similarity, resolve_embedding_backend
+from backet.embeddings import HashEmbeddingBackend, OllamaEmbeddingBackend, cosine_similarity, resolve_embedding_backend
 from backet.errors import AppError
 
 
@@ -30,3 +30,17 @@ def test_resolve_embedding_backend_rejects_unknown_backend(monkeypatch: pytest.M
 
     with pytest.raises(AppError, match="Unknown embedding backend"):
         resolve_embedding_backend()
+
+
+def test_ollama_embedding_backend_normalizes_vectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "backet.embeddings.ollama_embed",
+        lambda texts, model, endpoint, timeout_seconds: {"model": model, "embeddings": [[3.0, 4.0], [0.0, 2.0]]},
+    )
+    backend = OllamaEmbeddingBackend(model_name="nomic-embed-text")
+
+    result = backend.encode_many(["blood bond", "obfuscate"])
+
+    assert result.backend_name == "ollama"
+    assert result.model_name == "nomic-embed-text"
+    assert result.vectors[0] == pytest.approx([0.6, 0.8])

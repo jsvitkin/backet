@@ -925,16 +925,16 @@ def configure_answer_setup(
 ) -> CommandResult:
     state = load_or_initialize_setup_state(vault_root, save=True)
     normalized_mode = str(mode).strip() or "template"
-    if normalized_mode not in {"template", "llama-local"}:
+    if normalized_mode not in {"template", "llama-local", "ollama-local"}:
         raise AppError(
             code="bot_setup_answer_mode_invalid",
             message="Unsupported bot answer mode.",
-            hint="Use template or llama-local.",
+            hint="Use template, llama-local, or ollama-local.",
             details={"mode": mode},
             exit_code=2,
         )
     answers: dict[str, Any] = {"mode": normalized_mode}
-    if normalized_mode == "llama-local":
+    if normalized_mode in {"llama-local", "ollama-local"}:
         answers["model"] = {str(key): str(value) for key, value in (model or {}).items() if value not in (None, "")}
     state["answers"] = answers
     _sync_answer_service_state(state)
@@ -1309,6 +1309,16 @@ def _sync_answer_service_state(state: dict[str, Any]) -> None:
             "model": str(model.get("name") or model.get("model") or path).strip(),
             "local_model_path": path or None,
             "timeout_seconds": model.get("timeout_seconds") or model.get("timeout") or 20,
+            "enabled": True,
+        }
+    if answers.get("mode") == "ollama-local":
+        model = dict(answers.get("model", {}) or {})
+        services[SERVICE_ROLE_ANSWER] = {
+            "provider": "ollama",
+            "endpoint": str(model.get("endpoint") or "http://127.0.0.1:11434").rstrip("/"),
+            "endpoint_env": "BACKET_OLLAMA_ENDPOINT",
+            "model": str(model.get("name") or model.get("model") or "llama3.2:3b").strip(),
+            "timeout_seconds": model.get("timeout_seconds") or model.get("timeout") or 60,
             "enabled": True,
         }
     runtime.setdefault("profile", RUNTIME_PROFILE_LITE)

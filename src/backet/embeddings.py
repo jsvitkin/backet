@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from backet.errors import AppError
+from backet.local_runtime import DEFAULT_OLLAMA_EMBEDDING_MODEL, DEFAULT_OLLAMA_TIMEOUT_SECONDS, ollama_embed
 
 DEFAULT_SENTENCE_MODEL = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
 TOKEN_PATTERN = re.compile(r"[a-z0-9']+")
@@ -81,6 +82,55 @@ class SentenceTransformerEmbeddingBackend(EmbeddingBackend):
         )
 
 
+class OllamaEmbeddingBackend(EmbeddingBackend):
+    def __init__(
+        self,
+        model_name: str = DEFAULT_OLLAMA_EMBEDDING_MODEL,
+        *,
+        endpoint: str | None = None,
+        timeout_seconds: float = DEFAULT_OLLAMA_TIMEOUT_SECONDS,
+    ) -> None:
+        self.name = "ollama"
+        self.model_name = model_name
+        self.endpoint = endpoint or os.environ.get("BACKET_OLLAMA_ENDPOINT")
+        self.timeout_seconds = timeout_seconds
+
+    def encode_many(self, texts: list[str]) -> EmbeddingResult:
+        try:
+            payload = ollama_embed(texts, model=self.model_name, endpoint=self.endpoint, timeout_seconds=self.timeout_seconds)
+        except AppError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive guard around HTTP/runtime adapters.
+            raise AppError(
+                code="embedding_backend_unavailable",
+                message="Ollama embedding backend is unavailable.",
+                hint="Start Ollama, pull the configured embedding model, or set BACKET_EMBEDDING_BACKEND=hash.",
+                details={"backend": self.name, "model_name": self.model_name, "error": str(exc)},
+                exit_code=2,
+            ) from exc
+        embeddings = payload.get("embeddings")
+        if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+            raise AppError(
+                code="embedding_backend_invalid_response",
+                message="Ollama returned an invalid embedding response.",
+                hint="Check the Ollama version and embedding model.",
+                details={"backend": self.name, "model_name": self.model_name},
+                exit_code=2,
+            )
+        vectors: list[list[float]] = []
+        for row in embeddings:
+            if not isinstance(row, list):
+                raise AppError(
+                    code="embedding_backend_invalid_response",
+                    message="Ollama returned a non-vector embedding row.",
+                    hint="Use an embedding-capable Ollama model.",
+                    details={"backend": self.name, "model_name": self.model_name},
+                    exit_code=2,
+                )
+            vectors.append(normalize_vector([float(value) for value in row]))
+        return EmbeddingResult(backend_name=self.name, model_name=str(payload.get("model") or self.model_name), vectors=vectors)
+
+
 def resolve_embedding_backend() -> EmbeddingBackend:
     requested = os.environ.get("BACKET_EMBEDDING_BACKEND", "auto").strip().lower()
     return _resolve_backend(requested)
@@ -90,6 +140,12 @@ def resolve_embedding_backend() -> EmbeddingBackend:
 def _resolve_backend(requested: str) -> EmbeddingBackend:
     if requested == "hash":
         return HashEmbeddingBackend()
+    if requested in {"ollama", "ollama-local", "ollama_local"}:
+        return OllamaEmbeddingBackend(
+            model_name=os.environ.get("BACKET_EMBEDDING_MODEL", DEFAULT_OLLAMA_EMBEDDING_MODEL),
+            endpoint=os.environ.get("BACKET_OLLAMA_ENDPOINT"),
+            timeout_seconds=float(os.environ.get("BACKET_EMBEDDING_TIMEOUT", DEFAULT_OLLAMA_TIMEOUT_SECONDS)),
+        )
     if requested in {"auto", "", "sentence-transformers", "sentence_transformers"}:
         try:
             return SentenceTransformerEmbeddingBackend()
@@ -100,7 +156,7 @@ def _resolve_backend(requested: str) -> EmbeddingBackend:
     raise AppError(
         code="embedding_backend_unknown",
         message=f"Unknown embedding backend: {requested}",
-        hint="Use BACKET_EMBEDDING_BACKEND=auto, sentence-transformers, or hash.",
+        hint="Use BACKET_EMBEDDING_BACKEND=auto, ollama, sentence-transformers, or hash.",
         details={"requested_backend": requested},
         exit_code=2,
     )

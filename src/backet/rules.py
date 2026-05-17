@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -26,6 +26,7 @@ from backet.rules_query_planner import (
     INTENT_DEFINITION,
     INTENT_DICE_POOL,
     INTENT_TARGETING,
+    INTENT_TIMING,
     TARGETED_MECHANIC_ALIASES,
     TARGETED_POWER_ALIASES,
     RulesQueryPlan,
@@ -56,7 +57,7 @@ from backet.system_dependencies import has_tesseract, tesseract_command, tessera
 from backet.vault import ensure_bootstrapped_vault
 
 RULES_SCHEMA_VERSION = 5
-RULES_RAG_V2_METADATA_SCHEMA_VERSION = 1
+RULES_RAG_V2_METADATA_SCHEMA_VERSION = 2
 RULES_RAG_V2_RETRIEVAL_SCHEMA_VERSION = 1
 DEFAULT_PAGE_MIN_CHARS = 80
 DEFAULT_CHUNK_WORDS = 220
@@ -126,6 +127,8 @@ RAG_V2_PHRASE_CHANNEL_CAP = 30
 RAG_V2_ALIAS_CHANNEL_CAP = 30
 RAG_V2_METADATA_CHANNEL_CAP = 40
 RAG_V2_RAW_FALLBACK_CHANNEL_CAP = 20
+RAG_V2_NEIGHBOR_EXPANSION_SEED_LIMIT = 8
+RAG_V2_NEIGHBOR_EXPANSION_PER_SEED = 4
 RAG_V2_SELECTED_LIMIT_FLOOR = 1
 RAG_V2_REJECTED_LIMIT = 8
 RAG_V2_FALLBACK_CONTEXT_LIMIT = 6
@@ -136,6 +139,7 @@ NON_ANSWER_SECTION_PENALTIES = {
     "index": 0.4,
     "sheet": 0.35,
     "art": 0.3,
+    "furniture": 0.35,
 }
 RETRIEVAL_FLAG_PENALTIES = {
     "suspect_ocr": 0.2,
@@ -288,6 +292,7 @@ class RuleSearchCandidate:
     scope_fallback_used: bool
     page_start: int
     page_end: int
+    chunk_index: int
     section_label: str
     content: str
     excerpt: str
@@ -841,6 +846,7 @@ def query_rules_connection(
     query_terms = _rules_query_terms(query_plan.scoring_query) or _rules_query_terms(query_plan.semantic_query)
     normalized_tags = normalize_scope_tags(scope_tags or [])
     excluded_chunks = _active_excluded_chunk_count(connection, book_id)
+    corpus_blockers = _query_corpus_blockers(connection, book_id=book_id)
     exact_rows, semantic, channel_matches, rag_v2_diagnostics = _generate_rag_v2_candidates(
         connection,
         query_plan=query_plan,
@@ -867,6 +873,30 @@ def query_rules_connection(
         channel_matches=channel_matches,
     )
     rows = _rerank_rag_v2_candidates(rows, query_plan=query_plan)
+    neighbor_rows = _expand_rag_v2_neighbor_rows(
+        connection,
+        seeds=rows,
+        query_plan=query_plan,
+        book_id=book_id,
+        scope_tags=normalized_tags,
+        limit=RAG_V2_NEIGHBOR_EXPANSION_PER_SEED,
+    )
+    rag_v2_diagnostics["neighbor_expansion"] = {
+        "seed_limit": RAG_V2_NEIGHBOR_EXPANSION_SEED_LIMIT,
+        "candidate_count": len(neighbor_rows),
+    }
+    if neighbor_rows:
+        neighbor_channel_matches = {int(row["chunk_id"]): {"neighbor_expansion"} for row in neighbor_rows}
+        neighbor_candidates = _merge_rule_candidates(
+            neighbor_rows,
+            [],
+            scope_tags=normalized_tags,
+            query_terms=query_terms,
+            definition_query=INTENT_DEFINITION in query_plan.intents or _is_definition_rule_query(query),
+            channel_matches=neighbor_channel_matches,
+        )
+        rows = _merge_candidate_lists(rows, neighbor_candidates)
+        rows = _rerank_rag_v2_candidates(rows, query_plan=query_plan)
     if not rows:
         raise AppError(
             code="rules_query_empty",
@@ -943,6 +973,7 @@ def query_rules_connection(
             "evidence_status": evidence_packet.evidence_status,
             "semantic_quality": rag_v2_diagnostics.get("semantic_quality"),
             "reviewed_exclusions": {"excluded_chunks": excluded_chunks},
+            "corpus_blockers": corpus_blockers,
             "semantic_error": semantic.error,
             "primary_results": primary,
             "fallback_results": fallback,
@@ -995,6 +1026,7 @@ def audit_rules(vault_root: Path, book_id: str | None = None) -> CommandResult:
         for book in books:
             suspects.append(_rules_audit_book_report(connection, book))
         semantic_index = _inspect_rule_semantic_index_for_current_backend(connection, book_id=book_id)
+        corpus_health = _inspect_rules_corpus_health(connection, books=books, book_reports=suspects)
 
     return CommandResult(
         message="Audited ingested rulebooks",
@@ -1003,6 +1035,7 @@ def audit_rules(vault_root: Path, book_id: str | None = None) -> CommandResult:
             "book_id": book_id,
             "books": suspects,
             "semantic_index": semantic_index,
+            "corpus_health": corpus_health,
             "maintenance": _rules_audit_maintenance_findings(semantic_index),
         },
     )
@@ -1092,7 +1125,7 @@ def _rules_audit_book_report(connection: sqlite3.Connection, book: sqlite3.Row) 
     reviewable_pages = sorted({card["page_start"] for card in review_cards})
     excluded_chunks = _active_excluded_chunk_count(connection, current_book_id)
 
-    return {
+    report = {
         "book_id": current_book_id,
         "book_title": book["book_title"],
         "tier": book["tier"],
@@ -1108,6 +1141,7 @@ def _rules_audit_book_report(connection: sqlite3.Connection, book: sqlite3.Row) 
             "resolved_findings": resolved_count,
             "notices": category_counts.get("notice", 0),
             "blocked": category_counts.get("blocked", 0),
+            "pending_blocked": sum(1 for finding in findings if not finding.resolved and finding.category == "blocked"),
             "excluded_chunks": excluded_chunks,
             "by_category": category_counts,
         },
@@ -1156,6 +1190,196 @@ def _rules_audit_book_report(connection: sqlite3.Connection, book: sqlite3.Row) 
             }
             for row in suspect_chunks
         ],
+    }
+    report["corpus_health"] = _rules_corpus_action_for_book(
+        report,
+        semantic_index=None,
+        vault_label="<vault>",
+    )
+    return report
+
+
+def _inspect_rules_corpus_health(
+    connection: sqlite3.Connection,
+    *,
+    books: list[sqlite3.Row],
+    book_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    try:
+        backend = resolve_embedding_backend()
+    except AppError as error:
+        backend = None
+        backend_error = _semantic_error(error)
+    else:
+        backend_error = None
+
+    reports_by_id = {str(report.get("book_id")): report for report in book_reports}
+    book_health: list[dict[str, Any]] = []
+    for book in books:
+        current_book_id = str(book["book_id"])
+        report = reports_by_id.get(current_book_id, {})
+        semantic_index = None
+        if backend is not None:
+            semantic_index = _semantic_index_summary(
+                _fetch_rule_chunks_for_index(connection, book_id=current_book_id),
+                backend=backend,
+            )
+        health = _rules_corpus_action_for_book(
+            report,
+            semantic_index=semantic_index,
+            vault_label="<vault>",
+            backend_error=backend_error,
+        )
+        report["corpus_health"] = health
+        book_health.append(health)
+
+    action_order = {"none": 0, "reindex": 1, "repair": 2, "reingest": 3}
+    overall = max(book_health, key=lambda item: action_order.get(str(item.get("action")), 0), default={"action": "none"})
+    return {
+        "schema_version": 1,
+        "action": overall.get("action", "none"),
+        "books": book_health,
+        "summary": {
+            "none": sum(1 for item in book_health if item.get("action") == "none"),
+            "reindex": sum(1 for item in book_health if item.get("action") == "reindex"),
+            "repair": sum(1 for item in book_health if item.get("action") == "repair"),
+            "reingest": sum(1 for item in book_health if item.get("action") == "reingest"),
+        },
+        "reingest_sources": [
+            {
+                "book_id": item.get("book_id"),
+                "book_title": item.get("book_title"),
+                "pdf_path": item.get("source", {}).get("pdf_path"),
+                "source_status": item.get("source", {}).get("status"),
+            }
+            for item in book_health
+            if item.get("action") == "reingest"
+        ],
+    }
+
+
+def _rules_corpus_action_for_book(
+    book: dict[str, Any],
+    *,
+    semantic_index: dict[str, Any] | None,
+    vault_label: str,
+    backend_error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    book_id = str(book.get("book_id") or "")
+    source = dict(book.get("source_status") or {})
+    summary = dict(book.get("review_summary") or {})
+    chunk_count = int(book.get("chunk_count") or 0)
+    page_count = int(book.get("page_count") or 0)
+    suspect_pages = len(book.get("suspect_pages") or [])
+    suspect_chunks = len(book.get("suspect_chunks") or [])
+    blocked = int(summary.get("blocked") or 0)
+    pending_blocked = int(summary.get("pending_blocked") or 0)
+    pending = int(summary.get("pending_pages") or 0)
+    actionable_suspect_pages = sum(
+        1
+        for page in book.get("suspect_pages") or []
+        if str(page.get("review_state") or "pending") not in AUDIT_RESOLVING_DECISIONS
+    )
+    actionable_suspect_chunks = sum(
+        1
+        for chunk in book.get("suspect_chunks") or []
+        if str(chunk.get("review_state") or "pending") not in AUDIT_RESOLVING_DECISIONS
+    )
+    reasons: list[str] = []
+
+    missing = stale = 0
+    if semantic_index is None:
+        if backend_error is not None:
+            reasons.append("embedding_backend_unavailable")
+            missing = chunk_count
+    else:
+        missing = int(semantic_index.get("missing_embeddings") or 0) + int(semantic_index.get("missing_metadata") or 0)
+        stale = int(semantic_index.get("stale_embeddings") or 0) + int(semantic_index.get("stale_metadata") or 0)
+        if missing:
+            reasons.append("missing_retrieval_index")
+        if stale:
+            reasons.append("stale_retrieval_index")
+
+    unusable_ratio = (actionable_suspect_pages + actionable_suspect_chunks) / max(page_count + chunk_count, 1)
+    if chunk_count == 0:
+        action = "reingest"
+        reasons.append("no_stored_chunks")
+    elif unusable_ratio >= 0.35 or pending_blocked > 0:
+        action = "repair" if source.get("status") == "available" else "reingest"
+        reasons.append("stored_text_quality")
+    elif missing or stale or backend_error is not None:
+        action = "reindex"
+    elif pending:
+        action = "repair"
+        reasons.append("review_pending")
+    else:
+        action = "none"
+
+    if action == "reindex":
+        command = f"backet rules index {vault_label} --book-id {book_id} --full"
+        source_pdf_required = False
+    elif action == "repair":
+        command = f"backet rules audit {vault_label} --book-id {book_id} --review"
+        source_pdf_required = source.get("status") == "available"
+    elif action == "reingest":
+        command = f"backet rules ingest {vault_label} <source-pdf> --book-id {book_id}"
+        source_pdf_required = True
+    else:
+        command = None
+        source_pdf_required = False
+
+    return {
+        "book_id": book_id,
+        "book_title": book.get("book_title"),
+        "action": action,
+        "reasons": sorted(set(reasons)),
+        "next_command": command,
+        "source_pdf_required": source_pdf_required,
+        "source": {
+            "status": source.get("status"),
+            "pdf_path": source.get("pdf_path"),
+            "stored_fingerprint": source.get("stored_fingerprint"),
+        },
+        "retrieval_index": {
+            "missing": missing,
+            "stale": stale,
+            "backend_error": backend_error,
+        },
+        "quality": {
+            "suspect_pages": suspect_pages,
+            "suspect_chunks": suspect_chunks,
+            "actionable_suspect_pages": actionable_suspect_pages,
+            "actionable_suspect_chunks": actionable_suspect_chunks,
+            "pending_pages": pending,
+            "blocked": blocked,
+            "pending_blocked": pending_blocked,
+            "unusable_ratio": round(unusable_ratio, 4),
+        },
+    }
+
+
+def _query_corpus_blockers(connection: sqlite3.Connection, *, book_id: str | None) -> dict[str, Any]:
+    try:
+        backend = resolve_embedding_backend()
+    except AppError as error:
+        return {
+            "action": "reindex",
+            "blockers": ["embedding_backend_unavailable"],
+            "repair_hint": "Configure a local embedding backend, then run `backet rules index <vault> --full`.",
+            "semantic_error": _semantic_error(error),
+        }
+    summary = _semantic_index_summary(_fetch_rule_chunks_for_index(connection, book_id=book_id), backend=backend)
+    blockers: list[str] = []
+    if summary["missing_embeddings"] or summary["missing_metadata"]:
+        blockers.append("missing_retrieval_index")
+    if summary["stale_embeddings"] or summary["stale_metadata"]:
+        blockers.append("stale_retrieval_index")
+    return {
+        "action": "reindex" if blockers else "none",
+        "blockers": blockers,
+        "repair_hint": _rules_index_hint(book_id) if blockers else None,
+        "missing": int(summary["missing_embeddings"]) + int(summary["missing_metadata"]),
+        "stale": int(summary["stale_embeddings"]) + int(summary["stale_metadata"]),
     }
 
 
@@ -1375,7 +1599,7 @@ def _audit_notices_for_pages(
 
 
 def _audit_category_for_low_confidence(section_kind: str, *, source_status: RuleSourceStatus) -> str:
-    if section_kind in {"art", "toc", "index", "sheet"}:
+    if section_kind in {"art", "toc", "index", "sheet", "furniture"}:
         return "notice"
     if not source_status.repair_eligible:
         return "blocked"
@@ -1383,7 +1607,7 @@ def _audit_category_for_low_confidence(section_kind: str, *, source_status: Rule
 
 
 def _audit_page_reason(flags: list[str], section_kind: str, source_status: RuleSourceStatus) -> str:
-    if section_kind in {"art", "toc", "index", "sheet"}:
+    if section_kind in {"art", "toc", "index", "sheet", "furniture"}:
         return f"Likely {section_kind} material; review only if this page should answer rules queries."
     if not source_status.repair_eligible:
         return f"Extraction looks weak and automatic repair is blocked: {source_status.message}"
@@ -3283,6 +3507,7 @@ def _search_rule_chunks_by_metadata(
             rc.scope_tags_json AS chunk_scope_tags_json,
             rc.page_start,
             rc.page_end,
+            rc.chunk_index,
             rc.section_label,
             rc.content,
             rc.excerpt,
@@ -3445,8 +3670,9 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
         "scope_fallback_used": row.scope_fallback_used,
         "page_start": row.page_start,
         "page_end": row.page_end,
+        "chunk_index": row.chunk_index,
         "section_label": row.section_label,
-        "excerpt": row.excerpt,
+        "excerpt": _candidate_source_window(row),
         "content": row.content,
         "confidence": row.confidence,
         "extraction_method": row.extraction_method,
@@ -3467,6 +3693,62 @@ def _row_to_rule_result(row: RuleSearchCandidate) -> dict[str, Any]:
         "retrieval_channels": sorted(set(row.retrieval_channels)),
         "rejection_reasons": sorted(set(row.rejection_reasons)),
     }
+
+
+def _candidate_source_window(candidate: RuleSearchCandidate, limit: int = 360) -> str:
+    content = " ".join(str(candidate.content or "").split())
+    if not content:
+        return str(candidate.excerpt or "")
+    anchors: list[str] = []
+    _extend_unique(anchors, candidate.aliases)
+    _extend_unique(anchors, [str(entity.get("alias") or "") for entity in candidate.entity_locations])
+    cue_anchors = {
+        "system": "system:",
+        "cost": "cost:",
+        "dice_pool": "dice pool",
+        "targeting": "target",
+        "advancement": "experience",
+        "consequence": "on a success",
+        "definition": str(candidate.section_label or ""),
+    }
+    for cue in candidate.evidence_cues:
+        if cue in cue_anchors:
+            _add_unique(anchors, cue_anchors[cue])
+    normalized = _normalize_rule_alias(content)
+    best_index = -1
+    for anchor in anchors:
+        needle = _normalize_rule_alias(anchor)
+        if not needle:
+            continue
+        match = re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", normalized)
+        if match is not None:
+            best_index = match.start()
+            break
+    if best_index < 0:
+        return str(candidate.excerpt or content[:limit])
+
+    # Use a raw-content search for a readable start whenever possible; normalized
+    # positions are only approximate after punctuation and whitespace cleanup.
+    raw_lower = content.casefold()
+    raw_indexes = [raw_lower.find(str(anchor).casefold().rstrip(":")) for anchor in anchors if str(anchor).strip()]
+    raw_indexes = [index for index in raw_indexes if index >= 0]
+    raw_index = min(raw_indexes) if raw_indexes else min(best_index, len(content))
+    start = max(0, raw_index - 80)
+    end = min(len(content), start + limit)
+    if start > 0:
+        previous_space = content.find(" ", start)
+        if previous_space > 0 and previous_space < start + 40:
+            start = previous_space + 1
+    if end < len(content):
+        end_space = content.rfind(" ", start, end)
+        if end_space > start + 80:
+            end = end_space
+    window = content[start:end].strip()
+    if start > 0:
+        window = f"... {window}"
+    if end < len(content):
+        window = f"{window} ..."
+    return window
 
 
 def _candidate_has_precedence_scope(candidate: RuleSearchCandidate, scope_tags: list[str]) -> bool:
@@ -3523,6 +3805,7 @@ def _search_semantic_rule_chunks(
             rc.scope_tags_json AS chunk_scope_tags_json,
             rc.page_start,
             rc.page_end,
+            rc.chunk_index,
             rc.section_label,
             rc.content,
             rc.excerpt,
@@ -3635,6 +3918,143 @@ def _merge_rule_candidates(
     return sorted(candidates.values(), key=_candidate_sort_key)
 
 
+def _expand_rag_v2_neighbor_rows(
+    connection: sqlite3.Connection,
+    *,
+    seeds: list[RuleSearchCandidate],
+    query_plan: RulesQueryPlan,
+    book_id: str | None,
+    scope_tags: list[str],
+    limit: int,
+) -> list[sqlite3.Row]:
+    if not seeds:
+        return []
+    rows: list[sqlite3.Row] = []
+    returned: set[int] = set()
+    expansion_seeds = [
+        seed
+        for seed in seeds[:RAG_V2_NEIGHBOR_EXPANSION_SEED_LIMIT]
+        if _candidate_has_entity_anchor(seed, query_plan)
+        and _candidate_answerability_rejections(seed, query_plan)
+        and seed.section_kind not in {"toc", "index", "sheet", "art", "furniture"}
+    ]
+    for seed in expansion_seeds:
+        for row in _neighbor_rows_for_seed(connection, seed=seed, book_id=book_id, scope_tags=scope_tags, limit=limit):
+            chunk_id = int(row["chunk_id"])
+            if chunk_id in returned:
+                continue
+            returned.add(chunk_id)
+            rows.append(row)
+    return rows
+
+
+def _neighbor_rows_for_seed(
+    connection: sqlite3.Connection,
+    *,
+    seed: RuleSearchCandidate,
+    book_id: str | None,
+    scope_tags: list[str],
+    limit: int,
+) -> list[sqlite3.Row]:
+    rows = connection.execute(
+        """
+        SELECT
+            rc.id AS chunk_id,
+            rc.book_id,
+            b.book_title,
+            b.tier,
+            b.scope_tags_json AS book_scope_tags_json,
+            rc.scope_tags_json AS chunk_scope_tags_json,
+            rc.page_start,
+            rc.page_end,
+            rc.chunk_index,
+            rc.section_label,
+            rc.content,
+            rc.excerpt,
+            rc.word_count,
+            rc.content_hash,
+            rc.confidence,
+            rc.extraction_method,
+            m.section_kind,
+            m.retrieval_flags_json,
+            m.content_hash AS metadata_content_hash,
+            m.rag_schema_version,
+            m.heading_path_json,
+            m.aliases_json,
+            m.entity_locations_json,
+            m.evidence_cues_json,
+            COALESCE((
+                SELECT json_group_array(json_object(
+                    'id', rsa.id,
+                    'tag', rsa.tag,
+                    'role', rsa.role,
+                    'status', rsa.status,
+                    'confidence', rsa.confidence
+                ))
+                FROM rule_chunk_scope_assertions csa
+                JOIN rule_scope_assertions rsa ON rsa.id = csa.assertion_id
+                WHERE csa.chunk_id = rc.id
+                  AND rsa.status = 'applied'
+            ), '[]') AS scope_assertions_json,
+            0.0 AS rank
+        FROM rule_chunks rc
+        JOIN books b ON b.book_id = rc.book_id
+        LEFT JOIN rule_chunk_retrieval_metadata m ON m.chunk_id = rc.id
+        LEFT JOIN rule_retrieval_exclusions rex
+          ON rex.chunk_id = rc.id
+         AND rex.content_hash = rc.content_hash
+        WHERE rc.book_id = ?
+          AND rc.id != ?
+          AND rex.id IS NULL
+          AND rc.page_start = ?
+          AND ABS(rc.chunk_index - ?) <= 1
+        ORDER BY ABS(rc.chunk_index - ?), rc.chunk_index
+        LIMIT ?
+        """,
+        (seed.book_id, seed.chunk_id, seed.page_start, seed.chunk_index, seed.chunk_index, limit),
+    ).fetchall()
+    filtered: list[sqlite3.Row] = []
+    for row in rows:
+        if book_id and row["book_id"] != book_id:
+            continue
+        if row["tier"] == "supplement" and scope_tags and not _row_matches_scope(row, scope_tags):
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def _merge_candidate_lists(
+    base: list[RuleSearchCandidate],
+    additions: list[RuleSearchCandidate],
+) -> list[RuleSearchCandidate]:
+    merged: dict[int, RuleSearchCandidate] = {candidate.chunk_id: candidate for candidate in base}
+    for candidate in additions:
+        existing = merged.get(candidate.chunk_id)
+        if existing is None:
+            merged[candidate.chunk_id] = candidate
+            continue
+        existing.exact_score = max(existing.exact_score, candidate.exact_score)
+        existing.semantic_score = max(existing.semantic_score, candidate.semantic_score)
+        existing.lexical_score = max(existing.lexical_score, candidate.lexical_score)
+        existing.evidence_score = max(existing.evidence_score, candidate.evidence_score)
+        existing.score = max(existing.score, candidate.score)
+        _extend_unique(existing.match_reasons, candidate.match_reasons)
+        _extend_unique(existing.retrieval_channels, candidate.retrieval_channels)
+        _extend_unique(existing.rejection_reasons, candidate.rejection_reasons)
+    return sorted(merged.values(), key=_candidate_sort_key)
+
+
+def _dedupe_candidates(candidates: list[RuleSearchCandidate]) -> list[RuleSearchCandidate]:
+    seen: set[int] = set()
+    deduped: list[RuleSearchCandidate] = []
+    for candidate in candidates:
+        if candidate.chunk_id in seen:
+            continue
+        seen.add(candidate.chunk_id)
+        deduped.append(candidate)
+    return deduped
+
+
 def _candidate_from_row(row: sqlite3.Row) -> RuleSearchCandidate:
     section_kind = _row_optional(row, "section_kind")
     retrieval_flags = _json_list(_row_optional(row, "retrieval_flags_json"))
@@ -3679,6 +4099,7 @@ def _candidate_from_row(row: sqlite3.Row) -> RuleSearchCandidate:
         scope_fallback_used=scope_fallback_used,
         page_start=int(row["page_start"]),
         page_end=int(row["page_end"]),
+        chunk_index=int(_row_optional(row, "chunk_index") or 0),
         section_label=str(row["section_label"]),
         content=str(row["content"]),
         excerpt=str(row["excerpt"]),
@@ -3774,13 +4195,90 @@ def _rag_v2_evidence_score(candidate: RuleSearchCandidate, query_plan: RulesQuer
         required = set(_intent_evidence_cues([intent]))
         if not required:
             continue
+        if intent == INTENT_ADVANCEMENT:
+            if "advancement" in cues:
+                score += 1.25
+            else:
+                score -= 0.9
+            continue
+        if intent == INTENT_TIMING:
+            if _candidate_has_timing_answer(candidate, query_plan):
+                score += 1.4
+                score += _candidate_timing_subject_score(candidate, query_plan)
+            elif "duration" in cues:
+                score += 0.5
+            else:
+                score -= 0.45
+            continue
         if cues & required:
             score += 0.85
-        elif intent in {INTENT_ADVANCEMENT, INTENT_TARGETING, INTENT_DEFINITION, INTENT_COST, INTENT_DICE_POOL, INTENT_CONSEQUENCE}:
+        elif intent in {INTENT_ADVANCEMENT, INTENT_TARGETING, INTENT_DEFINITION, INTENT_COST, INTENT_TIMING, INTENT_DICE_POOL, INTENT_CONSEQUENCE}:
             score -= 0.35
+    if INTENT_DEFINITION in query_plan.intents and _candidate_has_definition_anchor(candidate, query_plan):
+        score += 0.8
     if INTENT_DEFINITION in query_plan.intents and "cost" in cues and not cues.intersection({"definition", "system"}):
         score -= 0.25
     return score
+
+
+def _candidate_has_definition_anchor(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> bool:
+    terms = _query_entity_anchor_terms(query_plan) or query_plan.canonical_terms
+    if not terms:
+        return False
+    haystack = _normalize_rule_alias(f"{candidate.section_label} {candidate.content}")
+    definition_cues = r"(?:is|are|means|refers to|represents|creates|create|becomes|become|anyone who|after three)"
+    for term in terms:
+        normalized = _normalize_rule_alias(term)
+        if not normalized:
+            continue
+        if normalized in haystack and any(
+            cue in haystack
+            for cue in (
+                f"{normalized} creates",
+                "anyone who drinks",
+                "after three drinks",
+                "becomes progressively",
+                "term the source",
+            )
+        ):
+            return True
+        if re.search(rf"\b(?:the\s+)?{re.escape(normalized)}\b.{0,180}\b{definition_cues}\b", haystack):
+            return True
+        if re.search(rf"\b{definition_cues}\b.{0,180}\b{re.escape(normalized)}\b", haystack):
+            return True
+    return False
+
+
+def _candidate_has_timing_answer(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan | None = None) -> bool:
+    if query_plan is not None and INTENT_TIMING not in query_plan.intents:
+        return False
+    haystack = _normalize_rule_alias(f"{candidate.section_label} {candidate.content}")
+    return bool(
+        re.search(r"\b(?:five|5)\s+minutes?\s+per\s+(?:level|ritual|ceremony)\b", haystack)
+        or re.search(r"\bperforming\s+(?:a\s+)?(?:ritual|ceremony)\s+requires\b.{0,180}\bminutes?\b", haystack)
+    )
+
+
+def _candidate_timing_subject_score(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> float:
+    haystack = _normalize_rule_alias(f"{candidate.section_label} {candidate.content}")
+    mechanics = {_normalize_rule_alias(term) for term in query_plan.entities.get("mechanics", [])}
+    if "ritual" in mechanics:
+        if re.search(r"\bperforming\s+(?:a\s+)?ritual\s+requires\b", haystack) or re.search(
+            r"\brituals\s+unless\s+otherwise\s+noted\b.{0,120}\bperforming\s+(?:a\s+)?ritual\s+requires\b",
+            haystack,
+        ):
+            return 1.6
+        if re.search(r"\bperforming\s+(?:a\s+)?ceremony\s+requires\b", haystack):
+            return -0.75
+    if "ceremony" in mechanics:
+        if re.search(r"\bperforming\s+(?:a\s+)?ceremony\s+requires\b", haystack) or re.search(
+            r"\bceremonies\s+unless\s+otherwise\s+noted\b.{0,120}\bperforming\s+(?:a\s+)?ceremony\s+requires\b",
+            haystack,
+        ):
+            return 1.6
+        if re.search(r"\bperforming\s+(?:a\s+)?ritual\s+requires\b", haystack):
+            return -0.75
+    return 0.0
 
 
 def _rag_v2_entity_score(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> float:
@@ -3813,7 +4311,7 @@ def _rag_v2_channel_score(candidate: RuleSearchCandidate) -> float:
 
 
 def _rag_v2_section_penalty(candidate: RuleSearchCandidate) -> float:
-    if candidate.section_kind in {"toc", "index", "sheet", "art"}:
+    if candidate.section_kind in {"toc", "index", "sheet", "art", "furniture"}:
         return 0.9
     if candidate.section_kind == "lore" and candidate.evidence_cues == ["lore"]:
         return 0.35
@@ -3822,14 +4320,21 @@ def _rag_v2_section_penalty(candidate: RuleSearchCandidate) -> float:
 
 def _rag_v2_rejection_reasons(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> list[str]:
     reasons: list[str] = []
-    if candidate.section_kind in {"toc", "index", "sheet", "art"}:
+    strong_answer = _candidate_has_strong_intent_answer(candidate, query_plan)
+    if candidate.section_kind in {"toc", "index", "sheet", "art", "furniture"} and not strong_answer:
         _add_unique(reasons, "low_quality_section")
+    general_advancement = INTENT_ADVANCEMENT in query_plan.intents and "advancement" in set(candidate.evidence_cues)
+    if _query_requires_entity_anchor(query_plan) and not _candidate_has_entity_anchor(candidate, query_plan) and not general_advancement:
+        _add_unique(reasons, "missing_entity_anchor")
+    if _query_target_group_terms(query_plan) and not _candidate_has_target_group(candidate, query_plan):
+        _add_unique(reasons, "missing_target_group")
     strict = _strict_evidence_requirements(query_plan.intents)
     if strict and not _candidate_satisfies_any_requirement(candidate, strict):
         if _candidate_mentions_query_entity(candidate, query_plan):
             _add_unique(reasons, "mere_mention")
+        _add_unique(reasons, "missing_intent_evidence")
         _add_unique(reasons, "missing_evidence_cue")
-    if candidate.retrieval_flags:
+    if candidate.retrieval_flags and not strong_answer:
         _add_unique(reasons, "retrieval_flagged")
     return reasons
 
@@ -3837,10 +4342,11 @@ def _rag_v2_rejection_reasons(candidate: RuleSearchCandidate, query_plan: RulesQ
 def _strict_evidence_requirements(intents: list[str]) -> dict[str, set[str]]:
     requirements: dict[str, set[str]] = {}
     mapping = {
-        INTENT_ADVANCEMENT: {"advancement", "prerequisite", "cost"},
+        INTENT_ADVANCEMENT: {"advancement"},
         INTENT_TARGETING: {"system", "targeting"},
         INTENT_DEFINITION: {"definition"},
         INTENT_COST: {"cost", "prerequisite"},
+        INTENT_TIMING: {"duration", "system"},
         INTENT_DICE_POOL: {"dice_pool", "system"},
         INTENT_CONSEQUENCE: {"consequence", "system"},
     }
@@ -3862,11 +4368,92 @@ def _intent_evidence_cues(intents: list[str]) -> list[str]:
 
 def _candidate_satisfies_any_requirement(candidate: RuleSearchCandidate, requirements: dict[str, set[str]]) -> bool:
     cues = set(candidate.evidence_cues)
-    return any(bool(cues & required) for required in requirements.values())
+    for intent, required in requirements.items():
+        if intent == INTENT_TIMING:
+            if _candidate_has_timing_answer(candidate):
+                return True
+            continue
+        if cues & required:
+            return True
+    return False
+
+
+def _candidate_has_strong_intent_answer(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> bool:
+    if INTENT_TIMING in query_plan.intents and _candidate_has_timing_answer(candidate, query_plan):
+        return True
+    return False
 
 
 def _candidate_mentions_query_entity(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> bool:
     return _rag_v2_entity_score(candidate, query_plan) > 0 or bool(candidate.aliases)
+
+
+def _query_requires_entity_anchor(query_plan: RulesQueryPlan) -> bool:
+    return bool(_query_entity_anchor_terms(query_plan))
+
+
+def _query_entity_anchor_terms(query_plan: RulesQueryPlan) -> list[str]:
+    entities = query_plan.entities
+    terms: list[str] = []
+    for key in ("powers", "disciplines", "mechanics", "clans"):
+        _extend_unique(terms, entities.get(key, []))
+    _extend_unique(terms, query_plan.canonical_terms)
+    return [
+        term
+        for term in _dedupe_text_values(terms)
+        if _normalize_rule_alias(term) not in {"power", "discipline", "rules", "system"}
+    ]
+
+
+def _candidate_has_entity_anchor(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> bool:
+    terms = _query_entity_anchor_terms(query_plan)
+    if not terms:
+        return True
+    haystack = _candidate_anchor_haystack(candidate)
+    return any(_contains_normalized_phrase(haystack, _normalize_rule_alias(term)) for term in terms)
+
+
+def _query_target_group_terms(query_plan: RulesQueryPlan) -> list[str]:
+    if INTENT_TARGETING not in query_plan.intents:
+        return []
+    normalized = query_plan.normalized_question
+    groups: list[str] = []
+    target_groups = {
+        "vampire": ("vampire", "vampires", "kindred", "other vampire", "other vampires"),
+        "mortal": ("mortal", "mortals", "human", "humans", "kine"),
+        "ghoul": ("ghoul", "ghouls"),
+        "animal": ("animal", "animals"),
+    }
+    for canonical, aliases in target_groups.items():
+        if any(_contains_normalized_phrase(normalized, _normalize_rule_alias(alias)) for alias in aliases):
+            _add_unique(groups, canonical)
+            _extend_unique(groups, aliases)
+    return _dedupe_text_values(groups)
+
+
+def _candidate_has_target_group(candidate: RuleSearchCandidate, query_plan: RulesQueryPlan) -> bool:
+    terms = _query_target_group_terms(query_plan)
+    if not terms:
+        return True
+    haystack = _candidate_anchor_haystack(candidate)
+    return any(_contains_normalized_phrase(haystack, _normalize_rule_alias(term)) for term in terms)
+
+
+def _candidate_anchor_haystack(candidate: RuleSearchCandidate) -> str:
+    entity_text: list[str] = []
+    for entity in candidate.entity_locations:
+        entity_text.extend([str(entity.get("alias") or ""), str(entity.get("canonical") or ""), str(entity.get("scope_tag") or "")])
+    return _normalize_rule_alias(
+        " ".join(
+            [
+                candidate.section_label,
+                candidate.content,
+                " ".join(candidate.aliases),
+                " ".join(candidate.scope_tags),
+                " ".join(entity_text),
+            ]
+        )
+    )
 
 
 def _build_rag_v2_evidence_packet(
@@ -3880,11 +4467,42 @@ def _build_rag_v2_evidence_packet(
     semantic: SemanticRulesSearch,
 ) -> RagV2EvidencePacket:
     strict_requirements = _strict_evidence_requirements(query_plan.intents)
-    candidate_pool = primary_rows[: max(limit, RAG_V2_SELECTED_LIMIT_FLOOR)]
+    candidate_limit = max(limit, RAG_V2_SELECTED_LIMIT_FLOOR)
+    entity_bridge_available = any(
+        _candidate_has_entity_anchor(candidate, query_plan)
+        for candidate in primary_rows
+        if candidate.section_kind not in {"toc", "index", "sheet", "art", "furniture"}
+    )
+    eligible_rows = [
+        candidate
+        for candidate in primary_rows
+        if not _candidate_answerability_rejections(
+            candidate,
+            query_plan,
+            entity_bridge_available=entity_bridge_available,
+        )
+    ]
+    if entity_bridge_available and any("neighbor_expansion" in set(candidate.retrieval_channels) for candidate in eligible_rows):
+        candidate_limit = max(candidate_limit, 2)
+        bridged_anchor_rows = [
+            candidate
+            for candidate in primary_rows
+            if _candidate_has_entity_anchor(candidate, query_plan)
+            and "neighbor_expansion" not in set(candidate.retrieval_channels)
+            and candidate.section_kind not in {"toc", "index", "sheet", "art", "furniture"}
+        ]
+        eligible_rows = _dedupe_candidates([*bridged_anchor_rows[:1], *eligible_rows])
+    candidate_pool = eligible_rows[:candidate_limit]
     satisfied = _satisfied_evidence_types(candidate_pool, strict_requirements)
     missing = [intent for intent in strict_requirements if intent not in satisfied]
+    entity_status = _entity_anchor_status(query_plan, candidate_pool)
+    target_status = _target_group_status(query_plan, candidate_pool)
+    if entity_status["required"] and not entity_status["satisfied"]:
+        missing.insert(0, "entity_anchor")
+    if target_status["required"] and not target_status["satisfied"]:
+        missing.insert(0, "target_group")
 
-    if strict_requirements and missing:
+    if (strict_requirements or entity_status["required"] or target_status["required"]) and missing:
         status = "insufficient"
         selected_evidence: list[dict[str, Any]] = []
         fallback_context = [_row_to_rule_result(row) for row in (primary_rows + fallback_rows)[:RAG_V2_FALLBACK_CONTEXT_LIMIT]]
@@ -3895,11 +4513,16 @@ def _build_rag_v2_evidence_packet(
 
     selected_ids = {item["book_id"] + ":" + str(item["page_start"]) + ":" + item["section_label"] for item in selected_evidence}
     rejected = []
+    semantic_quality = _semantic_quality(semantic)
     for candidate in all_rows:
         candidate_key = candidate.book_id + ":" + str(candidate.page_start) + ":" + candidate.section_label
         if candidate_key in selected_ids:
             continue
-        reasons = candidate.rejection_reasons or ["lower_ranked"]
+        reasons = [*candidate.rejection_reasons]
+        if set(candidate.retrieval_channels) == {"semantic"} and semantic_quality.get("status") != "available":
+            _add_unique(reasons, "degraded_semantic_only")
+        if not reasons:
+            reasons = ["lower_ranked"]
         rejected.append(_rag_v2_candidate_summary(candidate, reasons=reasons))
         if len(rejected) >= RAG_V2_REJECTED_LIMIT:
             break
@@ -3908,7 +4531,14 @@ def _build_rag_v2_evidence_packet(
     diagnostics = {
         **rag_v2_diagnostics,
         "reranked_candidates": len(all_rows),
-        "semantic_quality": _semantic_quality(semantic),
+        "semantic_quality": semantic_quality,
+        "entity_anchor_status": entity_status,
+        "target_group_status": target_status,
+        "intent_evidence_status": {
+            "required": sorted(strict_requirements),
+            "satisfied": sorted(satisfied),
+            "missing": missing,
+        },
     }
     return RagV2EvidencePacket(
         evidence_status=status,
@@ -3929,9 +4559,88 @@ def _satisfied_evidence_types(
 ) -> set[str]:
     satisfied: set[str] = set()
     for intent, cues in requirements.items():
+        if intent == INTENT_TIMING:
+            if any(_candidate_has_timing_answer(candidate) for candidate in candidates):
+                satisfied.add(intent)
+            continue
         if any(set(candidate.evidence_cues) & cues for candidate in candidates):
             satisfied.add(intent)
     return satisfied
+
+
+def _candidate_answerability_rejections(
+    candidate: RuleSearchCandidate,
+    query_plan: RulesQueryPlan,
+    *,
+    entity_bridge_available: bool = False,
+) -> list[str]:
+    reasons: list[str] = []
+    entity_bridged = entity_bridge_available and "neighbor_expansion" in set(candidate.retrieval_channels)
+    general_advancement = INTENT_ADVANCEMENT in query_plan.intents and "advancement" in set(candidate.evidence_cues)
+    if (
+        _query_requires_entity_anchor(query_plan)
+        and not _candidate_has_entity_anchor(candidate, query_plan)
+        and not entity_bridged
+        and not general_advancement
+    ):
+        _add_unique(reasons, "missing_entity_anchor")
+    if _query_target_group_terms(query_plan) and not _candidate_has_target_group(candidate, query_plan):
+        _add_unique(reasons, "missing_target_group")
+    strict = _strict_evidence_requirements(query_plan.intents)
+    if strict and not _candidate_satisfies_any_requirement(candidate, strict):
+        _add_unique(reasons, "missing_intent_evidence")
+    if candidate.section_kind in {"toc", "index", "sheet", "art", "furniture"} and not _candidate_has_strong_intent_answer(
+        candidate, query_plan
+    ):
+        _add_unique(reasons, "low_quality_section")
+    if reasons:
+        for reason in reasons:
+            _add_unique(candidate.rejection_reasons, reason)
+    return reasons
+
+
+def _entity_anchor_status(query_plan: RulesQueryPlan, candidates: list[RuleSearchCandidate]) -> dict[str, Any]:
+    terms = _query_entity_anchor_terms(query_plan)
+    if not terms:
+        return {"required": False, "satisfied": True, "terms": [], "missing_terms": []}
+    if INTENT_ADVANCEMENT in query_plan.intents and any("advancement" in set(candidate.evidence_cues) for candidate in candidates):
+        return {
+            "required": True,
+            "satisfied": True,
+            "terms": terms,
+            "matched_terms": ["general_advancement_rule"],
+            "missing_terms": [],
+        }
+    matched = [
+        term
+        for term in terms
+        if any(_contains_normalized_phrase(_candidate_anchor_haystack(candidate), _normalize_rule_alias(term)) for candidate in candidates)
+    ]
+    return {
+        "required": True,
+        "satisfied": bool(matched),
+        "terms": terms,
+        "matched_terms": _dedupe_text_values(matched),
+        "missing_terms": [term for term in terms if term not in matched],
+    }
+
+
+def _target_group_status(query_plan: RulesQueryPlan, candidates: list[RuleSearchCandidate]) -> dict[str, Any]:
+    terms = _query_target_group_terms(query_plan)
+    if not terms:
+        return {"required": False, "satisfied": True, "terms": [], "missing_terms": []}
+    matched = [
+        term
+        for term in terms
+        if any(_contains_normalized_phrase(_candidate_anchor_haystack(candidate), _normalize_rule_alias(term)) for candidate in candidates)
+    ]
+    return {
+        "required": True,
+        "satisfied": bool(matched),
+        "terms": terms,
+        "matched_terms": _dedupe_text_values(matched),
+        "missing_terms": [term for term in terms if term not in matched],
+    }
 
 
 def _rag_v2_candidate_summary(candidate: RuleSearchCandidate, *, reasons: list[str]) -> dict[str, Any]:
@@ -3940,6 +4649,7 @@ def _rag_v2_candidate_summary(candidate: RuleSearchCandidate, *, reasons: list[s
         "book_title": candidate.book_title,
         "page_start": candidate.page_start,
         "page_end": candidate.page_end,
+        "chunk_index": candidate.chunk_index,
         "section_label": candidate.section_label,
         "score": round(candidate.score, 6),
         "evidence_score": round(candidate.evidence_score, 6),
@@ -4226,6 +4936,8 @@ def _index_rule_chunks(
             "refreshed_embeddings": len(embedding_rows),
             "refreshed_metadata": len(metadata_rows),
             "full_reindex": full,
+            "source_pdf_required": False,
+            "source_operation": "stored_chunk_text",
         }
     )
     return summary
@@ -4469,6 +5181,8 @@ def classify_rule_chunk(
         section_kind = "toc"
     elif label_compact.startswith("index") or compact.startswith("index"):
         section_kind = "index"
+    elif _looks_page_furniture(section_label, content, word_count):
+        section_kind = "furniture"
     elif (
         "character sheet" in combined
         or "relationship map" in combined
@@ -4489,8 +5203,10 @@ def classify_rule_chunk(
         flags.append("very_short")
     if extraction_method == "ocr" and confidence < SUSPECT_CONFIDENCE_THRESHOLD:
         flags.append("suspect_ocr")
-    if section_kind in {"toc", "index", "sheet"}:
+    if section_kind in {"toc", "index", "sheet", "furniture"}:
         flags.append("navigational")
+    if section_kind == "furniture":
+        flags.append("page_furniture")
     if section_kind == "art":
         flags.append("art_heavy")
     return section_kind, sorted(set(flags))
@@ -4596,12 +5312,13 @@ def _detect_evidence_cues(*, section_label: str, content: str, section_kind: str
         _add_unique(cues, "duration")
     if re.search(r"\b(?:prerequisite|requires?|must|teacher|out of clan|access to|permission)\b", text):
         _add_unique(cues, "prerequisite")
-    if re.search(r"\b(?:target|targets|targeting|subject|victim|affect|affects|choose|range|vampire|kindred|mortal)\b", text):
+    if re.search(r"\b(?:target|targets|targeting|subject|affect|affects|choose|range|eligible|line of sight)\b", text):
         _add_unique(cues, "targeting")
-    if re.search(
-        r"\b(?:advancement|advance|acquire|acquisition|new discipline|new power|teacher|experience|out of clan)\b",
-        text,
-    ) or re.search(r"\blearn(?:ing)?\s+(?:a\s+)?(?:new\s+)?(?:discipline|power)\b", text):
+    if (
+        re.search(r"\b(?:advancement|advance|acquire|acquisition|new discipline|new power|teacher|out of clan)\b", text)
+        or re.search(r"\blearn(?:ing)?\s+(?:a\s+)?(?:new\s+)?(?:discipline|power|ceremony|ritual)\b", text)
+        or re.search(r"\b(?:experience points|trait costs?|spend(?:ing)?\s+\d+\s+experience|costs?\s+\d+\s+experience)\b", text)
+    ):
         _add_unique(cues, "advancement")
     if re.search(r"\b(?:on a success|on success|on a failure|on failure|succeeds?|fails?|result|consequence)\b", text):
         _add_unique(cues, "consequence")
@@ -4692,6 +5409,19 @@ def _looks_rules_substantive(text: str) -> bool:
         "willpower",
     )
     return any(term in text for term in rules_terms)
+
+
+def _looks_page_furniture(section_label: str, content: str, word_count: int) -> bool:
+    combined = f"{section_label} {content}".casefold()
+    compact = re.sub(r"[^a-z0-9]+", "", combined)
+    if word_count <= 18 and re.search(r"\b(?:core book|players guide|vampire the masquerade|chapter)\b", combined):
+        return True
+    if re.fullmatch(r"(?:page)?\d{1,4}", compact):
+        return True
+    spaced_caps = re.sub(r"\s+", " ", str(section_label or "").strip())
+    if len(spaced_caps) >= 12 and re.fullmatch(r"(?:[A-Z]\s+){4,}[A-Z]", spaced_caps):
+        return True
+    return False
 
 
 def _looks_art_heavy(content: str, word_count: int) -> bool:
@@ -4898,7 +5628,7 @@ def summarize_text(text: str, limit: int = 220) -> str:
     normalized = " ".join(text.split())
     if len(normalized) <= limit:
         return normalized
-    return normalized[: limit - 1].rstrip() + "…"
+    return normalized[: limit - 1].rstrip() + "â€¦"
 
 
 def fingerprint_text(text: str) -> str:

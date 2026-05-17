@@ -386,6 +386,7 @@ def answer_bot_query(
         denied=False,
         retrieval_attempted=True,
     )
+    trace["runtime"] = runtime_health
     return BotAnswer(
         command=normalized_command,
         access_tier=access.tier,
@@ -482,6 +483,7 @@ def build_answer_trace(
             "reranking": _trace_rag_v2_reranking(rag_v2),
             "answer_packet": _trace_answer_packet(answer_packet),
             "answerability": _trace_answerability(evidence_packet, answer_packet),
+            "synthesis": _trace_synthesis(generation),
         },
         "generation": generation,
         "response": {
@@ -868,6 +870,7 @@ def _trace_answerability(evidence_packet: Any, answer_packet: Any = None) -> dic
                 "satisfied_evidence": [],
             }
         return _unavailable_stage("not_available")
+    diagnostics = evidence_packet.get("retrieval_diagnostics") if isinstance(evidence_packet.get("retrieval_diagnostics"), dict) else {}
     return {
         "status": "available",
         "evidence_status": evidence_packet.get("evidence_status"),
@@ -875,6 +878,32 @@ def _trace_answerability(evidence_packet: Any, answer_packet: Any = None) -> dic
         "fallback_context_count": len(evidence_packet.get("fallback_context") or []),
         "missing_evidence": list(evidence_packet.get("missing_evidence") or []),
         "satisfied_evidence": list(evidence_packet.get("satisfied_evidence") or []),
+        "entity_anchor_status": diagnostics.get("entity_anchor_status"),
+        "target_group_status": diagnostics.get("target_group_status"),
+        "intent_evidence_status": diagnostics.get("intent_evidence_status"),
+        "semantic_quality": diagnostics.get("semantic_quality"),
+        "rejected_candidates": list(evidence_packet.get("rejected_candidates") or [])[:5],
+    }
+
+
+def _trace_synthesis(generation: Any) -> dict[str, Any]:
+    if not isinstance(generation, dict):
+        return _unavailable_stage("not_available")
+    diagnostics = generation.get("diagnostics") if isinstance(generation.get("diagnostics"), dict) else {}
+    synthesis = diagnostics.get("synthesis") if isinstance(diagnostics.get("synthesis"), dict) else {}
+    outline = diagnostics.get("answer_outline") if isinstance(diagnostics.get("answer_outline"), dict) else {}
+    if not synthesis and not outline:
+        return _unavailable_stage("not_available")
+    return {
+        "status": "available",
+        "mode": synthesis.get("mode") or generation.get("mode"),
+        "validation_status": synthesis.get("validation_status"),
+        "validation_error": synthesis.get("validation_error"),
+        "fallback_reason": synthesis.get("fallback_reason") or diagnostics.get("fallback_reason"),
+        "answer_shape": synthesis.get("answer_shape") or outline.get("answer_shape"),
+        "stance": outline.get("stance"),
+        "source_ids": list(synthesis.get("source_ids") or outline.get("source_ids") or []),
+        "outline": outline,
     }
 
 

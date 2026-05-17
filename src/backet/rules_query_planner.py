@@ -12,6 +12,7 @@ INTENT_DEFINITION = "definition"
 INTENT_ADVANCEMENT = "advancement"
 INTENT_TARGETING = "targeting"
 INTENT_COST = "cost"
+INTENT_TIMING = "timing"
 INTENT_DICE_POOL = "dice_pool"
 INTENT_CONSEQUENCE = "consequence"
 INTENT_BROAD_EXPLANATION = "broad_explanation"
@@ -21,6 +22,7 @@ INTENT_ORDER = (
     INTENT_ADVANCEMENT,
     INTENT_TARGETING,
     INTENT_COST,
+    INTENT_TIMING,
     INTENT_DICE_POOL,
     INTENT_CONSEQUENCE,
     INTENT_BROAD_EXPLANATION,
@@ -120,7 +122,7 @@ TARGETED_MECHANIC_ALIASES = {
 
 TARGETED_POWER_ALIASES = {
     "Dementation": {
-        "aliases": ("dementation",),
+        "aliases": ("dementation", "dementia"),
         "expanded": ("dementation", "dominate", "malkavian", "power"),
         "scope_tags": ("discipline:dominate",),
         "warning": (
@@ -143,6 +145,7 @@ REQUIRED_EVIDENCE_BY_INTENT = {
     ),
     INTENT_TARGETING: ("system", "target", "targets", "restrictions", "applicability", "affect"),
     INTENT_COST: ("cost", "rouse check", "experience", "spend"),
+    INTENT_TIMING: ("duration", "time", "minutes", "cast", "perform"),
     INTENT_DICE_POOL: ("dice pool", "test", "roll", "attribute", "skill"),
     INTENT_CONSEQUENCE: ("success", "failure", "consequence", "result"),
     INTENT_BROAD_EXPLANATION: ("overview", "system", "example"),
@@ -307,13 +310,19 @@ def normalize_rules_query_text(text: str) -> str:
 def _detect_intents(normalized: str, entities: dict[str, list[str]]) -> list[str]:
     intents: list[str] = []
     has_named_rule_entity = any(entities[key] for key in ("disciplines", "mechanics", "powers"))
+    timing_or_casting_query = bool(
+        re.search(r"\bhow\s+long\b.*\b(?:take|cast|perform)\b", normalized)
+        or re.search(r"\b(?:time|duration)\b.*\b(?:cast|perform)\b", normalized)
+    )
 
     if re.search(r"\b(?:what\s+(?:is|are)|define|definition|meaning)\b", normalized):
         _add(intents, INTENT_DEFINITION)
-    if re.search(r"\b(?:learn|acquire|buy|purchase|take|get|gain)\b", normalized) and (
+    if not timing_or_casting_query and re.search(r"\b(?:learn|acquire|buy|purchase|take|get|gain)\b", normalized) and (
         has_named_rule_entity or re.search(r"\b(?:discipline|power)\b", normalized)
     ):
         _add(intents, INTENT_ADVANCEMENT)
+    if timing_or_casting_query:
+        _add(intents, INTENT_TIMING)
     if re.search(
         r"\b(?:can|could|does|do)\b.*\b(?:use|affect|target|apply|work)\b.*\b(?:on|against|to)\b",
         normalized,
@@ -382,6 +391,8 @@ def _build_retrieval_queries(
             )
         elif intent == INTENT_DEFINITION:
             terms = _dedupe([*entities.get("mechanics", []), *entities.get("powers", []), *entity_terms, "definition", "rules"])
+        elif intent == INTENT_TIMING:
+            terms = _dedupe([*entity_terms, "duration", "time", "minutes", "per level", "cast", "performing", "requires"])
         if terms:
             queries.append(_retrieval_query(f"{intent}_evidence", terms, evidence=evidence, weight=0.9))
 

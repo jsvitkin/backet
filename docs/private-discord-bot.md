@@ -309,7 +309,16 @@ backet bot playground /path/to/vault \
 
 Add `--use-model` when you specifically want to test the configured local Llama endpoint. Add `--bundle-output dist/bot-playground --force` when you want to keep the exported bundle for inspection.
 
-Current template answers are tuned for direct, source-grounded replies rather than raw retrieval dumps. Broad rules questions should receive short explanations with the main procedure, consequences, and caveats. Specific lookup questions, such as predator-type dice pools, should answer the requested value first and then cite sources. The answer body should not expose internal source labels such as `[R1]`; those belong in the source detail shown after the answer.
+Use the QA workbench when you want a repeatable regression check instead of a one-off playground run:
+
+```bash
+backet bot qa /path/to/vault --case-file docs/qa/prague-rules-answer-cases.json --limit 6
+backet --json bot qa /path/to/vault --case-file docs/qa/prague-rules-answer-cases.json --report-output .backet/reports/answer-quality
+```
+
+QA cases store questions, expected planner terms, source anchors, required answer patterns, and forbidden answer patterns. Failures are classified by stage: planner, retrieval, answerability, synthesis, citation, runtime, or output policy. Missing private-vault cases are skipped so shared suites can remain CI-safe.
+
+Current answers are tuned for direct, source-grounded replies rather than raw retrieval dumps. Retrieval produces an evidence packet, synthesis builds a grounded answer outline, and the final answer cites only selected evidence. Broad rules questions should receive short explanations with the main procedure, consequences, and caveats. Specific lookup questions, such as predator-type dice pools, should answer the requested value first and then cite sources. If the selected evidence is related but not sufficient, the bot should say which evidence is missing instead of bluffing. The answer body should not expose internal source labels such as `[R1]`; those belong in the source detail shown after the answer.
 
 The bundle shape is:
 
@@ -338,6 +347,56 @@ Start with `lite` until access policy, visibility, and rules retrieval are worki
 
 Rollback is just setting `runtime_profile: lite` and redeploying the bundle.
 
+For the current Prague local benchmark, the measured standard profile is Ollama on Windows:
+
+```yaml
+answer_mode: ollama-local
+model:
+  provider: ollama
+  endpoint: http://127.0.0.1:11434
+  model: llama3.2:3b
+  timeout_seconds: 90
+  token_budget: 700
+runtime_profile: rag-standard
+fallback_policy: degrade
+model_services:
+  embedding:
+    provider: ollama
+    endpoint: http://127.0.0.1:11434
+    endpoint_env: BACKET_OLLAMA_ENDPOINT
+    model: nomic-embed-text
+    dimensions: 768
+    timeout_seconds: 30
+    required: true
+    enabled: true
+  answer:
+    provider: ollama
+    endpoint: http://127.0.0.1:11434
+    endpoint_env: BACKET_OLLAMA_ENDPOINT
+    model: llama3.2:3b
+    timeout_seconds: 90
+    required: false
+    enabled: true
+```
+
+Use the runtime doctor and benchmark before trusting a model swap:
+
+```powershell
+$env:OLLAMA_MODELS = 'H:\OllamaModels'
+$env:BACKET_OLLAMA_ENDPOINT = 'http://127.0.0.1:11434'
+$env:BACKET_EMBEDDING_BACKEND = 'ollama'
+$env:BACKET_EMBEDDING_MODEL = 'nomic-embed-text'
+
+backet bot runtime doctor --model-cache H:\OllamaModels
+backet bot runtime benchmark E:\Projects\prague-by-night `
+  --case-file docs\qa\prague-rules-answer-cases.json `
+  --role-id 1117554581904294018 `
+  --model-cache H:\OllamaModels `
+  --report-output E:\Projects\prague-by-night\.backet\qa\local-runtime
+```
+
+The May 17, 2026 baseline on the Ryzen 7 7800X3D / 32 GB RAM / RX 7800 XT machine used Ollama 0.24.0, `nomic-embed-text` for 768-dimensional embeddings, and `llama3.2:3b` for answer synthesis. Deterministic QA passed 5 of 5 Prague cases after the corpus was reindexed to RAG metadata schema 2. Configured-model QA also passed 5 of 5 because invalid model prose fell back to deterministic outline answers. The important caveat is that `llama3.2:3b` omitted required citations or outline support in answerable cases, so it is useful for plumbing tests but not the final-quality answer model. The Dementation targeting case now abstains honestly with missing `dementation` evidence instead of answering from unrelated Malkavian clan text. `llama3.1:8b` was pulled but failed this run with GPU memory/KV cache allocation errors, so do not treat 8B as the minimum supported answer model yet.
+
 ## Answer Diagnostics
 
 When a deployed Discord answer looks too short, too slow, or based on the wrong source, start with the playground and the deployed logs.
@@ -365,13 +424,13 @@ The Discord runtime writes one structured log line per command. It includes:
 
 By default, logs include a short sanitized question preview so bad answers can be traced back to the prompt that produced them. Logs still avoid vault note titles, vault paths, and secret values. Source references are non-revealing, such as `R1:rules@p307` or `V1:vault`. Set `BACKET_BOT_LOG_QUESTION_TEXT=0` in the bot runtime environment if you need to suppress question previews.
 
-## Optional Local Llama
+## Optional Local Models
 
-Template answers are the default and work without a model. For local Llama, configure the runtime model and let the VM cache the GGUF file under `/srv/backet-bot/models`.
+Template answers still work without a model. For local Windows quality testing, prefer Ollama first because it gives the bot both an embedding endpoint and an answer endpoint through the same local API.
 
-Recommended first model: Llama 3.2 3B Instruct GGUF Q4. Keep fallback to template enabled, because Always Free CPU-only resources can be slow.
+Recommended first plumbing model: Llama 3.2 3B through Ollama (`llama3.2:3b`). Keep fallback enabled until the QA workbench passes without frequent model validation failures. For production-quality answers, plan to benchmark a stronger citation-following model or a dedicated local service profile. Use a llama.cpp-compatible GGUF server only as an advanced fallback, for example with `scripts/setup-llama-cpp-vulkan-windows.ps1` and `BACKET_LLAMA_ENDPOINT=http://127.0.0.1:8080/completion`.
 
-Model files are VM-local cache assets. They are not committed and not bundled.
+Model files are machine-local cache assets. They are not committed and not bundled.
 
 ## Troubleshooting
 

@@ -314,6 +314,90 @@ model_services:
 
 For `rag-quality`, add required `reranker` and `answer` service entries as well. Use endpoint environment variable names such as `BACKET_EMBEDDING_ENDPOINT`, `BACKET_RERANKER_ENDPOINT`, and `BACKET_ANSWER_MODEL_ENDPOINT` for deploy wiring. Do not put raw API keys or tokens in this YAML.
 
+## Measured Local Runtime Baseline
+
+The v0.2.0 local quality baseline was measured on May 17, 2026 with:
+
+- Windows 11
+- AMD Ryzen 7 7800X3D, 8 cores / 16 logical processors
+- 32 GB system RAM
+- AMD Radeon RX 7800 XT
+- Ollama 0.24.0 installed at `H:\Tools\Ollama`
+- model cache at `H:\OllamaModels`
+- local API at `http://127.0.0.1:11434`
+
+Windows WMI reported the RX 7800 XT `AdapterRAM` as about 4 GB during the doctor run, which can underreport modern GPU VRAM. Treat the model benchmark as more reliable than that single inventory field.
+
+Pulled and measured models:
+
+| Role | Model | Size | Details | Result |
+| --- | --- | ---: | --- | --- |
+| Embedding | `nomic-embed-text:latest` | 274 MB | 137M, F16, 768 dimensions | works |
+| Answer | `llama3.2:3b` | 2.0 GB | 3.2B, Q4_K_M | works |
+| Answer candidate | `llama3.1:8b` | 4.9 GB | 8B, Q4_K_M | pulled, but failed this run with GPU memory/KV cache allocation errors |
+
+The first useful local profile is:
+
+```yaml
+answer_mode: ollama-local
+model:
+  provider: ollama
+  endpoint: http://127.0.0.1:11434
+  model: llama3.2:3b
+  timeout_seconds: 90
+  token_budget: 700
+runtime_profile: rag-standard
+fallback_policy: degrade
+model_services:
+  embedding:
+    provider: ollama
+    endpoint: http://127.0.0.1:11434
+    endpoint_env: BACKET_OLLAMA_ENDPOINT
+    model: nomic-embed-text
+    dimensions: 768
+    timeout_seconds: 30
+    required: true
+    enabled: true
+  answer:
+    provider: ollama
+    endpoint: http://127.0.0.1:11434
+    endpoint_env: BACKET_OLLAMA_ENDPOINT
+    model: llama3.2:3b
+    timeout_seconds: 90
+    required: false
+    enabled: true
+```
+
+Local benchmark command used for Prague QA:
+
+```powershell
+$env:OLLAMA_MODELS = 'H:\OllamaModels'
+$env:BACKET_OLLAMA_ENDPOINT = 'http://127.0.0.1:11434'
+$env:BACKET_EMBEDDING_BACKEND = 'ollama'
+$env:BACKET_EMBEDDING_MODEL = 'nomic-embed-text'
+
+backet bot runtime doctor --model-cache H:\OllamaModels
+backet bot runtime benchmark E:\Projects\prague-by-night `
+  --case-file docs\qa\prague-rules-answer-cases.json `
+  --role-id 1117554581904294018 `
+  --model-cache H:\OllamaModels `
+  --report-output E:\Projects\prague-by-night\.backet\qa\local-runtime
+```
+
+Measured results from that run:
+
+- embedding call: `nomic-embed-text`, 768 dimensions, about 0.02 seconds warm
+- answer smoke call: `llama3.2:3b`, about 0.8 seconds warm, first token at about 0.15 seconds, about 138 tokens/second
+- Ollama process working set: about 2.7 GB
+- deterministic QA workbench: 5 of 5 Prague cases passed
+- configured-model QA workbench: 5 of 5 passed after validation fallback
+- local `llama3.2:3b` quality caveat: it omitted required source citations or outline support in answerable cases, so the validator rejected the model prose and used deterministic outline answers instead
+- remaining content gap: Dementation targeting now fails honestly with "missing evidence: dementation" because the permitted corpus did not contain a direct targeting rule; it no longer answers from unrelated Malkavian/Obfuscate clan text
+
+This is enough for `rag-standard` local testing. It is not enough to call the profile `rag-quality` yet, because no reranker service is configured and the small local answer model repeatedly fails answer validation. For first production sizing, start from at least this machine class: 32 GB RAM, fast SSD model cache, and GPU/runtime compatibility proven with the same benchmark command. Do not size final production from synthetic model latency alone; require the QA workbench to pass without frequent model fallbacks.
+
+llama.cpp Vulkan remains the advanced fallback path. The helper script at `scripts/setup-llama-cpp-vulkan-windows.ps1` documents a Windows Vulkan build and starts a llama.cpp-compatible endpoint at `http://127.0.0.1:8080/completion`. Use it only when Ollama cannot provide the required service mix or quality.
+
 ## Safe Example Transcript
 
 The status output is intentionally paste-safe:
@@ -367,7 +451,15 @@ backet bot playground /path/to/vault \
 
 The playground exports a temporary bot bundle, answers in fast template mode, and shows which sources were retrieved with scores and match reasons. Use `--use-model` only when you want to test the configured local Llama endpoint. Use `--bundle-output dist/bot-playground --force` if you want to keep the bundle for manual inspection.
 
-Current answers are generated from an evidence-aware packet rather than raw retrieval snippets. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. If retrieved chunks are related but do not answer the question, the bot should say what evidence is missing instead of bluffing. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
+Run the QA workbench before redeploying answer-quality changes:
+
+```bash
+backet bot qa /path/to/vault --case-file docs/qa/prague-rules-answer-cases.json --limit 6
+```
+
+The QA report groups failures by planner, retrieval, answerability, synthesis, citation, runtime, or output policy so you can tell which layer needs work before changing the live Discord bot.
+
+Current answers are generated from an evidence-aware packet and grounded answer outline rather than raw retrieval snippets. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. If retrieved chunks are related but do not answer the question, the bot should say what evidence is missing instead of bluffing. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
 
 ## Answer Logs
 
@@ -419,11 +511,12 @@ Player answers are empty:
 - rerun the visibility setup check
 - redeploy
 
-Llama is slow:
+Local model answers are slow:
 
 - use template mode
-- use a smaller Q4 GGUF model
+- use a smaller answer model such as `llama3.2:3b`
 - keep template fallback enabled
+- run `backet bot runtime benchmark` and compare QA pass/fail before deploying a model change
 
 Runtime profile is degraded or unavailable:
 

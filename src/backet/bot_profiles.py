@@ -251,6 +251,8 @@ def parse_runtime_profile_config(config: dict[str, Any] | None) -> RuntimeProfil
     model = _mapping(config.get("model"), field_name="model", default={})
     if answer_mode == "llama-local" and SERVICE_ROLE_ANSWER not in raw_services:
         raw_services[SERVICE_ROLE_ANSWER] = _legacy_llama_answer_service(model)
+    if answer_mode == "ollama-local" and SERVICE_ROLE_ANSWER not in raw_services:
+        raw_services[SERVICE_ROLE_ANSWER] = _ollama_answer_service(model)
 
     services = {}
     for role in MODEL_SERVICE_ROLES:
@@ -571,10 +573,25 @@ def _legacy_llama_answer_service(model: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ollama_answer_service(model: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": "ollama",
+        "endpoint": model.get("endpoint") or "http://127.0.0.1:11434",
+        "endpoint_env": "BACKET_OLLAMA_ENDPOINT",
+        "model": model.get("name") or model.get("model") or "llama3.2:3b",
+        "timeout_seconds": model.get("timeout_seconds") or model.get("timeout") or DEFAULT_SERVICE_TIMEOUTS[SERVICE_ROLE_ANSWER],
+        "enabled": True,
+    }
+
+
 def _normalize_provider(value: Any, *, endpoint: str | None, model: str | None, local_model_path: str | None) -> str:
-    provider = str(value or "").strip().lower().replace("_", "-")
+    provider = str(value or "").strip().lower().replace("_", "-").replace(".", "-")
     if not provider:
         provider = "self-hosted" if endpoint else ("local" if model or local_model_path else "disabled")
+    if provider in {"llamacpp", "llama-server", "llama-cpp-server"}:
+        provider = "llama-cpp"
+    if provider == "ollama-local":
+        provider = "ollama"
     if provider in {"none", "off", "false"}:
         provider = "disabled"
     return provider

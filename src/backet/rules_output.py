@@ -228,6 +228,26 @@ def emit_rules_audit_report(result: CommandResult, *, show_cards: bool = False) 
                 output.console.print(f"    {item.get('repair_hint')}")
         output.console.print("")
 
+    corpus_health = data.get("corpus_health") if isinstance(data.get("corpus_health"), dict) else {}
+    if corpus_health:
+        output.console.print("[bold yellow]Corpus health[/bold yellow]")
+        output.console.print(f"  Overall action: {corpus_health.get('action', 'none')}")
+        for item in (corpus_health.get("books") if isinstance(corpus_health.get("books"), list) else [])[:8]:
+            if not isinstance(item, dict):
+                continue
+            action = str(item.get("action") or "none")
+            title = str(item.get("book_title") or item.get("book_id") or "rulebook")
+            output.console.print(f"  - {title}: {action}")
+            command = item.get("next_command")
+            if command:
+                if action == "repair" and "backet rules audit" in str(command):
+                    command = "backet rules audit <vault> --review"
+                output.console.print(f"    Run: {command}")
+            reasons = item.get("reasons") if isinstance(item.get("reasons"), list) else []
+            if reasons:
+                output.console.print(f"    Reason: {', '.join(str(reason) for reason in reasons[:3])}")
+        output.console.print("")
+
     for book in books:
         if not isinstance(book, dict):
             continue
@@ -423,6 +443,9 @@ def _emit_audit_book_summary(book: dict[str, Any]) -> None:
     output.console.print(
         f"  Review: {pending:,} pending pages, {blocked:,} blocked findings, {notices:,} notices, {excluded:,} excluded chunks"
     )
+    health = book.get("corpus_health") if isinstance(book.get("corpus_health"), dict) else {}
+    if health:
+        output.console.print(f"  Action: {health.get('action', 'none')}")
 
 
 def _emit_audit_review_cards(book: dict[str, Any]) -> None:

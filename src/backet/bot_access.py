@@ -179,11 +179,11 @@ def load_bot_config(vault_root: Path) -> BotConfig:
     config.commands = _parse_command_policies(payload.get("commands", {}), path=path)
     config.response_defaults = _bool_map(payload.get("response_defaults", {}), field_name="response_defaults", path=path)
     answer_mode = str(payload.get("answer_mode", config.answer_mode)).strip() or "template"
-    if answer_mode not in {"template", "llama-local"}:
+    if answer_mode not in {"template", "llama-local", "ollama-local"}:
         raise AppError(
             code="bot_config_answer_mode_invalid",
             message="Bot answer mode is invalid.",
-            hint="Use answer_mode: template or answer_mode: llama-local.",
+            hint="Use answer_mode: template, llama-local, or ollama-local.",
             details={"answer_mode": answer_mode, "path": str(path)},
             exit_code=2,
         )

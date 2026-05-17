@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "learn-obfuscate-advancement",
+      "description": "A question about learning Obfuscate needs advancement or acquisition evidence, not a character page that happens to contain the word learn and the discipline name.",
+      "difficulty": "easy",
+      "command": "rules.ask",
+      "question": "how do I learn obfuscate",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "obfuscate",
+        "advancement"
+      ],
+      "expected_intents": [
+        "advancement"
+      ],
+      "expected_sources": [
+        {
+          "source_type": "rules",
+          "text_contains": "Obfuscate"
+        }
+      ],
+      "forbidden_sources": [
+        {
+          "text_contains": "learn a lesson about myself"
+        }
+      ],
+      "forbidden_answer_contains": [
+        "learn a lesson about myself"
+      ]
+    },
+    {
+      "id": "malkavian-dementation-targeting",
+      "description": "A Malkavian Dementation targeting question needs system or applicability evidence, not a nearby clan discipline mention.",
+      "difficulty": "medium",
+      "command": "rules.ask",
+      "question": "can malkavians use dementation on other vampires",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "malkavian",
+        "dementation",
+        "vampire"
+      ],
+      "accepted_planner_aliases": {
+        "vampire": [
+          "vampires",
+          "kindred"
+        ]
+      },
+      "expected_intents": [
+        "targeting"
+      ],
+      "expected_sources": [
+        {
+          "source_type": "rules",
+          "text_contains": "Dementation"
+        }
+      ],
+      "forbidden_sources": [
+        {
+          "text_contains": "Malkavians do not advertise their use of Obfuscate"
+        }
+      ],
+      "forbidden_answer_contains": [
+        "do not advertise their use of Obfuscate"
+      ]
+    },
+    {
+      "id": "blood-bond-definition",
+      "description": "A blood bond question needs Blood Bond definition or mechanics evidence and must not answer from unrelated Second Inquisition text.",
+      "difficulty": "easy",
+      "command": "rules.ask",
+      "question": "what are blood bonds and how do I make use of it",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "blood bond"
+      ],
+      "expected_sources": [
+        {
+          "source_type": "rules",
+          "text_contains": "Blood Bond"
+        }
+      ],
+      "forbidden_sources": [
+        {
+          "text_contains": "Second Inquisition"
+        }
+      ],
+      "forbidden_answer_contains": [
+        "Second Inquisition"
+      ]
+    },
+    {
+      "id": "ritual-timing",
+      "description": "Ritual timing should retrieve and answer from the general ritual procedure.",
+      "difficulty": "very-easy",
+      "command": "rules.ask",
+      "question": "how long does it take to cast a ritual",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "ritual"
+      ],
+      "expected_sources": [
+        {
+          "source_type": "rules",
+          "all_text_contains": [
+            "ritual",
+            "five minutes"
+          ]
+        }
+      ],
+      "required_answer_contains": [
+        "five minutes"
+      ]
+    },
+    {
+      "id": "messy-critical-feeding-masquerade",
+      "description": "A messy critical question asks for consequences, not a generic dice-pool example.",
+      "difficulty": "hard",
+      "command": "rules.ask",
+      "question": "does a messy critical on a feeding roll cause a masquerade breach",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "messy critical",
+        "masquerade"
+      ],
+      "accepted_planner_aliases": {
+        "messy critical": [
+          "messy",
+          "critical"
+        ]
+      },
+      "required_answer_patterns": [
+        "(yes|can|possible|may)"
+      ],
+      "forbidden_answer_contains": [
+        "4 successes and no critical"
+      ]
+    }
+  ]
+}

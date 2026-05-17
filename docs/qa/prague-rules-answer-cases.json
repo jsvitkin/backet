@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "prague-learn-obfuscate-advancement",
+      "description": "Private Prague QA template: learning Obfuscate should use advancement/acquisition evidence.",
+      "difficulty": "easy",
+      "command": "rules.ask",
+      "question": "how do I learn obfuscate",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "obfuscate",
+        "advancement"
+      ],
+      "forbidden_answer_contains": [
+        "learn a lesson about myself"
+      ]
+    },
+    {
+      "id": "prague-malkavian-dementation-targeting",
+      "description": "Private Prague QA template: Dementation targeting must not answer from generic Malkavian flavor.",
+      "difficulty": "medium",
+      "command": "rules.ask",
+      "question": "can malkavians use dementation on other vampires",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "malkavian",
+        "dementation",
+        "vampire"
+      ],
+      "accepted_planner_aliases": {
+        "vampire": [
+          "vampires",
+          "kindred"
+        ]
+      },
+      "forbidden_answer_contains": [
+        "do not advertise their use of Obfuscate"
+      ]
+    },
+    {
+      "id": "prague-blood-bond-definition",
+      "description": "Private Prague QA template: Blood Bond should not answer from unrelated Second Inquisition text.",
+      "difficulty": "easy",
+      "command": "rules.ask",
+      "question": "what are blood bonds and how do I make use of it",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "blood bond"
+      ],
+      "forbidden_answer_contains": [
+        "Second Inquisition"
+      ]
+    },
+    {
+      "id": "prague-ritual-timing",
+      "description": "Private Prague QA template: ritual timing should cite the general ritual procedure.",
+      "difficulty": "very-easy",
+      "command": "rules.ask",
+      "question": "how long does it take to cast a ritual",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "ritual"
+      ],
+      "required_answer_contains": [
+        "five minutes"
+      ]
+    },
+    {
+      "id": "prague-messy-critical-feeding-masquerade",
+      "description": "Private Prague QA template: messy critical feeding consequence should address Masquerade breach possibility.",
+      "difficulty": "hard",
+      "command": "rules.ask",
+      "question": "does a messy critical on a feeding roll cause a masquerade breach",
+      "expected_answerable": true,
+      "required_planner_terms": [
+        "messy critical",
+        "masquerade"
+      ],
+      "accepted_planner_aliases": {
+        "messy critical": [
+          "messy",
+          "critical"
+        ]
+      }
+    }
+  ]
+}

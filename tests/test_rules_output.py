@@ -152,6 +152,18 @@ def test_rules_audit_report_groups_human_work_without_raw_diagnostic_keys(monkey
                         "repair_hint": "Run `backet rules index <vault>`.",
                     }
                 ],
+                "corpus_health": {
+                    "action": "reindex",
+                    "books": [
+                        {
+                            "book_id": "cults",
+                            "book_title": "Cults",
+                            "action": "reindex",
+                            "next_command": "backet rules index <vault> --book-id cults --full",
+                            "reasons": ["stale_retrieval_index"],
+                        }
+                    ],
+                },
                 "books": [
                     {
                         "book_id": "cults",
@@ -190,6 +202,8 @@ def test_rules_audit_report_groups_human_work_without_raw_diagnostic_keys(monkey
     rendered = buffer.getvalue()
     assert "Rules audit" in rendered
     assert "Maintenance" in rendered
+    assert "Corpus health" in rendered
+    assert "Overall action: reindex" in rendered
     assert "Cults (cults, supplement)" in rendered
     assert "Review: 1 pending pages" in rendered
     assert "Review queue" not in rendered
