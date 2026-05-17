@@ -2,14 +2,26 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
 from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from backet.bot_answers import AnswerGenerator, ModelClient, generate_answer_from_config
+from backet.bot_answers import (
+    ANSWER_CLASS_RUNTIME_UNAVAILABLE,
+    AnswerGenerator,
+    AnswerPacket,
+    ModelClient,
+    TemplateAnswerGenerator,
+    build_answer_packet,
+    clean_bot_source_text,
+    format_bot_source_label,
+    generate_answer_from_config,
+)
 from backet.bot_access import ACCESS_TIER_PLAYER, ACCESS_TIER_STORYTELLER
 from backet.bot_export import BOT_BUNDLE_SCHEMA_VERSION
+from backet.bot_profiles import doctor_runtime_profile
 from backet.errors import AppError
 from backet.indexing import INDEX_SCHEMA_VERSION
 from backet.models import CommandResult
@@ -19,6 +31,8 @@ from backet.rules import open_rules_database, query_rules_connection
 DISCORD_MESSAGE_LIMIT = 2000
 SAFE_DISCORD_MESSAGE_LIMIT = 1900
 ACCESS_RANK = {ACCESS_TIER_PLAYER: 0, ACCESS_TIER_STORYTELLER: 1}
+ANSWER_TRACE_SCHEMA_VERSION = 1
+ANSWER_TRACE_SNIPPET_CHARS = 500
 
 
 @dataclass(slots=True)
@@ -59,6 +73,7 @@ class BotAnswer:
     denied: bool = False
     retrieval_attempted: bool = False
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    answer_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +86,7 @@ class BotAnswer:
             "denied": self.denied,
             "retrieval_attempted": self.retrieval_attempted,
             "diagnostics": self.diagnostics,
+            "answer_trace": self.answer_trace,
         }
 
 
@@ -221,6 +237,7 @@ def open_rules_readonly(db_path: Path) -> sqlite3.Connection:
 
 def inspect_bot_bundle(bundle_root: Path) -> CommandResult:
     bundle = BotBundle.load(bundle_root)
+    runtime_health = doctor_runtime_profile(bundle.manifest, manifest=bundle.manifest)
     return CommandResult(
         message="Bot runtime bundle loaded",
         data={
@@ -230,6 +247,8 @@ def inspect_bot_bundle(bundle_root: Path) -> CommandResult:
             "indexes": bundle.manifest.get("indexes", {}),
             "rules": bundle.manifest.get("rules", {}),
             "answer_mode": bundle.manifest.get("bot", {}).get("answer_mode", "template"),
+            "runtime": bundle.manifest.get("runtime", {}),
+            "runtime_health": runtime_health,
         },
     )
 
@@ -249,20 +268,77 @@ def answer_bot_query(
     route = route_for_command(normalized_command)
     access = resolve_access_tier(bundle.manifest.get("bot", {}), user_id=user_id, role_ids=role_ids or [])
     response_private = route.private_default if private is None else private
-    diagnostics: dict[str, Any] = {"access": access.to_dict(), "route": asdict(route)}
+    runtime_health = doctor_runtime_profile(bundle.manifest, manifest=bundle.manifest)
+    diagnostics: dict[str, Any] = {"access": access.to_dict(), "route": asdict(route), "runtime": runtime_health}
 
     if not tier_allows(access.tier, route.min_tier):
         text = sanitize_discord_mentions("Permission denied for that bot command.")
+        parts = split_discord_response(text)
+        trace = build_answer_trace(
+            command=normalized_command,
+            question=question,
+            access=access,
+            route=route,
+            sources=[],
+            retrieval_errors=[],
+            generated=None,
+            text=text,
+            parts=parts,
+            response_private=True,
+            denied=True,
+            retrieval_attempted=False,
+        )
         return BotAnswer(
             command=normalized_command,
             access_tier=access.tier,
             text=text,
-            parts=split_discord_response(text),
+            parts=parts,
             sources=[],
             response_private=True,
             denied=True,
             retrieval_attempted=False,
             diagnostics=diagnostics,
+            answer_trace=trace,
+        )
+
+    if runtime_health.get("blocking"):
+        packet = AnswerPacket(
+            question=question,
+            response_class=ANSWER_CLASS_RUNTIME_UNAVAILABLE,
+            evidence_status="runtime_unavailable",
+            missing_evidence=["runtime_profile"],
+            diagnostics={"runtime_health": runtime_health},
+        )
+        generated = TemplateAnswerGenerator().generate_from_packet(packet)
+        text = sanitize_discord_mentions(generated.text)
+        parts = split_discord_response(text)
+        diagnostics["answer_generation"] = generated.to_dict()
+        trace = build_answer_trace(
+            command=normalized_command,
+            question=question,
+            access=access,
+            route=route,
+            sources=[],
+            retrieval_errors=[{"code": "bot_runtime_profile_unavailable", "message": "Runtime profile services are unavailable."}],
+            generated=generated.to_dict(),
+            text=text,
+            parts=parts,
+            response_private=response_private,
+            denied=False,
+            retrieval_attempted=False,
+        )
+        trace["runtime"] = runtime_health
+        return BotAnswer(
+            command=normalized_command,
+            access_tier=access.tier,
+            text=text,
+            parts=parts,
+            sources=[],
+            response_private=response_private,
+            denied=False,
+            retrieval_attempted=False,
+            diagnostics=diagnostics,
+            answer_trace=trace,
         )
 
     sources: list[dict[str, Any]] = []
@@ -277,39 +353,49 @@ def answer_bot_query(
         try:
             sources.extend(retrieve_rule_sources(bundle, question, limit=limit))
         except AppError as error:
-            if error.code == "rules_query_ambiguous":
-                text = _compose_rule_ambiguity(error.details)
-                text = sanitize_discord_mentions(text)
-                return BotAnswer(
-                    command=normalized_command,
-                    access_tier=access.tier,
-                    text=text,
-                    parts=split_discord_response(text),
-                    sources=[],
-                    response_private=response_private,
-                    retrieval_attempted=True,
-                    diagnostics={**diagnostics, "rules_ambiguity": error.details},
-                )
             retrieval_errors.append({"code": error.code, "message": error.message, "details": error.details})
 
     diagnostics["retrieval_errors"] = retrieval_errors
-    generated = (
-        answer_generator.generate(question, sources)
-        if answer_generator is not None
-        else generate_answer_from_config(bundle.manifest.get("bot", {}), question, sources, client=model_client)
-    )
+    answer_packet = build_answer_packet(question, sources, retrieval_errors=retrieval_errors)
+    if answer_generator is not None:
+        generator = getattr(answer_generator, "generate_from_packet", None)
+        generated = generator(answer_packet) if callable(generator) else answer_generator.generate(question, sources)
+    else:
+        generated = generate_answer_from_config(
+            bundle.manifest.get("bot", {}),
+            question,
+            sources,
+            client=model_client,
+            answer_packet=answer_packet,
+        )
     diagnostics["answer_generation"] = generated.to_dict()
     text = generated.text
     text = sanitize_discord_mentions(text)
+    parts = split_discord_response(text)
+    trace = build_answer_trace(
+        command=normalized_command,
+        question=question,
+        access=access,
+        route=route,
+        sources=sources,
+        retrieval_errors=retrieval_errors,
+        generated=generated.to_dict(),
+        text=text,
+        parts=parts,
+        response_private=response_private,
+        denied=False,
+        retrieval_attempted=True,
+    )
     return BotAnswer(
         command=normalized_command,
         access_tier=access.tier,
         text=text,
-        parts=split_discord_response(text),
+        parts=parts,
         sources=sources,
         response_private=response_private,
         retrieval_attempted=True,
         diagnostics=diagnostics,
+        answer_trace=trace,
     )
 
 
@@ -335,6 +421,76 @@ def answer_bot_query_result(
         model_client=model_client,
     )
     return CommandResult(message="Answered bot query from bundle", data=answer.to_dict())
+
+
+def build_answer_trace(
+    *,
+    command: str,
+    question: str,
+    access: ResolvedBotAccess,
+    route: BotCommandRoute,
+    sources: list[dict[str, Any]],
+    retrieval_errors: list[dict[str, Any]],
+    generated: dict[str, Any] | None,
+    text: str,
+    parts: list[str],
+    response_private: bool,
+    denied: bool,
+    retrieval_attempted: bool,
+) -> dict[str, Any]:
+    source_traces = [_trace_source(source) for source in sources]
+    generation = _trace_generation(generated, text=text, sources=sources)
+    query_plan = _query_plan_from_sources_or_errors(sources, retrieval_errors)
+    rag_v2 = _rag_v2_from_sources_or_errors(sources, retrieval_errors)
+    evidence_packet = _evidence_packet_from_sources_or_errors(sources, retrieval_errors)
+    answer_packet = _answer_packet_from_generation(generated)
+    return {
+        "trace_schema_version": ANSWER_TRACE_SCHEMA_VERSION,
+        "question": {
+            "fingerprint": _fingerprint_question(question),
+            "preview": sanitize_discord_mentions(" ".join(question.strip().split()))[:240],
+            "length": len(question),
+        },
+        "route": {
+            "command": command,
+            "min_tier": route.min_tier,
+            "index_scope": route.index_scope,
+            "topics": route.topics,
+            "include_vault": route.include_vault,
+            "include_rules": route.include_rules,
+        },
+        "access": access.to_dict(),
+        "retrieval": {
+            "attempted": retrieval_attempted,
+            "source_count": len(sources),
+            "source_counts": {
+                "vault": sum(1 for source in sources if source.get("source_type") == "vault"),
+                "rules": sum(1 for source in sources if source.get("source_type") == "rules"),
+            },
+            "rules_retrieval_mode": _first_source_field(sources, "retrieval_mode", source_type="rules"),
+            "rules_embedding_backend": _first_source_field(sources, "embedding_backend", source_type="rules"),
+            "rules_embedding_model": _first_source_field(sources, "embedding_model", source_type="rules"),
+            "rules_evidence_status": _first_source_field(sources, "evidence_status", source_type="rules")
+            or (evidence_packet or {}).get("evidence_status"),
+            "vault_attempted": bool(route.include_vault and route.index_scope),
+            "rules_attempted": bool(route.include_rules),
+            "errors": retrieval_errors,
+            "selected_sources": source_traces,
+        },
+        "stages": {
+            "query_plan": _trace_query_plan(query_plan),
+            "reranking": _trace_rag_v2_reranking(rag_v2),
+            "answer_packet": _trace_answer_packet(answer_packet),
+            "answerability": _trace_answerability(evidence_packet, answer_packet),
+        },
+        "generation": generation,
+        "response": {
+            "chars": len(text),
+            "parts": len(parts),
+            "private": response_private,
+            "denied": denied,
+        },
+    }
 
 
 def retrieve_vault_sources(bundle: BotBundle, route: BotCommandRoute, question: str, limit: int) -> list[dict[str, Any]]:
@@ -371,8 +527,28 @@ def retrieve_rule_sources(bundle: BotBundle, question: str, limit: int) -> list[
             query=question,
             limit=limit,
             db_label=str(bundle.root / str(bundle.manifest["rules"]["path"])),
+    )
+    evidence_packet = result.data.get("evidence_packet") if isinstance(result.data.get("evidence_packet"), dict) else {}
+    if evidence_packet and evidence_packet.get("evidence_status") != "answerable":
+        raise AppError(
+            code="rules_evidence_insufficient",
+            message="Rules retrieval found related chunks but not enough answer evidence.",
+            hint="Use a narrower rules question or ingest/index the relevant rules source.",
+            details={
+                "query_plan": result.data.get("query_plan"),
+                "evidence_packet": evidence_packet,
+                "rag_v2": result.data.get("rag_v2"),
+            },
+            exit_code=2,
         )
-    raw_sources = result.data.get("primary_results", []) + result.data.get("fallback_results", [])
+    raw_sources = (
+        list(evidence_packet.get("selected_evidence") or [])
+        if evidence_packet
+        else result.data.get("primary_results", []) + result.data.get("fallback_results", [])
+    )
+    query_plan = result.data.get("query_plan")
+    planned_retrieval = result.data.get("planned_retrieval")
+    rag_v2 = result.data.get("rag_v2")
     sources: list[dict[str, Any]] = []
     for index, source in enumerate(raw_sources[:limit], start=1):
         sources.append(
@@ -388,6 +564,16 @@ def retrieve_rule_sources(bundle: BotBundle, question: str, limit: int) -> list[
                 "content": source["content"],
                 "score": source["score"],
                 "match_reasons": source["match_reasons"],
+                "retrieval_mode": result.data.get("retrieval_mode"),
+                "embedding_backend": result.data.get("embedding_backend"),
+                "embedding_model": result.data.get("embedding_model"),
+                "query_plan": query_plan,
+                "planned_retrieval": planned_retrieval,
+                "rag_v2": rag_v2,
+                "evidence_packet": evidence_packet,
+                "evidence_status": evidence_packet.get("evidence_status") if evidence_packet else None,
+                "evidence_cues": source.get("evidence_cues", []),
+                "retrieval_channels": source.get("retrieval_channels", []),
             }
         )
     return sources
@@ -551,6 +737,206 @@ def _source_label(source: dict[str, Any]) -> str:
     if source.get("page_end") and source["page_end"] != source["page_start"]:
         page = f"{source['page_start']}-{source['page_end']}"
     return f"[{source['citation']}] {source['book_title']} p. {page} ({source['section_label']})"
+
+
+def _trace_source(source: dict[str, Any]) -> dict[str, Any]:
+    traced: dict[str, Any] = {
+        "citation": source.get("citation"),
+        "source_type": source.get("source_type"),
+        "label": _safe_source_label(source),
+        "score": source.get("score"),
+        "match_reasons": list(source.get("match_reasons") or []),
+        "snippet": _bounded_source_snippet(source),
+        "snippet_chars": ANSWER_TRACE_SNIPPET_CHARS,
+    }
+    if source.get("source_type") == "vault":
+        traced.update(
+            {
+                "title": source.get("title"),
+                "relative_path": source.get("relative_path"),
+                "heading_path": source.get("heading_path"),
+            }
+        )
+    elif source.get("source_type") == "rules":
+        traced.update(
+            {
+                "book_id": source.get("book_id"),
+                "book_title": source.get("book_title"),
+                "page_start": source.get("page_start"),
+                "page_end": source.get("page_end"),
+                "section_label": source.get("section_label"),
+                "retrieval_mode": source.get("retrieval_mode"),
+                "embedding_backend": source.get("embedding_backend"),
+                "embedding_model": source.get("embedding_model"),
+                "evidence_status": source.get("evidence_status"),
+                "evidence_cues": list(source.get("evidence_cues") or []),
+                "retrieval_channels": list(source.get("retrieval_channels") or []),
+            }
+        )
+    return traced
+
+
+def _safe_source_label(source: dict[str, Any]) -> str:
+    try:
+        return format_bot_source_label(source)
+    except Exception:
+        return str(source.get("citation") or source.get("source_type") or "source")
+
+
+def _bounded_source_snippet(source: dict[str, Any], limit: int = ANSWER_TRACE_SNIPPET_CHARS) -> str:
+    text = clean_bot_source_text(str(source.get("excerpt") or source.get("content") or ""))
+    text = sanitize_discord_mentions(text)
+    if len(text) <= limit:
+        return text
+    end = text.rfind(" ", 0, max(0, limit - 4))
+    if end < 80:
+        end = max(0, limit - 4)
+    return text[:end].rstrip(" ,;:") + " ..."
+
+
+def _trace_generation(generated: dict[str, Any] | None, *, text: str, sources: list[dict[str, Any]]) -> dict[str, Any]:
+    if generated is None:
+        return {
+            "available": False,
+            "mode": None,
+            "fallback_used": False,
+            "fallback_reason": None,
+            "citation_status": "not_checked",
+            "diagnostics": {},
+        }
+    diagnostics = dict(generated.get("diagnostics", {}) or {})
+    return {
+        "available": True,
+        "mode": generated.get("mode"),
+        "fallback_used": bool(generated.get("fallback_used")),
+        "fallback_reason": diagnostics.get("fallback_reason"),
+        "citation_status": _citation_status(text, sources),
+        "diagnostics": diagnostics,
+    }
+
+
+def _citation_status(text: str, sources: list[dict[str, Any]]) -> str:
+    if not sources:
+        return "not_required"
+    labels = [format_bot_source_label(source) for source in sources]
+    citations = [f"[{source.get('citation')}]" for source in sources if source.get("citation")]
+    lowered = text.casefold()
+    if any(citation in text for citation in citations):
+        return "citation_present"
+    if "sources:" in lowered and any(label.casefold() in lowered for label in labels):
+        return "source_label_present"
+    return "not_found"
+
+
+def _unavailable_stage(reason: str) -> dict[str, Any]:
+    return {"status": "unavailable", "reason": reason}
+
+
+def _trace_query_plan(query_plan: Any) -> dict[str, Any]:
+    if isinstance(query_plan, dict):
+        return {"status": "available", "plan": query_plan}
+    return _unavailable_stage("not_planned")
+
+
+def _trace_rag_v2_reranking(rag_v2: Any) -> dict[str, Any]:
+    if not isinstance(rag_v2, dict):
+        return _unavailable_stage("not_available")
+    return {
+        "status": "available",
+        "schema_version": rag_v2.get("schema_version"),
+        "candidate_caps": rag_v2.get("candidate_caps", {}),
+        "channels": rag_v2.get("channels", []),
+        "semantic_quality": rag_v2.get("semantic_quality"),
+    }
+
+
+def _trace_answer_packet(answer_packet: Any) -> dict[str, Any]:
+    if isinstance(answer_packet, dict):
+        return {"status": "available", **answer_packet}
+    return _unavailable_stage("not_available")
+
+
+def _trace_answerability(evidence_packet: Any, answer_packet: Any = None) -> dict[str, Any]:
+    if not isinstance(evidence_packet, dict):
+        if isinstance(answer_packet, dict):
+            return {
+                "status": "available",
+                "evidence_status": answer_packet.get("evidence_status"),
+                "selected_evidence_count": answer_packet.get("selected_evidence_count", 0),
+                "fallback_context_count": answer_packet.get("fallback_context_count", 0),
+                "missing_evidence": list(answer_packet.get("missing_evidence") or []),
+                "satisfied_evidence": [],
+            }
+        return _unavailable_stage("not_available")
+    return {
+        "status": "available",
+        "evidence_status": evidence_packet.get("evidence_status"),
+        "selected_evidence_count": len(evidence_packet.get("selected_evidence") or []),
+        "fallback_context_count": len(evidence_packet.get("fallback_context") or []),
+        "missing_evidence": list(evidence_packet.get("missing_evidence") or []),
+        "satisfied_evidence": list(evidence_packet.get("satisfied_evidence") or []),
+    }
+
+
+def _answer_packet_from_generation(generated: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(generated, dict):
+        return None
+    diagnostics = generated.get("diagnostics") if isinstance(generated.get("diagnostics"), dict) else {}
+    packet = diagnostics.get("answer_packet") if isinstance(diagnostics, dict) else None
+    return packet if isinstance(packet, dict) else None
+
+
+def _query_plan_from_sources_or_errors(
+    sources: list[dict[str, Any]],
+    retrieval_errors: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    source_plan = _first_source_field(sources, "query_plan", source_type="rules")
+    if isinstance(source_plan, dict):
+        return source_plan
+    for error in retrieval_errors:
+        details = error.get("details") if isinstance(error, dict) else None
+        if isinstance(details, dict) and isinstance(details.get("query_plan"), dict):
+            return details["query_plan"]
+    return None
+
+
+def _rag_v2_from_sources_or_errors(
+    sources: list[dict[str, Any]],
+    retrieval_errors: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    source_rag_v2 = _first_source_field(sources, "rag_v2", source_type="rules")
+    if isinstance(source_rag_v2, dict):
+        return source_rag_v2
+    for error in retrieval_errors:
+        details = error.get("details") if isinstance(error, dict) else None
+        if isinstance(details, dict) and isinstance(details.get("rag_v2"), dict):
+            return details["rag_v2"]
+    return None
+
+
+def _evidence_packet_from_sources_or_errors(
+    sources: list[dict[str, Any]],
+    retrieval_errors: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    source_packet = _first_source_field(sources, "evidence_packet", source_type="rules")
+    if isinstance(source_packet, dict):
+        return source_packet
+    for error in retrieval_errors:
+        details = error.get("details") if isinstance(error, dict) else None
+        if isinstance(details, dict) and isinstance(details.get("evidence_packet"), dict):
+            return details["evidence_packet"]
+    return None
+
+
+def _first_source_field(sources: list[dict[str, Any]], key: str, *, source_type: str) -> Any:
+    for source in sources:
+        if source.get("source_type") == source_type and source.get(key) not in (None, ""):
+            return source.get(key)
+    return None
+
+
+def _fingerprint_question(question: str) -> str:
+    return hashlib.sha256(question.encode("utf-8")).hexdigest()
 
 
 def _compose_rule_ambiguity(details: dict[str, Any]) -> str:

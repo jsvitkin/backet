@@ -2,6 +2,8 @@
 
 This is the friendly path for getting your private Backet Bot into your Discord server.
 
+This page describes the v0.2.0 bot hosting model. The default path still works on a low-resource Oracle VM, but the release now makes answer quality an explicit runtime choice instead of an accidental side effect of the first free-hosting setup.
+
 The main command is:
 
 ```bash
@@ -57,9 +59,19 @@ Backet creates:
 .backet/state/bot-setup.yaml
 ```
 
-This file stores non-secret setup facts, such as app ID, server ID, role IDs, GitHub repo, Oracle host/user, deploy path, and answer mode.
+This file stores non-secret setup facts, such as app ID, server ID, role IDs, GitHub repo, Oracle host/user, deploy path, answer mode, and runtime profile.
 
 Secrets are never stored there.
+
+The default runtime profile is `lite`, which preserves the current low-resource Oracle path. Stronger profiles are available when you operate the required model services yourself:
+
+- `lite`: template/source-grounded answers, exact or degraded semantic retrieval, no required model services.
+- `rag-standard`: compatible embedding support is required; reranker and answer model services are optional and fallback is reported as degraded mode.
+- `rag-quality`: embedding, reranker, and answer model services are required; missing services fail closed.
+
+Only local or self-hosted model services are supported in this initial hosting upgrade. Do not configure third-party hosted model APIs until Backet has an explicit privacy and licensing mode for that.
+
+The exported bot bundle records non-secret runtime compatibility metadata in `manifest.json`: profile, fallback policy, model-service roles, backend/model identifiers, endpoint roles, dimensions, and whether model files were bundled. Secrets and model weights are deliberately excluded.
 
 If Backet says the deployment workflow or deploy assets are missing, the wizard asks whether to install them. The focused command is also available:
 
@@ -189,6 +201,8 @@ Expected layout:
 
 Backet validates SSH, Docker/Compose availability, and the deploy directories. It does not store your SSH private key.
 
+Model weights stay in `/srv/backet-bot/models` or another VM-local/operator-controlled cache. They are not bundled, committed, or uploaded as bot data.
+
 ## 5. Connect GitHub
 
 Authenticate GitHub CLI:
@@ -225,10 +239,17 @@ GitHub variables Backet can configure:
 - `DISCORD_GUILD_ID`
 - `ORACLE_VM_HOST`
 - `ORACLE_VM_USER`
+- `BACKET_RAG_PROFILE`
+- `BACKET_MODEL_CACHE`
+- `BACKET_EMBEDDING_ENDPOINT`
+- `BACKET_RERANKER_ENDPOINT`
+- `BACKET_ANSWER_MODEL_ENDPOINT`
 - `BOT_COMPOSE_PROFILES`
 - `LLAMA_MODEL_RELATIVE_PATH`
 - `LLAMA_MODEL_SHA256`
 - `LLAMA_MODEL_URL`
+
+`BACKET_RAG_PROFILE` should match the profile exported in `.backet/state/bot-config.yaml`. `COMPOSE_PROFILES` controls which optional containers Docker Compose starts, for example `llama`, `rag-standard`, `rag-quality`, or a comma-separated combination such as `llama,rag-quality` when quality mode uses the bundled local Llama service. Keep model API keys, download tokens, and SSH keys in GitHub secrets or VM-local secret storage, not in `.backet/state/*.yaml`, `.env.example`, or the exported bot bundle.
 
 The repository needs:
 
@@ -265,6 +286,34 @@ backet bot setup deploy /path/to/vault --vault-path . --watch
 
 Backet dispatches the private GitHub Actions workflow. The workflow exports the bundle, uploads it to the Oracle VM, activates the release, restarts containers, and smoke-checks the bot.
 
+## Upgrading RAG Quality
+
+Use this path when `lite` is working and you want better retrieval or answer synthesis:
+
+1. Keep `lite` until visibility, rules indexes, and basic Discord answers are correct.
+2. Change `.backet/state/bot-config.yaml` to `runtime_profile: rag-standard`.
+3. Add `model_services.embedding` with a self-hosted endpoint, model identifier, expected dimensions, and timeout.
+4. Run `backet bot setup doctor /path/to/vault`, then export and run `backet bot doctor dist/bot-data`.
+5. Add reranker and answer model services and switch to `rag-quality` only when all required checks are green.
+
+If the stronger profile is not ready, switch back to `runtime_profile: lite` and redeploy.
+
+Example profile configuration:
+
+```yaml
+runtime_profile: rag-standard
+fallback_policy: degrade
+model_services:
+  embedding:
+    provider: self-hosted
+    endpoint: http://embedding:8080/embed
+    model: bge-small
+    dimensions: 384
+    timeout_seconds: 5
+```
+
+For `rag-quality`, add required `reranker` and `answer` service entries as well. Use endpoint environment variable names such as `BACKET_EMBEDDING_ENDPOINT`, `BACKET_RERANKER_ENDPOINT`, and `BACKET_ANSWER_MODEL_ENDPOINT` for deploy wiring. Do not put raw API keys or tokens in this YAML.
+
 ## Safe Example Transcript
 
 The status output is intentionally paste-safe:
@@ -284,6 +333,9 @@ github:
     DISCORD_GUILD_ID: configured
     ORACLE_VM_HOST: configured
 next_phase: github
+runtime:
+  profile: lite
+  fallback_policy: template
 ```
 
 Tokens, private keys, and model download tokens are not printed.
@@ -315,11 +367,11 @@ backet bot playground /path/to/vault \
 
 The playground exports a temporary bot bundle, answers in fast template mode, and shows which sources were retrieved with scores and match reasons. Use `--use-model` only when you want to test the configured local Llama endpoint. Use `--bundle-output dist/bot-playground --force` if you want to keep the bundle for manual inspection.
 
-Current template answers are tuned to answer directly instead of dumping raw retrieval snippets. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
+Current answers are generated from an evidence-aware packet rather than raw retrieval snippets. Broad rules questions should produce a short procedure-oriented explanation. Specific lookup questions should put the requested value first. If retrieved chunks are related but do not answer the question, the bot should say what evidence is missing instead of bluffing. Internal source labels such as `[R1]` should not appear in the answer body; source details belong after the answer.
 
 ## Answer Logs
 
-When the bot runs in Discord, each command writes a structured diagnostic log. It includes the command route, access tier, number of sources, answer mode, fallback reason, response size, elapsed time, and a question fingerprint.
+When the bot runs in Discord, each command writes a structured diagnostic log. It includes the command route, access tier, number of sources, answer mode, runtime profile, degraded mode, fallback reason, response size, elapsed time, and a question fingerprint.
 
 The logs include a short sanitized question preview by default so bad answers can be traced back to the prompt that produced them. They remain paste-safe for vault content and secrets:
 
@@ -372,3 +424,10 @@ Llama is slow:
 - use template mode
 - use a smaller Q4 GGUF model
 - keep template fallback enabled
+
+Runtime profile is degraded or unavailable:
+
+- run `backet bot doctor dist/bot-data`
+- check `runtime_health` for the missing or unsupported service role
+- make sure required services are local or self-hosted
+- switch back to `runtime_profile: lite` if you need the bot online before stronger services are ready

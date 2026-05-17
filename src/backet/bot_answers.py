@@ -23,6 +23,13 @@ DEFAULT_PROMPT_SOURCE_CHARS = 720
 DEFAULT_TEMPLATE_SOURCE_LIMIT = 1
 DEFAULT_TEMPLATE_DETAIL_CHARS = 420
 DEFAULT_PROMPT_SOURCE_LIMIT = 3
+ANSWER_PACKET_SCHEMA_VERSION = 1
+ANSWER_CLASS_ANSWER = "answer"
+ANSWER_CLASS_INSUFFICIENT = "insufficient"
+ANSWER_CLASS_AMBIGUOUS = "ambiguous"
+ANSWER_CLASS_CONFLICTING = "conflicting"
+ANSWER_CLASS_PERMISSION_DENIED = "permission-denied"
+ANSWER_CLASS_RUNTIME_UNAVAILABLE = "runtime-unavailable"
 SYSTEM_EXPLANATION_TEMPLATE_SOURCE_LIMIT = 4
 SYSTEM_EXPLANATION_TEMPLATE_DETAIL_CHARS = 260
 SYSTEM_EXPLANATION_PROMPT_SOURCE_LIMIT = 5
@@ -99,6 +106,49 @@ class GeneratedAnswer:
         }
 
 
+@dataclass(slots=True)
+class AnswerPacket:
+    question: str
+    response_class: str
+    evidence_status: str
+    selected_evidence: list[dict[str, Any]] = field(default_factory=list)
+    fallback_context: list[dict[str, Any]] = field(default_factory=list)
+    missing_evidence: list[str] = field(default_factory=list)
+    ambiguity: dict[str, Any] = field(default_factory=dict)
+    answer_shape: str = "concise"
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = ANSWER_PACKET_SCHEMA_VERSION
+
+    @property
+    def answerable(self) -> bool:
+        return self.response_class == ANSWER_CLASS_ANSWER
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "question": self.question,
+            "response_class": self.response_class,
+            "evidence_status": self.evidence_status,
+            "selected_evidence": self.selected_evidence,
+            "fallback_context": self.fallback_context,
+            "missing_evidence": self.missing_evidence,
+            "ambiguity": self.ambiguity,
+            "answer_shape": self.answer_shape,
+            "diagnostics": self.diagnostics,
+        }
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "response_class": self.response_class,
+            "evidence_status": self.evidence_status,
+            "selected_evidence_count": len(self.selected_evidence),
+            "fallback_context_count": len(self.fallback_context),
+            "missing_evidence": self.missing_evidence,
+            "answer_shape": self.answer_shape,
+        }
+
+
 class AnswerGenerator(Protocol):
     def generate(self, question: str, sources: list[dict[str, Any]]) -> GeneratedAnswer:
         ...
@@ -113,11 +163,18 @@ class TemplateAnswerGenerator:
     mode = "template"
 
     def generate(self, question: str, sources: list[dict[str, Any]]) -> GeneratedAnswer:
+        return self.generate_from_packet(build_answer_packet(question, sources))
+
+    def generate_from_packet(self, packet: AnswerPacket) -> GeneratedAnswer:
+        if packet.response_class != ANSWER_CLASS_ANSWER:
+            return _non_answer_generated(packet, mode=self.mode)
+        sources = packet.selected_evidence
+        question = packet.question
         if not sources:
             return GeneratedAnswer(
                 text="I do not have enough permitted source material to answer that.",
                 mode=self.mode,
-                diagnostics={"source_count": 0},
+                diagnostics={"source_count": 0, "answer_packet": packet.summary()},
             )
         display_sources = _select_answer_sources(question, sources, limit=_template_source_limit(question))
         lines = _format_short_answer(question, display_sources)
@@ -134,7 +191,11 @@ class TemplateAnswerGenerator:
         return GeneratedAnswer(
             text="\n".join(lines),
             mode=self.mode,
-            diagnostics={"source_count": len(sources), "question_fingerprint": _fingerprint_text(question)},
+            diagnostics={
+                "source_count": len(sources),
+                "question_fingerprint": _fingerprint_text(question),
+                "answer_packet": packet.summary(),
+            },
         )
 
 
@@ -196,12 +257,29 @@ class LlamaLocalAnswerGenerator:
         self.fallback = fallback or TemplateAnswerGenerator()
 
     def generate(self, question: str, sources: list[dict[str, Any]]) -> GeneratedAnswer:
+        return self.generate_from_packet(build_answer_packet(question, sources))
+
+    def generate_from_packet(self, packet: AnswerPacket) -> GeneratedAnswer:
+        if not packet.answerable:
+            fallback = _generate_fallback_from_packet(self.fallback, packet)
+            fallback.mode = self.mode
+            fallback.diagnostics = {
+                **fallback.diagnostics,
+                "model_skipped_reason": f"evidence_status:{packet.evidence_status}",
+            }
+            return fallback
+        sources = packet.selected_evidence
         if not sources:
-            return self.fallback.generate(question, sources)
-        prompt = build_llama_prompt(question, sources, token_budget=self.token_budget)
+            return _generate_fallback_from_packet(self.fallback, packet)
+        prompt = build_llama_prompt(packet.question, sources, token_budget=self.token_budget, answer_packet=packet)
         try:
             text = self.client.complete(prompt, timeout_seconds=self.timeout_seconds, token_budget=self.token_budget).strip()
-            validation_error = validate_generated_answer(text, sources, max_chars=self.max_response_chars)
+            validation_error = validate_generated_answer(
+                text,
+                sources,
+                max_chars=self.max_response_chars,
+                answer_packet=packet,
+            )
             if validation_error is not None:
                 raise AppError(
                     code=validation_error,
@@ -216,13 +294,14 @@ class LlamaLocalAnswerGenerator:
                 diagnostics={
                     "source_count": len(sources),
                     "endpoint": self.endpoint,
-                    "question_fingerprint": _fingerprint_text(question),
+                    "question_fingerprint": _fingerprint_text(packet.question),
+                    "answer_packet": packet.summary(),
                 },
             )
         except AppError as error:
             if not self.fallback_enabled:
                 raise
-            fallback = self.fallback.generate(question, sources)
+            fallback = _generate_fallback_from_packet(self.fallback, packet)
             fallback.mode = self.mode
             fallback.fallback_used = True
             fallback.diagnostics = {**fallback.diagnostics, "fallback_reason": error.code}
@@ -234,14 +313,208 @@ def generate_answer_from_config(
     question: str,
     sources: list[dict[str, Any]],
     client: ModelClient | None = None,
+    answer_packet: AnswerPacket | dict[str, Any] | None = None,
 ) -> GeneratedAnswer:
+    packet = coerce_answer_packet(question, sources, answer_packet=answer_packet)
     mode = str(bot_config.get("answer_mode") or "template")
     if mode == "llama-local":
-        return LlamaLocalAnswerGenerator(model_config=bot_config.get("model", {}), client=client).generate(question, sources)
-    return TemplateAnswerGenerator().generate(question, sources)
+        return LlamaLocalAnswerGenerator(model_config=bot_config.get("model", {}), client=client).generate_from_packet(packet)
+    return TemplateAnswerGenerator().generate_from_packet(packet)
 
 
-def build_llama_prompt(question: str, sources: list[dict[str, Any]], token_budget: int) -> str:
+def build_answer_packet(
+    question: str,
+    sources: list[dict[str, Any]],
+    retrieval_errors: list[dict[str, Any]] | None = None,
+) -> AnswerPacket:
+    error_packet = _answer_packet_from_retrieval_errors(question, retrieval_errors or [])
+    source_packet = _answer_packet_from_sources(question, sources)
+    if error_packet is not None and (source_packet is None or source_packet.response_class != ANSWER_CLASS_ANSWER):
+        return error_packet
+    if source_packet is not None:
+        return source_packet
+    if error_packet is not None:
+        return error_packet
+    return AnswerPacket(
+        question=question,
+        response_class=ANSWER_CLASS_INSUFFICIENT,
+        evidence_status="insufficient",
+        missing_evidence=["permitted_source"],
+        answer_shape=_answer_shape_name(question),
+        diagnostics={"source_count": 0},
+    )
+
+
+def coerce_answer_packet(
+    question: str,
+    sources: list[dict[str, Any]],
+    *,
+    answer_packet: AnswerPacket | dict[str, Any] | None = None,
+) -> AnswerPacket:
+    if isinstance(answer_packet, AnswerPacket):
+        return answer_packet
+    if isinstance(answer_packet, dict):
+        return _answer_packet_from_dict(question, sources, answer_packet)
+    return build_answer_packet(question, sources)
+
+
+def _answer_packet_from_sources(question: str, sources: list[dict[str, Any]]) -> AnswerPacket | None:
+    evidence_packet = next((source.get("evidence_packet") for source in sources if isinstance(source.get("evidence_packet"), dict)), None)
+    if isinstance(evidence_packet, dict):
+        status = str(evidence_packet.get("evidence_status") or "answerable")
+        return AnswerPacket(
+            question=question,
+            response_class=_response_class_for_evidence_status(status),
+            evidence_status=status,
+            selected_evidence=sources if status == "answerable" else [],
+            fallback_context=list(evidence_packet.get("fallback_context") or []),
+            missing_evidence=[str(item) for item in evidence_packet.get("missing_evidence", []) or []],
+            ambiguity=dict(evidence_packet.get("ambiguity", {}) or {}),
+            answer_shape=_answer_shape_name(question),
+            diagnostics={
+                "source_count": len(sources),
+                "packet_source": "retrieval_evidence_packet",
+                "candidate_counts": evidence_packet.get("candidate_counts", {}),
+            },
+        )
+    if sources:
+        return AnswerPacket(
+            question=question,
+            response_class=ANSWER_CLASS_ANSWER,
+            evidence_status="answerable",
+            selected_evidence=sources,
+            answer_shape=_answer_shape_name(question),
+            diagnostics={"source_count": len(sources), "packet_source": "source_list_compatibility"},
+        )
+    return None
+
+
+def _answer_packet_from_retrieval_errors(question: str, retrieval_errors: list[dict[str, Any]]) -> AnswerPacket | None:
+    for error in retrieval_errors:
+        if not isinstance(error, dict):
+            continue
+        details = error.get("details") if isinstance(error.get("details"), dict) else {}
+        packet = details.get("evidence_packet") if isinstance(details, dict) else None
+        if isinstance(packet, dict):
+            return _answer_packet_from_dict(question, [], packet, diagnostics={"error_code": error.get("code")})
+        if error.get("code") == "rules_query_ambiguous":
+            return AnswerPacket(
+                question=question,
+                response_class=ANSWER_CLASS_AMBIGUOUS,
+                evidence_status="ambiguous",
+                ambiguity=dict(details or {}),
+                answer_shape=_answer_shape_name(question),
+                diagnostics={"error_code": error.get("code")},
+            )
+    if retrieval_errors:
+        return AnswerPacket(
+            question=question,
+            response_class=ANSWER_CLASS_RUNTIME_UNAVAILABLE,
+            evidence_status="runtime_unavailable",
+            missing_evidence=["retrieval"],
+            answer_shape=_answer_shape_name(question),
+            diagnostics={"errors": retrieval_errors[:4]},
+        )
+    return None
+
+
+def _answer_packet_from_dict(
+    question: str,
+    sources: list[dict[str, Any]],
+    payload: dict[str, Any],
+    diagnostics: dict[str, Any] | None = None,
+) -> AnswerPacket:
+    status = str(payload.get("evidence_status") or payload.get("status") or "answerable")
+    response_class = str(payload.get("response_class") or _response_class_for_evidence_status(status))
+    selected = sources if response_class == ANSWER_CLASS_ANSWER and sources else list(payload.get("selected_evidence") or [])
+    return AnswerPacket(
+        question=str(payload.get("question") or question),
+        response_class=response_class,
+        evidence_status=status,
+        selected_evidence=selected,
+        fallback_context=list(payload.get("fallback_context") or []),
+        missing_evidence=[str(item) for item in payload.get("missing_evidence", []) or []],
+        ambiguity=dict(payload.get("ambiguity", {}) or {}),
+        answer_shape=str(payload.get("answer_shape") or _answer_shape_name(question)),
+        diagnostics={**dict(payload.get("diagnostics", {}) or {}), **(diagnostics or {})},
+    )
+
+
+def _response_class_for_evidence_status(status: str) -> str:
+    normalized = status.replace("_", "-").casefold()
+    if normalized in {"answerable", "answer"}:
+        return ANSWER_CLASS_ANSWER
+    if normalized == "ambiguous":
+        return ANSWER_CLASS_AMBIGUOUS
+    if normalized == "conflicting":
+        return ANSWER_CLASS_CONFLICTING
+    if normalized in {"permission-denied", "denied"}:
+        return ANSWER_CLASS_PERMISSION_DENIED
+    if normalized in {"runtime-unavailable", "runtime unavailable", "unavailable"}:
+        return ANSWER_CLASS_RUNTIME_UNAVAILABLE
+    return ANSWER_CLASS_INSUFFICIENT
+
+
+def _generate_fallback_from_packet(fallback: AnswerGenerator, packet: AnswerPacket) -> GeneratedAnswer:
+    generator = getattr(fallback, "generate_from_packet", None)
+    if callable(generator):
+        return generator(packet)
+    return fallback.generate(packet.question, packet.selected_evidence)
+
+
+def _non_answer_generated(packet: AnswerPacket, *, mode: str) -> GeneratedAnswer:
+    text = _non_answer_text(packet)
+    return GeneratedAnswer(
+        text=text,
+        mode=mode,
+        diagnostics={
+            "source_count": len(packet.selected_evidence),
+            "answer_packet": packet.summary(),
+            "question_fingerprint": _fingerprint_text(packet.question),
+        },
+    )
+
+
+def _non_answer_text(packet: AnswerPacket) -> str:
+    if packet.response_class == ANSWER_CLASS_AMBIGUOUS:
+        return (
+            "I found multiple comparable permitted rule sources for that. "
+            "Please narrow by book, scope, clan, discipline, or ask the Storyteller to choose."
+        )
+    if packet.response_class == ANSWER_CLASS_CONFLICTING:
+        return "The permitted sources appear to conflict, so I cannot reconcile them safely."
+    if packet.response_class == ANSWER_CLASS_PERMISSION_DENIED:
+        return "Permission denied for that bot command."
+    if packet.response_class == ANSWER_CLASS_RUNTIME_UNAVAILABLE:
+        return "I could not retrieve enough permitted source material because retrieval is unavailable right now."
+    if packet.missing_evidence:
+        missing = ", ".join(packet.missing_evidence[:3])
+        return f"I found related permitted material, but it is missing the evidence needed to answer safely: {missing}."
+    return "I do not have enough permitted source material to answer that."
+
+
+def _looks_like_substantive_answer(text: str) -> bool:
+    lowered = " ".join(text.casefold().split())
+    if "insufficient" in lowered or "do not have enough" in lowered or "cannot answer" in lowered:
+        return False
+    return len(lowered) > 80 or bool(re.search(r"\b(?:yes|no|you can|you cannot|must|requires?|costs?|roll)\b", lowered))
+
+
+def _answer_shape_name(question: str) -> str:
+    if _wants_consequence_list(question):
+        return "consequence_bullets"
+    if _wants_system_explanation(question):
+        return "system_overview"
+    return "concise"
+
+
+def build_llama_prompt(
+    question: str,
+    sources: list[dict[str, Any]],
+    token_budget: int,
+    answer_packet: AnswerPacket | dict[str, Any] | None = None,
+) -> str:
+    packet = coerce_answer_packet(question, sources, answer_packet=answer_packet)
     char_budget = max(2200, min(6000, token_budget * 24))
     header = (
         "You are Backet-bot. Answer only from the SOURCE blocks below. "
@@ -250,13 +523,14 @@ def build_llama_prompt(question: str, sources: list[dict[str, Any]], token_budge
         "Start with the direct answer, not a list of sources. "
         "Do not put bracket labels like [R1] in the answer body, do not quote whole source blocks, "
         "do not print a 'closest sources' section, and do not invent beyond the sources. "
+        f"EVIDENCE STATUS: {packet.evidence_status}. RESPONSE CLASS: {packet.response_class}. "
         f"{_answer_shape_instruction(question)}\n\n"
         f"QUESTION:\n{question.strip()}\n\n"
         "SOURCES:\n"
     )
     remaining = max(200, char_budget - len(header))
     blocks: list[str] = []
-    prompt_sources = _select_answer_sources(question, sources, limit=_prompt_source_limit(question))
+    prompt_sources = _select_answer_sources(question, packet.selected_evidence, limit=_prompt_source_limit(question))
     for source in prompt_sources:
         source_limit = min(_prompt_source_chars(question), max(240, remaining // max(1, len(prompt_sources))))
         excerpt = _source_text_for_question(source, question, limit=source_limit)
@@ -271,12 +545,26 @@ def build_llama_prompt(question: str, sources: list[dict[str, Any]], token_budge
     return f"{header}{chr(10).join(blocks)}\n\nANSWER:"
 
 
-def validate_generated_answer(text: str, sources: list[dict[str, Any]], max_chars: int = DEFAULT_MAX_RESPONSE_CHARS) -> str | None:
+def validate_generated_answer(
+    text: str,
+    sources: list[dict[str, Any]],
+    max_chars: int = DEFAULT_MAX_RESPONSE_CHARS,
+    answer_packet: AnswerPacket | dict[str, Any] | None = None,
+) -> str | None:
     if not text.strip():
         return "bot_llama_output_empty"
     if len(text) > max_chars:
         return "bot_llama_output_too_long"
+    packet = coerce_answer_packet("", sources, answer_packet=answer_packet)
+    if packet.response_class != ANSWER_CLASS_ANSWER:
+        if _looks_like_substantive_answer(text):
+            return "bot_llama_output_evidence_status_violation"
+        return None
     citations = {f"[{source['citation']}]" for source in sources}
+    emitted_citations = set(re.findall(r"\[[A-Z]\d+\]", text))
+    unavailable = emitted_citations - citations
+    if unavailable:
+        return "bot_llama_output_unavailable_citation"
     source_labels = {format_bot_source_label(source).casefold() for source in sources}
     lowered = text.casefold()
     has_source_label = "sources:" in lowered and any(label in lowered for label in source_labels)

@@ -168,6 +168,10 @@ backet rules query /path/to/vault "feeding rights blood doll" \
 
 When a supplement matches the requested scope, `backet` returns supplement results as primary results and core results as fallback results. If several supplement books match with comparable precedence, `backet` asks you to narrow the query with `--book-id` or more specific `--scope-tag` filters instead of guessing.
 
+In v0.2.0, rules queries run through the RAG v2 retrieval path. Backet plans the query, extracts canonical terms and intent cues, combines exact search with semantic matches when embeddings are available, reranks bounded candidates, and builds an evidence packet before answer synthesis. JSON output includes the query plan, retrieval mode, embedding backend/model, candidate counts, evidence status, selected evidence, and fallback context. If semantic retrieval or evidence checks are unavailable, Backet falls back explicitly instead of silently pretending the stronger path ran.
+
+The evidence packet is also used by the Discord bot. If the retrieved chunks are merely related but do not contain answer evidence, the bot should refuse with a missing-evidence answer instead of summarizing the wrong passage.
+
 ## Refresh semantic indexes
 
 Run `backet rules index` after installing or changing the optional Sentence Transformers backend, after restoring an older rules store, or when `backet rules audit` reports stale semantic coverage.

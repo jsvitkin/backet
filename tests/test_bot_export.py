@@ -62,6 +62,7 @@ def test_bot_export_builds_access_scoped_indexes_and_shared_rules_db(runner, tmp
     assert manifest["exported_at"]
     assert manifest["source_revision"]
     assert manifest["bot"]["answer_mode"] == "template"
+    assert manifest["bot"]["runtime_profile"] == "lite"
     assert manifest["bot"]["guild_id"] is None
     assert manifest["access_policy_hash"] == access_policy["access_policy_hash"]
     assert manifest["access_policy_hash"] == sha256(
@@ -82,6 +83,10 @@ def test_bot_export_builds_access_scoped_indexes_and_shared_rules_db(runner, tmp
     assert manifest["indexes"]["player"]["embedding_model"] == "hash-v1-64"
     assert manifest["model"]["answer_mode"] == "template"
     assert manifest["model"]["model_files_bundled"] is False
+    assert manifest["runtime"]["profile"] == "lite"
+    assert manifest["runtime"]["fallback_policy"] == "template"
+    assert manifest["runtime"]["model_files_bundled"] is False
+    assert manifest["runtime"]["services"]["embedding"]["required"] is False
     assert manifest["rules"]["path"] == "rules/rules.sqlite3"
 
     with closing(open_index_database(output / "indexes" / "player-vault-index.sqlite3")) as connection:
@@ -137,6 +142,71 @@ def test_bot_export_reports_empty_player_index_warning(runner, tmp_path: Path) -
     payload = json.loads(result.stdout)
     assert payload["issues"][0]["code"] == "bot_export_no_player_notes"
     assert payload["data"]["indexes"]["player"]["note_count"] == 0
+
+
+def test_bot_export_records_rag_profile_without_leaking_credentials(runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nThe court is public knowledge.")
+    (vault / ".backet" / "state" / "bot-config.yaml").write_text(
+        "schema_version: 1\n"
+        "runtime_profile: rag-quality\n"
+        "model_services:\n"
+        "  embedding:\n"
+        "    provider: self-hosted\n"
+        "    endpoint: http://embedding:8080/embed\n"
+        "    model: bge-small\n"
+        "    dimensions: 384\n"
+        "    api_key_env: BACKET_EMBEDDING_API_KEY\n"
+        "  reranker:\n"
+        "    provider: self-hosted\n"
+        "    endpoint: http://reranker:8080/rerank\n"
+        "    model: bge-reranker\n"
+        "  answer:\n"
+        "    provider: local\n"
+        "    endpoint: http://llama:8080/completion\n"
+        "    model: llama-3.1-8b\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+
+    result = runner.invoke(app, ["--json", "bot", "export", str(vault), "--output", str(output)])
+
+    assert result.exit_code == 0, result.stdout
+    manifest_text = (output / "manifest.json").read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
+    assert manifest["runtime"]["profile"] == "rag-quality"
+    assert manifest["runtime"]["fail_closed"] is True
+    assert manifest["runtime"]["services"]["embedding"]["model"] == "bge-small"
+    assert manifest["runtime"]["services"]["embedding"]["dimensions"] == 384
+    assert "BACKET_EMBEDDING_API_KEY" not in manifest_text
+    assert not any(path.name.endswith(".gguf") for path in output.rglob("*"))
+
+
+def test_bot_doctor_marks_third_party_model_apis_unsupported(runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nThe court is public knowledge.")
+    (vault / ".backet" / "state" / "bot-config.yaml").write_text(
+        "schema_version: 1\n"
+        "runtime_profile: rag-standard\n"
+        "model_services:\n"
+        "  embedding:\n"
+        "    provider: openai\n"
+        "    endpoint: https://api.openai.com/v1/embeddings\n"
+        "    model: text-embedding-3-large\n"
+        "    dimensions: 3072\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "bundle"
+
+    export = runner.invoke(app, ["--json", "bot", "export", str(vault), "--output", str(output)])
+    doctor = runner.invoke(app, ["--json", "bot", "doctor", str(output)])
+
+    assert export.exit_code == 0, export.stdout
+    assert doctor.exit_code == 0, doctor.stdout
+    payload = json.loads(doctor.stdout)
+    assert payload["data"]["ok"] is False
+    assert payload["data"]["runtime_health"]["services"]["embedding"]["status"] == "unsupported"
+    assert "bot_runtime_service_embedding_unsupported" in {issue["code"] for issue in payload["issues"]}
 
 
 def test_bot_export_fails_closed_for_invalid_visibility_metadata(runner, tmp_path: Path) -> None:

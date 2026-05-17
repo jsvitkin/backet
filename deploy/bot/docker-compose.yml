@@ -12,6 +12,11 @@ services:
     environment:
       BACKET_SKIP_UPDATE_CHECK: "1"
       BACKET_BOT_BUNDLE: /srv/backet-bot/data/current
+      BACKET_RAG_PROFILE: ${BACKET_RAG_PROFILE:-lite}
+      BACKET_MODEL_CACHE: ${BACKET_MODEL_CACHE:-/srv/backet-bot/models}
+      BACKET_EMBEDDING_ENDPOINT: ${BACKET_EMBEDDING_ENDPOINT:-}
+      BACKET_RERANKER_ENDPOINT: ${BACKET_RERANKER_ENDPOINT:-}
+      BACKET_ANSWER_MODEL_ENDPOINT: ${BACKET_ANSWER_MODEL_ENDPOINT:-}
       BACKET_LLAMA_ENDPOINT: ${BACKET_LLAMA_ENDPOINT:-http://llama:8080/completion}
     volumes:
       - /srv/backet-bot/data:/srv/backet-bot/data:ro
@@ -34,3 +39,25 @@ services:
       - "8080"
       - "--model"
       - "/models/${LLAMA_MODEL_RELATIVE_PATH:-llama-3.2-3b-instruct-q4/model.gguf}"
+
+  embedding:
+    image: ${BACKET_EMBEDDING_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-latest}
+    profiles: ["rag-standard", "rag-quality"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:80"
+    volumes:
+      - /srv/backet-bot/models:/data
+    environment:
+      MODEL_ID: ${BACKET_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+
+  reranker:
+    image: ${BACKET_RERANKER_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-latest}
+    profiles: ["rag-quality"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8082:80"
+    volumes:
+      - /srv/backet-bot/models:/data
+    environment:
+      MODEL_ID: ${BACKET_RERANKER_MODEL:-BAAI/bge-reranker-base}

@@ -8,7 +8,7 @@ from typing import Any
 
 from backet.bot_answers import TemplateAnswerGenerator, clean_bot_source_text
 from backet.bot_export import export_bot_bundle
-from backet.bot_runtime import BotBundle, answer_bot_query
+from backet.bot_runtime import BotBundle, answer_bot_query, sanitize_discord_mentions
 from backet.errors import AppError
 from backet.models import CommandResult
 
@@ -138,5 +138,11 @@ def _source_debug(source: dict[str, Any]) -> dict[str, Any]:
         "section_label": source.get("section_label"),
         "score": source.get("score"),
         "match_reasons": source.get("match_reasons", []),
-        "excerpt": clean_bot_source_text(str(source.get("excerpt") or source.get("content") or ""))[:500],
+        "retrieval_mode": source.get("retrieval_mode"),
+        "embedding_backend": source.get("embedding_backend"),
+        "embedding_model": source.get("embedding_model"),
+        "evidence_status": source.get("evidence_status"),
+        "evidence_cues": source.get("evidence_cues", []),
+        "retrieval_channels": source.get("retrieval_channels", []),
+        "excerpt": sanitize_discord_mentions(clean_bot_source_text(str(source.get("excerpt") or source.get("content") or "")))[:500],
     }

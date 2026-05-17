@@ -15,6 +15,7 @@ from backet.bot_setup import (
     PHASE_NEEDS_ACTION,
     SETUP_PHASES,
     configure_answer_setup,
+    configure_runtime_profile_setup,
     install_deployment_repository_files,
     load_or_initialize_setup_state,
     run_deploy_setup,
@@ -200,6 +201,17 @@ def _guide_visibility(vault_root: Path, options: GuidedBotSetupOptions) -> Comma
 
 
 def _guide_answer_mode(vault_root: Path, memory: _WizardMemory) -> CommandResult:
+    click.echo()
+    click.echo("RAG runtime profile")
+    state = load_or_initialize_setup_state(vault_root, save=True)
+    runtime = dict(state.get("runtime", {}) or {})
+    default_profile = str(runtime.get("profile") or runtime.get("runtime_profile") or "lite")
+    click.echo("  lite: current low-resource path with template fallback.")
+    click.echo("  rag-standard: requires semantic retrieval support and can degrade with diagnostics.")
+    click.echo("  rag-quality: requires embedding, reranker, and answer model services; missing services fail closed.")
+    profile = click.prompt("Runtime profile", default=default_profile)
+    result = configure_runtime_profile_setup(vault_root, profile=profile)
+
     click.echo()
     click.echo("Answer generation")
     state = load_or_initialize_setup_state(vault_root, save=True)

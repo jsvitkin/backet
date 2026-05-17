@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "learn-obfuscate-advancement",
+      "description": "A question about learning Obfuscate needs advancement or acquisition evidence, not a character page that happens to contain the word learn and the discipline name.",
+      "command": "rules.ask",
+      "question": "how do I learn obfuscate",
+      "expected_answerable": true,
+      "expected_sources": [
+        {
+          "source_type": "rules",
+          "text_contains": "Obfuscate"
+        }
+      ],
+      "forbidden_sources": [
+        {
+          "text_contains": "They wanted me to learn a lesson about myself"
+        }
+      ],
+      "forbidden_answer_contains": [
+        "learn a lesson about myself"
+      ]
+    },
+    {
+      "id": "malkavian-dementation-targeting",
+      "description": "A Malkavian Dementation targeting question needs system or applicability evidence, not a nearby clan discipline mention.",
+      "command": "rules.ask",
+      "question": "can malkavians use dementation on other vampires",
+      "expected_answerable": true,
+      "expected_sources": [
+        {
+          "source_type": "rules",
+          "text_contains": "Dementation"
+        }
+      ],
+      "forbidden_sources": [
+        {
+          "text_contains": "Malkavians do not advertise their use of Obfuscate"
+        }
+      ],
+      "forbidden_answer_contains": [
+        "do not advertise their use of Obfuscate"
+      ]
+    },
+    {
+      "id": "blood-bond-definition",
+      "description": "A blood bond question needs Blood Bond definition/mechanics evidence and must not answer from unrelated Second Inquisition text.",
+      "command": "rules.ask",
+      "question": "what are bloodbonds and how do I make use of it",
+      "expected_answerable": true,
+      "expected_sources": [
+        {
+          "source_type": "rules",
+          "text_contains": "Blood Bond"
+        }
+      ],
+      "forbidden_sources": [
+        {
+          "text_contains": "Second Inquisition"
+        }
+      ],
+      "forbidden_answer_contains": [
+        "Second Inquisition"
+      ]
+    }
+  ]
+}

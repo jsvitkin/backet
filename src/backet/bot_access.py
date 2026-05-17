@@ -8,6 +8,11 @@ from typing import Any
 
 import yaml
 
+from backet.bot_profiles import (
+    FALLBACK_TEMPLATE,
+    RUNTIME_PROFILE_LITE,
+    parse_runtime_profile_config,
+)
 from backet.errors import AppError
 from backet.index_ignore import load_index_ignore_policy, normalize_relative_path
 from backet.indexing import fingerprint_text
@@ -63,6 +68,9 @@ class BotConfig:
     response_defaults: dict[str, bool] = field(default_factory=dict)
     answer_mode: str = "template"
     model: dict[str, Any] = field(default_factory=dict)
+    runtime_profile: str = RUNTIME_PROFILE_LITE
+    fallback_policy: str = FALLBACK_TEMPLATE
+    model_services: dict[str, Any] = field(default_factory=dict)
     source_path: str | None = None
     exists: bool = False
 
@@ -76,6 +84,9 @@ class BotConfig:
             "response_defaults": self.response_defaults,
             "answer_mode": self.answer_mode,
             "model": self.model,
+            "runtime_profile": self.runtime_profile,
+            "fallback_policy": self.fallback_policy,
+            "model_services": self.model_services,
             "source_path": self.source_path,
             "exists": self.exists,
         }
@@ -187,6 +198,16 @@ def load_bot_config(vault_root: Path) -> BotConfig:
             exit_code=2,
         )
     config.model = dict(model or {})
+    runtime_profile = parse_runtime_profile_config(
+        {
+            **payload,
+            "answer_mode": config.answer_mode,
+            "model": config.model,
+        }
+    )
+    config.runtime_profile = runtime_profile.profile
+    config.fallback_policy = runtime_profile.fallback_policy
+    config.model_services = runtime_profile.to_config()["model_services"]
     return config
 
 
@@ -741,6 +762,9 @@ def _reject_secret_like_keys(value: Any, path: Path, key_path: str = "") -> None
 
 
 def _is_secret_like_key(lowered_key: str) -> bool:
+    normalized = lowered_key.replace("-", "_")
+    if normalized.endswith("_env") or normalized.endswith("_env_var") or normalized.endswith("_env_name"):
+        return False
     if lowered_key == "token" or lowered_key.endswith("_token") or lowered_key.endswith("-token"):
         return True
     return any(marker in lowered_key for marker in SECRET_KEY_MARKERS)

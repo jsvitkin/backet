@@ -10,6 +10,7 @@ from backet.bot_setup import (
     AdapterResult,
     DiscordSetupClient,
     Redactor,
+    configure_runtime_profile_setup,
     generate_discord_install_url,
     install_deployment_repository_files,
     load_or_initialize_setup_state,
@@ -195,8 +196,37 @@ def test_github_setup_enables_llama_profile_for_llama_answer_mode(tmp_path: Path
 
     assert result.data["last_phase_result"]["status"] == "done"
     assert adapter.variables["BOT_COMPOSE_PROFILES"] == "llama"
+    assert adapter.variables["BACKET_RAG_PROFILE"] == "lite"
+    assert adapter.variables["BACKET_MODEL_CACHE"] == "/srv/backet-bot/models"
     assert adapter.variables["LLAMA_MODEL_RELATIVE_PATH"] == "qwen/model.gguf"
     assert adapter.variables["LLAMA_MODEL_URL"] == "https://example.test/qwen.gguf"
+
+
+def test_runtime_profile_setup_syncs_non_secret_model_services(tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    state = load_or_initialize_setup_state(vault)
+    state["discord"]["guild_id"] = "guild-a"
+    save_bot_setup_state(vault, state)
+
+    result = configure_runtime_profile_setup(
+        vault,
+        profile="rag-standard",
+        model_services={
+            "embedding": {
+                "provider": "self-hosted",
+                "endpoint": "http://embedding:8080/embed",
+                "model": "bge-small",
+                "dimensions": 384,
+                "api_key_env": "BACKET_EMBEDDING_API_KEY",
+            }
+        },
+    )
+
+    runtime_config = (vault / ".backet" / "state" / "bot-config.yaml").read_text(encoding="utf-8")
+    assert result.data["runtime"]["runtime_profile"] == "rag-standard"
+    assert "runtime_profile: rag-standard" in runtime_config
+    assert "http://embedding:8080/embed" in runtime_config
+    assert "BACKET_EMBEDDING_API_KEY" not in runtime_config
 
 
 def test_github_setup_reports_public_repo_until_confirmed(tmp_path: Path) -> None:
@@ -307,8 +337,8 @@ def test_setup_files_installs_private_deploy_workflow_and_assets(runner, tmp_pat
     assert (repo_root / "deploy/bot/activate-release.sh").exists()
     workflow = (repo_root / ".github/workflows/deploy-backet-bot.yml").read_text(encoding="utf-8")
     dockerfile = (repo_root / "deploy/bot/Dockerfile").read_text(encoding="utf-8")
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl" in workflow
-    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl" in dockerfile
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.2.0/backet-0.2.0-py3-none-any.whl" in workflow
+    assert "backet[bot] @ https://github.com/jsvitkin/backet/releases/download/v0.2.0/backet-0.2.0-py3-none-any.whl" in dockerfile
     state = load_or_initialize_setup_state(vault)
     assert state["setup"]["phases"]["prerequisites"]["status"] == "done"
     assert "Deployment Files" in result.output

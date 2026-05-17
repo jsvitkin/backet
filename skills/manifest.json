@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "pack_version": "0.1.2",
-  "cli_requirement": ">=0.1.0,<0.2.0",
+  "pack_version": "0.2.0",
+  "cli_requirement": ">=0.2.0,<0.3.0",
   "skills": [
     {
       "name": "workflow-authoring",

@@ -52,6 +52,8 @@ context: |
   - Preserve room to debate vault information architecture; do not assume the current numbered Prague-by-Night chapter structure is the only valid future vault model.
   - Require strong automated test coverage with unit, integration, and install or smoke coverage proportionate to the risk of each change.
   - Validate installability of release artifacts before deployment so broken install flows are caught in CI instead of after release.
+  - Human terminal output must be concise, interpreted, and command-specific. Raw JSON, Python dict reprs, list reprs, and machine payload keys belong only behind `--json`.
+  - When a command has both human and machine output, human output should summarize status, next action, paths, and runnable commands; `--json` should carry the complete deterministic payload.
 
 rules:
   proposal:
@@ -75,7 +77,9 @@ rules:
     - Show where per-vault indexes and ingested rules data live, what is committed, and what is ignored or rebuildable.
     - Show how PDF ingestion, chunking, OCR recovery, and rule-precedence metadata fit into the system.
     - Account for both human-friendly terminal UX and deterministic agent-facing command output.
+    - Explicitly define human output for commands that return structured data, instead of relying on generic dict/list rendering.
   tasks:
     - Separate work for CLI, skill pack, and release or update plumbing.
     - Separate work for per-vault state management and private rules ingestion when relevant.
     - Include explicit testing and validation tasks for every change, not only implementation tasks.
+    - Include regression tests for structured CLI commands proving non-JSON output does not dump raw dictionaries, lists, or machine payload keys.

@@ -133,11 +133,11 @@ def test_rule_ingestion_docs_cover_system_dependency_setup() -> None:
 def test_installation_wiki_covers_platform_specific_installs() -> None:
     installation = Path("docs/wiki/Installation.md").read_text(encoding="utf-8")
 
-    assert "The current release is `v0.1.28`." in installation
+    assert "The current release is `v0.2.0`." in installation
     assert "## Recommended Install on macOS or Linux" in installation
     assert "curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash" in installation
     assert "## Recommended Install on Windows PowerShell" in installation
-    assert "py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl" in installation
+    assert "py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.2.0/backet-0.2.0-py3-none-any.whl" in installation
     assert "The Windows install path does not use the macOS/Linux `curl ... | bash` installer." in installation
 
 

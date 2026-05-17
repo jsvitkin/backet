@@ -8,6 +8,12 @@ from typing import Any
 
 from backet import __version__
 from backet.bot_access import load_bot_config, scan_bot_visibility, summarize_visibility
+from backet.bot_profiles import (
+    doctor_runtime_profile,
+    issues_from_runtime_health,
+    runtime_profile_manifest,
+    scrub_secret_fields,
+)
 from backet.errors import AppError
 from backet.indexing import build_scoped_index, timestamp_now
 from backet.models import CommandResult, Issue
@@ -83,12 +89,18 @@ def export_bot_bundle(vault_root: Path, output_path: Path, force: bool = False) 
     if rules_meta["included"]:
         file_fingerprints["rules/rules.sqlite3"] = str(rules_meta["fingerprint"])
 
+    portable_config = _portable_bot_config(config.to_dict())
+    portable_indexes = {
+        "player": _portable_index_meta(player_index, "indexes/player-vault-index.sqlite3"),
+        "storyteller": _portable_index_meta(storyteller_index, "indexes/storyteller-vault-index.sqlite3"),
+    }
+    runtime = runtime_profile_manifest(portable_config, indexes=portable_indexes)
     manifest = {
         "schema_version": BOT_BUNDLE_SCHEMA_VERSION,
         "backet_version": __version__,
         "exported_at": timestamp_now(),
         "vault": str(vault_root),
-        "bot": _portable_bot_config(config.to_dict()),
+        "bot": portable_config,
         "source_revision": _fingerprint_json(
             {
                 "decisions": decisions_payload,
@@ -102,11 +114,9 @@ def export_bot_bundle(vault_root: Path, output_path: Path, force: bool = False) 
         "access_policy_hash": access_policy_hash,
         "visibility_summary": summary,
         "files": file_fingerprints,
-        "indexes": {
-            "player": _portable_index_meta(player_index, "indexes/player-vault-index.sqlite3"),
-            "storyteller": _portable_index_meta(storyteller_index, "indexes/storyteller-vault-index.sqlite3"),
-        },
+        "indexes": portable_indexes,
         "rules": rules_meta,
+        "runtime": runtime,
         "model": _portable_model_meta(config.to_dict()),
     }
     _write_json_file(output_root / "manifest.json", manifest)
@@ -148,6 +158,8 @@ def export_bot_bundle(vault_root: Path, output_path: Path, force: bool = False) 
                 "target": "oracle-always-free-vm",
                 "activation": "github-actions-upload-activate-smoke",
                 "model_files_bundled": False,
+                "runtime_profile": runtime["profile"],
+                "fallback_policy": runtime["fallback_policy"],
             },
         },
     )
@@ -248,6 +260,9 @@ def doctor_bot_bundle(bundle_root: Path) -> CommandResult:
                 )
         _append_fingerprint_issue(issues, root, manifest, "access-policy.json")
 
+    runtime_health = doctor_runtime_profile(manifest, manifest=manifest)
+    issues.extend(issues_from_runtime_health(runtime_health))
+
     return CommandResult(
         message="Bot bundle health check complete",
         issues=issues,
@@ -257,6 +272,7 @@ def doctor_bot_bundle(bundle_root: Path) -> CommandResult:
             "schema_version": schema_version,
             "ok": not any(issue.severity == "error" for issue in issues),
             "manifest": manifest,
+            "runtime_health": runtime_health,
         },
     )
 
@@ -282,7 +298,10 @@ def _portable_bot_config(config: dict[str, Any]) -> dict[str, Any]:
         "commands": config.get("commands", {}),
         "response_defaults": config.get("response_defaults", {}),
         "answer_mode": config.get("answer_mode", "template"),
-        "model": config.get("model", {}),
+        "model": scrub_secret_fields(config.get("model", {})),
+        "runtime_profile": config.get("runtime_profile", "lite"),
+        "fallback_policy": config.get("fallback_policy"),
+        "model_services": scrub_secret_fields(config.get("model_services", {})),
         "config_exists": bool(config.get("exists")),
     }
 
@@ -291,7 +310,7 @@ def _portable_model_meta(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "answer_mode": config.get("answer_mode", "template"),
         "model_files_bundled": False,
-        "configured": config.get("model", {}),
+        "configured": scrub_secret_fields(config.get("model", {})),
         "recommended": {
             "default": "Llama-3.2-3B-Instruct GGUF Q4",
             "stronger_optional": "Llama-3.1-8B-Instruct GGUF Q4",

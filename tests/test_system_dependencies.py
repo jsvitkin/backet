@@ -9,7 +9,7 @@ import backet.cli
 import backet.system_dependencies as deps
 from backet.cli import app
 from backet.errors import AppError
-from backet.models import CommandResult
+from backet.models import CommandResult, Issue
 from backet.system_dependencies import DependencyStatus
 
 
@@ -139,3 +139,86 @@ def test_setup_check_cli_emits_dependency_payload(
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["data"]["dependencies"]["tesseract"]["ok"] is False
+
+
+def test_setup_check_cli_emits_human_summary_without_raw_dependency_dump(
+    runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result_payload = CommandResult(
+        message="System dependency check complete",
+        data={
+            "dependencies": {
+                "tesseract": {
+                    "installed": True,
+                    "ok": True,
+                    "path": r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                    "version": "5.4.0.20240606",
+                    "minimum_version": "5.0.0",
+                    "outdated": False,
+                    "install_command": ["winget", "install", "--id", "UB-Mannheim.TesseractOCR"],
+                }
+            },
+            "ok": True,
+        },
+    )
+    monkeypatch.setattr(backet.cli, "check_system_dependencies", lambda: result_payload)
+
+    result = runner.invoke(app, ["setup", "check"])
+
+    assert result.exit_code == 0
+    assert "System dependency check complete" in result.stdout
+    assert "Tesseract: ready" in result.stdout
+    assert "Version: 5.4.0.20240606" in result.stdout
+    assert r"Path: C:\Program Files\Tesseract-OCR\tesseract.exe" in result.stdout
+    assert "OCR fallback: available" in result.stdout
+    assert "Ready: yes" in result.stdout
+    assert "dependencies:" not in result.stdout
+    assert "install_command" not in result.stdout
+    assert "{" not in result.stdout
+
+
+def test_setup_check_cli_human_summary_reports_install_action_for_missing_dependency(
+    runner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result_payload = CommandResult(
+        message="System dependency check complete",
+        issues=[
+            Issue(
+                code="tesseract_missing",
+                severity="warning",
+                message="Tesseract is not available, so OCR fallback for scanned/image-only PDFs will not work.",
+                hint="Install Tesseract.",
+                safe_to_fix=True,
+            )
+        ],
+        data={
+            "dependencies": {
+                "tesseract": {
+                    "installed": False,
+                    "ok": False,
+                    "path": None,
+                    "version": None,
+                    "minimum_version": "5.0.0",
+                    "outdated": False,
+                    "install_command": ["winget", "install", "--id", "UB-Mannheim.TesseractOCR"],
+                    "hint": "Install Tesseract.",
+                }
+            },
+            "ok": False,
+        },
+    )
+    monkeypatch.setattr(backet.cli, "check_system_dependencies", lambda: result_payload)
+
+    result = runner.invoke(app, ["setup", "check"])
+
+    assert result.exit_code == 0
+    assert "Tesseract: missing" in result.stdout
+    assert "Required: >= 5.0.0" in result.stdout
+    assert "OCR fallback: unavailable" in result.stdout
+    assert "Install: winget install --id UB-Mannheim.TesseractOCR" in result.stdout
+    assert "Ready: no" in result.stdout
+    assert "dependencies:" not in result.stdout
+    assert "install_command" not in result.stdout
+    assert "{" not in result.stdout

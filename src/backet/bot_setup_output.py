@@ -172,7 +172,8 @@ def _print_bot_facts(data: dict[str, Any]) -> None:
     discord = dict(data.get("discord", {}) or {})
     github = dict(data.get("github", {}) or {})
     oracle = dict(data.get("oracle", {}) or {})
-    if discord or github or oracle:
+    runtime = dict(data.get("runtime", {}) or {})
+    if discord or github or oracle or runtime:
         console.print("[bold]Current Facts[/bold]")
     if discord:
         _print_path_line("Discord app", _named_id(discord.get("app_name"), discord.get("app_id")))
@@ -185,7 +186,10 @@ def _print_bot_facts(data: dict[str, Any]) -> None:
         _print_path_line("Oracle host", oracle.get("host"))
         _print_path_line("Oracle user", oracle.get("user"))
         _print_path_line("Oracle deploy path", oracle.get("deploy_path"))
-    if discord or github or oracle:
+    if runtime:
+        _print_path_line("Runtime profile", runtime.get("profile") or runtime.get("runtime_profile"))
+        _print_path_line("Fallback policy", runtime.get("fallback_policy"))
+    if discord or github or oracle or runtime:
         console.print()
 
 

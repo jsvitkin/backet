@@ -18,6 +18,8 @@ def emit_bot_policy_report(result: CommandResult) -> None:
     _line("Config exists", _yes_no(config.get("exists")))
     _line("Guild", config.get("guild_id") or "not configured")
     _line("Answer mode", config.get("answer_mode"))
+    _line("Runtime profile", config.get("runtime_profile"))
+    _line("Fallback policy", config.get("fallback_policy"))
     _print_roles(config)
     _print_command_policies(config)
     _print_visibility_summary(summary)
@@ -45,6 +47,7 @@ def emit_bot_bundle_doctor_report(result: CommandResult) -> None:
     _line("Manifest", data.get("manifest_path"))
     _line("Schema", data.get("schema_version"))
     _line("Status", "ok" if data.get("ok") else "needs attention")
+    _print_runtime_health(dict(data.get("runtime_health", {}) or {}))
     _print_issues(result.issues)
     if data.get("ok"):
         _print_next("Inspect the bundle or try a dry-run bot question when you are ready to test it.")
@@ -59,6 +62,7 @@ def emit_bot_bundle_inspect_report(result: CommandResult) -> None:
     _line("Schema", data.get("schema_version"))
     _line("Guild", data.get("guild_id") or "not configured")
     _line("Answer mode", data.get("answer_mode"))
+    _print_runtime_health(dict(data.get("runtime_health", {}) or {}))
     indexes = dict(data.get("indexes", {}) or {})
     if indexes:
         console.print("Indexes:")
@@ -78,6 +82,7 @@ def emit_bot_answer_report(result: CommandResult) -> None:
     _line("Access tier", data.get("access_tier"))
     _line("Response visibility", "private" if data.get("response_private") else "public")
     _line("Denied", _yes_no(data.get("denied")))
+    _print_trace_summary(dict(data.get("answer_trace", {}) or {}))
     generation = dict(dict(data.get("diagnostics", {}) or {}).get("answer_generation", {}) or {})
     if generation:
         _line("Answer mode", generation.get("mode"))
@@ -113,6 +118,7 @@ def emit_bot_playground_report(result: CommandResult) -> None:
         answer = dict(run.get("answer", {}) or {})
         generation = dict(dict(answer.get("diagnostics", {}) or {}).get("answer_generation", {}) or {})
         generation_diag = dict(generation.get("diagnostics", {}) or {})
+        trace = dict(answer.get("answer_trace", {}) or {})
         console.print()
         console.print(f"[bold]Run {index}[/bold]")
         _line("Question", run.get("question"))
@@ -120,6 +126,7 @@ def emit_bot_playground_report(result: CommandResult) -> None:
         _line("Access tier", answer.get("access_tier"))
         _line("Response visibility", "private" if answer.get("response_private") else "public")
         _line("Denied", _yes_no(answer.get("denied")))
+        _print_trace_summary(trace)
         if generation:
             _line("Answer mode", generation.get("mode"))
             _line("Fallback used", _yes_no(generation.get("fallback_used")))
@@ -271,6 +278,26 @@ def _print_visibility_guidance(summary: dict[str, Any]) -> None:
         console.print(f"  - {action}")
 
 
+def _print_runtime_health(health: dict[str, Any]) -> None:
+    if not health:
+        return
+    _line("Runtime profile", health.get("profile"))
+    _line("Fallback policy", health.get("fallback_policy"))
+    _line("Degraded mode", _yes_no(health.get("degraded")))
+    services = dict(health.get("services", {}) or {})
+    if not services:
+        return
+    console.print("Model services:")
+    for role, service in sorted(services.items()):
+        if not isinstance(service, dict):
+            continue
+        required = "required" if service.get("required") else "optional"
+        status = service.get("status") or "unknown"
+        provider = service.get("provider") or "disabled"
+        model = f", {service.get('model')}" if service.get("model") else ""
+        console.print(f"  - {role}: {status} ({required}, {provider}{model})")
+
+
 def _print_created(created: list[str]) -> None:
     if not created:
         return
@@ -293,6 +320,44 @@ def _print_issues(issues: list[Issue]) -> None:
 def _print_next(message: str) -> None:
     console.print("Next:")
     console.print(f"  - {message}")
+
+
+def _print_trace_summary(trace: dict[str, Any]) -> None:
+    if not trace:
+        return
+    retrieval = dict(trace.get("retrieval", {}) or {})
+    _line("Trace schema", trace.get("trace_schema_version"))
+    _line("Retrieved sources", retrieval.get("source_count"))
+    if retrieval.get("rules_retrieval_mode"):
+        _line("Rules retrieval", retrieval.get("rules_retrieval_mode"))
+    stages = dict(trace.get("stages", {}) or {})
+    query_plan_stage = dict(stages.get("query_plan", {}) or {})
+    if query_plan_stage.get("status") == "available":
+        plan = dict(query_plan_stage.get("plan", {}) or {})
+        intents = ", ".join(str(intent) for intent in plan.get("intents", []) or [])
+        terms = ", ".join(str(term) for term in plan.get("canonical_terms", [])[:6] or [])
+        _line("Query intents", intents or "none")
+        _line("Query terms", terms or "none")
+    answerability = dict(stages.get("answerability", {}) or {})
+    if answerability.get("status") == "available":
+        _line("Evidence status", answerability.get("evidence_status"))
+        missing = ", ".join(str(item) for item in answerability.get("missing_evidence", []) or [])
+        if missing:
+            _line("Missing evidence", missing)
+    answer_packet = dict(stages.get("answer_packet", {}) or {})
+    if answer_packet.get("status") == "available":
+        _line("Answer class", answer_packet.get("response_class"))
+    generation = dict(trace.get("generation", {}) or {})
+    if generation.get("citation_status"):
+        _line("Citation status", generation.get("citation_status"))
+    errors = list(retrieval.get("errors") or [])
+    if errors:
+        console.print("Retrieval warnings:")
+        for error in errors[:4]:
+            if isinstance(error, dict):
+                console.print(f"  - {error.get('code')}: {error.get('message')}")
+            else:
+                console.print(f"  - {error}")
 
 
 def _line(label: str, value: Any) -> None:
@@ -322,6 +387,11 @@ def _print_source_debug(source: dict[str, Any]) -> None:
     score_text = f"{float(score):.3f}" if isinstance(score, int | float) else str(score or "n/a")
     console.print(f"  - {citation}: {title}{location}")
     console.print(f"    score: {score_text}; matches: {reasons}")
+    if source.get("retrieval_mode"):
+        console.print(f"    retrieval: {source.get('retrieval_mode')}")
+    if source.get("evidence_status"):
+        cues = ", ".join(str(cue) for cue in source.get("evidence_cues", []) or []) or "none"
+        console.print(f"    evidence: {source.get('evidence_status')}; cues: {cues}")
     excerpt = " ".join(str(source.get("excerpt") or "").split())
     if excerpt:
         wrapped = textwrap.wrap(excerpt, width=72, break_long_words=False, break_on_hyphens=False)

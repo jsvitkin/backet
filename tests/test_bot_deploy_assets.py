@@ -19,11 +19,21 @@ def test_oracle_vm_deploy_assets_are_present_and_private_by_default() -> None:
     assert "COPY src" not in dockerfile
     assert "/srv/backet-bot/data" in compose
     assert "/srv/backet-bot/models" in compose
+    assert "BACKET_RAG_PROFILE" in compose
+    assert "BACKET_EMBEDDING_ENDPOINT" in compose
+    assert "BACKET_RERANKER_ENDPOINT" in compose
+    assert "BACKET_ANSWER_MODEL_ENDPOINT" in compose
     assert "profiles: [\"llama\"]" in compose
+    assert "profiles: [\"rag-standard\", \"rag-quality\"]" in compose
+    assert "profiles: [\"rag-quality\"]" in compose
     assert "ghcr.io/ggml-org/llama.cpp:server" in compose
     assert "ghcr.io/ggerganov/llama.cpp:server" not in compose
     assert "deploy/bot/Dockerfile" not in compose
     assert "replace-with-github-secret-or-vm-secret" in env_example
+    assert "BACKET_RAG_PROFILE=lite" in env_example
+    assert "BACKET_MODEL_CACHE=/srv/backet-bot/models" in env_example
+    assert "BACKET_EMBEDDING_ENDPOINT=" in env_example
+    assert "Third-party hosted model APIs are not supported" in env_example
     assert "backet bot doctor" in activate
     assert "backet bot inspect" in activate
     assert "chmod -R a+rX" in activate

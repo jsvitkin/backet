@@ -60,6 +60,18 @@ The bot runtime still reads:
 
 Secrets are never written to either file.
 
+## Runtime Profiles
+
+The bot now treats answer quality as an explicit hosting profile:
+
+- `lite` is the default. It keeps the current low-resource deployment path, template/source-grounded answers, and degraded semantic retrieval fallback.
+- `rag-standard` requires compatible embedding support. Reranking and model synthesis can be added, but fallback remains allowed and is reported in diagnostics.
+- `rag-quality` requires embedding, reranker, and answer model services. Missing required services fail closed instead of silently falling back to weaker answers.
+
+Model services in this initial slice must be local or self-hosted inside your operator-controlled deployment boundary. Third-party hosted model APIs such as OpenAI, Anthropic, Cohere, or similar providers are deliberately unsupported until there is a separate privacy and licensing decision.
+
+The profile and non-secret model-service compatibility metadata are written into the exported bundle manifest. API keys, tokens, SSH keys, model download credentials, and model weights are not written into the manifest or data bundle.
+
 If setup reports that the deployment workflow or deploy assets are missing, the interactive wizard asks to install them. You can also run the focused command:
 
 ```bash
@@ -188,6 +200,11 @@ GitHub variables:
 - `DISCORD_GUILD_ID`
 - `ORACLE_VM_HOST`
 - `ORACLE_VM_USER`
+- `BACKET_RAG_PROFILE`
+- `BACKET_MODEL_CACHE`
+- `BACKET_EMBEDDING_ENDPOINT`
+- `BACKET_RERANKER_ENDPOINT`
+- `BACKET_ANSWER_MODEL_ENDPOINT`
 - `BOT_COMPOSE_PROFILES`
 - `LLAMA_MODEL_RELATIVE_PATH`
 - `LLAMA_MODEL_SHA256`
@@ -242,6 +259,8 @@ Expected VM layout:
 ```
 
 The SSH private key value belongs in the GitHub secret `ORACLE_VM_SSH_KEY`, not in `.backet`.
+
+Model weights belong under `/srv/backet-bot/models` or another operator-controlled cache. They are not committed, uploaded in bot data bundles, or copied out of the VM cache during export.
 
 ## Deploy Phase
 
@@ -306,6 +325,18 @@ bot-data/
 ```
 
 The bundle does not include source PDFs, model files, tokens, SSH keys, or the full Obsidian vault.
+
+## Upgrading From Lite
+
+Start with `lite` until access policy, visibility, and rules retrieval are working. Then move in this order:
+
+1. Set `runtime_profile: rag-standard` in `.backet/state/bot-config.yaml`.
+2. Configure `model_services.embedding` with a local or self-hosted endpoint, model identifier, expected dimensions, and timeout.
+3. Run `backet bot setup doctor /path/to/vault`, then export and run `backet bot doctor dist/bot-data`.
+4. Add a reranker and answer model service only after embedding diagnostics are clean.
+5. Switch to `rag-quality` when all three services are configured and startup diagnostics can fail closed safely.
+
+Rollback is just setting `runtime_profile: lite` and redeploying the bundle.
 
 ## Answer Diagnostics
 

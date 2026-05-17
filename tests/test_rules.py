@@ -14,6 +14,7 @@ from backet.errors import AppError
 from backet.rules import (
     build_rules_fts_query,
     classify_rule_chunk,
+    classify_rule_chunk_rag_metadata,
     ingest_rulebook,
     normalize_scope_tags,
     open_rules_connection,
@@ -259,6 +260,183 @@ def test_rules_query_prefers_definition_over_incidental_cost_mentions(runner, tm
     assert "definition-match" in damage_first["match_reasons"]
 
 
+def test_rules_query_planner_prefers_blood_bond_definition(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "blood-bond.pdf",
+        [
+            _rule_page(
+                "Second Inquisition",
+                (
+                    "A prince thought they could use it as a pawn in his own schemes. "
+                    "This chapter discusses agencies, hunters, paranoia, and indirect threats."
+                ),
+            ),
+            _rule_page(
+                "Blood Bonds",
+                (
+                    "A Blood Bond is a supernatural emotional dependence created by repeated tastes of vitae. "
+                    "Blood bonds bind the drinker to the vampire whose vitae they consume."
+                ),
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "what are bloodbonds and how do I make use of it", "--limit", "1"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["data"]["query_plan"]["entities"]["mechanics"] == ["blood bond"]
+    assert payload["data"]["query_plan"]["scope_tags"] == ["mechanic:blood-bond"]
+    assert payload["data"]["evidence_status"] == "answerable"
+    assert payload["data"]["evidence_packet"]["candidate_counts"]["selected_evidence"] == 1
+    assert payload["data"]["semantic_quality"]["status"] == "degraded"
+    assert payload["data"]["primary_results"][0]["section_label"] == "Blood Bonds"
+
+
+def test_rules_query_planner_prefers_advancement_for_learning_obfuscate(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "advancement.pdf",
+        [
+            _rule_page(
+                "Example Character",
+                (
+                    "They wanted me to learn a lesson about myself, but I am not ready for it. "
+                    "Clan: Nosferatu. Disciplines and Powers: Obfuscate 1 Silence of Death, "
+                    "Obfuscate 2 Unseen Passage, Animalism 1 Bond Famulus."
+                ),
+            ),
+            _rule_page(
+                "Advancement",
+                (
+                    "Characters learn new Discipline powers by spending experience during advancement. "
+                    "Out of clan Discipline powers such as Obfuscate require access to a teacher, "
+                    "story permission, and the listed experience cost."
+                ),
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "how do I learn obfuscate", "--limit", "1"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert "advancement" in payload["data"]["query_plan"]["intents"]
+    assert "discipline:obfuscate" in payload["data"]["query_plan"]["scope_tags"]
+    assert payload["data"]["scope_tags"] == []
+    assert payload["data"]["evidence_status"] == "answerable"
+    assert "advancement" in payload["data"]["evidence_packet"]["selected_evidence"][0]["evidence_cues"]
+    assert payload["data"]["primary_results"][0]["section_label"] == "Advancement"
+
+
+def test_rules_query_planner_prefers_dementation_targeting_system(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "dementation.pdf",
+        [
+            _rule_page(
+                "Malkavian Clan",
+                (
+                    "Some Malkavians use Dominate to distract a victim's mind. "
+                    "Others rely on Obfuscate and unusual clan traditions in social scenes."
+                ),
+            ),
+            _rule_page(
+                "Dementation System",
+                (
+                    "Dementation is a Dominate power associated with Malkavians. "
+                    "System: choose a target vampire or other Kindred within conversation range. "
+                    "The power affects the target if the user's roll succeeds."
+                ),
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "can malkavians use dementation on other vampires", "--limit", "1"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert "targeting" in payload["data"]["query_plan"]["intents"]
+    assert any("ambiguous_power_alias:dementation" in warning for warning in payload["data"]["query_plan"]["warnings"])
+    assert payload["data"]["evidence_status"] == "answerable"
+    assert "targeting" in payload["data"]["evidence_packet"]["selected_evidence"][0]["evidence_cues"]
+    assert payload["data"]["primary_results"][0]["section_label"] == "Dementation System"
+
+
+def test_rules_rag_v2_selects_cost_and_consequence_evidence(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "cost-consequence.pdf",
+        [
+            _rule_page(
+                "Blood Surge Cost",
+                "Cost: One Rouse Check. A Blood Surge adds dice to a roll for the current test.",
+            ),
+            _rule_page(
+                "Messy Critical Consequence",
+                "On a messy critical, the character succeeds but suffers a Beast-driven consequence or complication.",
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    cost = runner.invoke(app, ["--json", "rules", "query", str(vault), "what does blood surge cost", "--limit", "1"])
+    consequence = runner.invoke(
+        app,
+        ["--json", "rules", "query", str(vault), "what happens on a messy critical", "--limit", "1"],
+    )
+
+    assert cost.exit_code == 0, cost.stdout
+    assert consequence.exit_code == 0, consequence.stdout
+    cost_payload = json.loads(cost.stdout)
+    consequence_payload = json.loads(consequence.stdout)
+    assert cost_payload["data"]["evidence_status"] == "answerable"
+    assert cost_payload["data"]["primary_results"][0]["section_label"] == "Blood Surge Cost"
+    assert "cost" in cost_payload["data"]["evidence_packet"]["selected_evidence"][0]["evidence_cues"]
+    assert consequence_payload["data"]["evidence_status"] == "answerable"
+    assert consequence_payload["data"]["primary_results"][0]["section_label"] == "Messy Critical Consequence"
+    assert "consequence" in consequence_payload["data"]["evidence_packet"]["selected_evidence"][0]["evidence_cues"]
+
+
+def test_rules_rag_v2_marks_mere_mentions_insufficient(runner, tmp_path: Path) -> None:
+    vault = _make_bootstrapped_vault(runner, tmp_path)
+    pdf_path = _create_text_pdf(
+        tmp_path / "mere-mention.pdf",
+        [
+            _rule_page(
+                "Example Character",
+                (
+                    "They wanted me to learn a lesson about myself, but I am not ready for it. "
+                    "Clan: Nosferatu. Disciplines and Powers: Obfuscate 1 Silence of Death, "
+                    "Obfuscate 2 Unseen Passage."
+                ),
+            ),
+        ],
+    )
+    _ingest_book(runner, vault, pdf_path, "core-v5", "Core Rulebook", "core")
+
+    result = runner.invoke(app, ["--json", "rules", "query", str(vault), "how do I learn obfuscate", "--limit", "1"])
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["data"]["evidence_status"] == "insufficient"
+    assert payload["data"]["evidence_packet"]["selected_evidence"] == []
+    assert "advancement" in payload["data"]["evidence_packet"]["missing_evidence"]
+    rejected = payload["data"]["evidence_packet"]["rejected_candidates"]
+    assert rejected
+    assert "mere_mention" in rejected[0]["rejection_reasons"]
+
+
 def test_rules_query_downranks_non_answer_sections(runner, tmp_path: Path) -> None:
     vault = _make_bootstrapped_vault(runner, tmp_path)
     pdf_path = _create_text_pdf(
@@ -337,6 +515,25 @@ def test_rule_retrieval_metadata_classifies_common_non_answer_chunks() -> None:
         "art",
         ["art_heavy", "suspect_ocr", "very_short"],
     )
+
+
+def test_rag_v2_metadata_detects_aliases_locations_and_evidence_cues() -> None:
+    metadata = classify_rule_chunk_rag_metadata(
+        "Advancement",
+        (
+            "Characters learn new Discipline powers by spending experience. "
+            "Out of clan Discipline powers such as Obfuscate require access to a teacher."
+        ),
+        18,
+        0.98,
+        "direct",
+    )
+
+    assert metadata.rag_schema_version == 1
+    assert "Advancement" in metadata.heading_path
+    assert "obfuscate" in metadata.aliases
+    assert {"advancement", "cost", "prerequisite"}.issubset(set(metadata.evidence_cues))
+    assert any(entity["scope_tag"] == "discipline:obfuscate" for entity in metadata.entity_locations)
 
 
 def test_rules_ingest_uses_ocr_fallback_for_image_only_pdf(

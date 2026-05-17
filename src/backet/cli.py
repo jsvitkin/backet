@@ -98,6 +98,7 @@ from backet.rules_output import (
 )
 from backet.skills import install_skills, skills_status, update_skills
 from backet.system_dependencies import check_system_dependencies, install_system_dependencies
+from backet.system_dependencies_output import emit_system_dependencies_report
 from backet.vault import diagnose_vault, initialize_vault
 
 app = typer.Typer(no_args_is_help=True, help="backet CLI")
@@ -302,7 +303,11 @@ def doctor_command(
 def setup_check_command(ctx: typer.Context) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(state, check_system_dependencies())
+        result = check_system_dependencies()
+        if state.json_output:
+            emit_success(state, result)
+            return
+        emit_system_dependencies_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 
@@ -314,7 +319,11 @@ def setup_install_command(
 ) -> None:
     state = ensure_state(ctx)
     try:
-        emit_success(state, install_system_dependencies(yes=yes))
+        result = install_system_dependencies(yes=yes)
+        if state.json_output:
+            emit_success(state, result)
+            return
+        emit_system_dependencies_report(result)
     except AppError as error:
         _handle_error(ctx, error)
 

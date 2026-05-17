@@ -34,8 +34,8 @@ def _create_skill_source(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     manifest = {
         "schema_version": 1,
-        "pack_version": "0.1.0",
-        "cli_requirement": ">=0.1.0,<0.2.0",
+        "pack_version": "0.2.0",
+        "cli_requirement": ">=0.2.0,<0.3.0",
         "skills": [{"name": "npc-author", "path": "npc-author"}],
     }
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")

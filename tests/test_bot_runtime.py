@@ -61,6 +61,25 @@ def test_bot_runtime_denies_player_before_storyteller_index_is_opened(runner, tm
     assert opened == []
 
 
+def test_bot_runtime_quality_profile_fails_closed_when_required_services_missing(runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    _write_bot_config(vault)
+    config_path = vault / ".backet" / "state" / "bot-config.yaml"
+    config_path.write_text(config_path.read_text(encoding="utf-8") + "runtime_profile: rag-quality\n", encoding="utf-8")
+    _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nCourt customs.")
+    output = _export_bundle(runner, vault, tmp_path)
+    bundle = BotBundle.load(output)
+
+    answer = answer_bot_query(bundle, command="canon.ask", question="court customs", role_ids=["player-role"])
+
+    assert answer.denied is False
+    assert answer.retrieval_attempted is False
+    assert answer.sources == []
+    assert answer.diagnostics["runtime"]["blocking"] is True
+    assert answer.answer_trace["runtime"]["fail_closed"] is True
+    assert "retrieval is unavailable" in answer.text
+
+
 def test_bot_runtime_opens_bundle_indexes_read_only(runner, tmp_path: Path) -> None:
     vault = _make_vault(tmp_path)
     _write(vault / "Player Primer.md", "player", ["canon"], "# Player Primer\n\nCourt customs.")
@@ -97,6 +116,8 @@ def test_bot_ask_cli_exercises_runtime_without_discord(runner, tmp_path: Path) -
     payload = json.loads(result.stdout)
     assert payload["data"]["access_tier"] == "player"
     assert payload["data"]["sources"][0]["relative_path"] == "Player Primer.md"
+    assert payload["data"]["answer_trace"]["trace_schema_version"] == 1
+    assert payload["data"]["answer_trace"]["stages"]["query_plan"]["status"] == "unavailable"
 
 
 def test_bot_runtime_keeps_unscoped_supplement_matches_answerable(runner, tmp_path: Path) -> None:
@@ -149,6 +170,46 @@ def test_bot_runtime_keeps_unscoped_supplement_matches_answerable(runner, tmp_pa
     assert "blood doll" in answer.text
     assert answer.sources[0]["source_type"] == "vault"
     assert any(source["source_type"] == "rules" for source in answer.sources)
+    query_plan_stage = answer.answer_trace["stages"]["query_plan"]
+    assert query_plan_stage["status"] == "available"
+    assert "sect:camarilla" in query_plan_stage["plan"]["scope_tags"]
+    assert answer.answer_trace["stages"]["reranking"]["status"] == "available"
+    assert answer.answer_trace["stages"]["answerability"]["evidence_status"] == "answerable"
+    assert answer.answer_trace["route"]["index_scope"] == "player"
+
+
+def test_bot_runtime_refuses_insufficient_rules_evidence(runner, tmp_path: Path) -> None:
+    vault = _make_vault(tmp_path)
+    _write_bot_config(vault)
+    _ingest_book(
+        runner,
+        vault,
+        _create_text_pdf(
+            tmp_path / "mere-mention.pdf",
+            [
+                _rule_page(
+                    "Example Character",
+                    (
+                        "They wanted me to learn a lesson about myself. "
+                        "Disciplines and Powers: Obfuscate 1 Silence of Death, Obfuscate 2 Unseen Passage."
+                    ),
+                )
+            ],
+        ),
+        "fake-core",
+        "Fake Core",
+        "core",
+    )
+    output = _export_bundle(runner, vault, tmp_path)
+    bundle = BotBundle.load(output)
+
+    answer = answer_bot_query(bundle, command="rules.ask", question="how do I learn obfuscate", role_ids=["player-role"])
+
+    assert "missing the evidence" in answer.text
+    assert "advancement" in answer.text
+    assert "Obfuscate 1" not in answer.text
+    assert answer.answer_trace["stages"]["answer_packet"]["response_class"] == "insufficient"
+    assert answer.answer_trace["stages"]["answerability"]["evidence_status"] == "insufficient"
 
 
 def test_bot_playground_exports_fake_vault_and_prints_source_diagnostics(runner, tmp_path: Path) -> None:
@@ -189,6 +250,8 @@ def test_bot_playground_exports_fake_vault_and_prints_source_diagnostics(runner,
     assert result.exit_code == 0, result.output
     assert "Bot playground" in result.output
     assert "Mode: template-only" in result.output
+    assert "Trace schema: 1" in result.output
+    assert "Rules retrieval:" in result.output
     assert "Answer" in result.output
     assert "Retrieved Sources" in result.output
     assert "Fake Core" in result.output

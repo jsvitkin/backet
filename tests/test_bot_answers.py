@@ -6,7 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from backet.bot_answers import LlamaLocalAnswerGenerator, TemplateAnswerGenerator, build_llama_prompt, validate_llama_model_files
+from backet.bot_answers import (
+    ANSWER_CLASS_AMBIGUOUS,
+    ANSWER_CLASS_CONFLICTING,
+    ANSWER_CLASS_INSUFFICIENT,
+    ANSWER_CLASS_RUNTIME_UNAVAILABLE,
+    AnswerPacket,
+    LlamaLocalAnswerGenerator,
+    TemplateAnswerGenerator,
+    build_llama_prompt,
+    validate_generated_answer,
+    validate_llama_model_files,
+)
 from backet.bot_runtime import BotBundle, answer_bot_query
 from backet.cli import app
 from backet.errors import AppError
@@ -61,6 +72,112 @@ def test_llama_generator_falls_back_on_timeout_and_missing_citations() -> None:
     assert "[V1]" not in timeout.text
     assert missing_citation.fallback_used is True
     assert missing_citation.diagnostics["fallback_reason"] == "bot_llama_output_missing_citation"
+
+
+def test_template_answer_packet_response_classes_are_evidence_aware() -> None:
+    generator = TemplateAnswerGenerator()
+    insufficient = generator.generate_from_packet(
+        AnswerPacket(
+            question="how do I learn obfuscate",
+            response_class=ANSWER_CLASS_INSUFFICIENT,
+            evidence_status="insufficient",
+            missing_evidence=["advancement"],
+        )
+    )
+    ambiguous = generator.generate_from_packet(
+        AnswerPacket(
+            question="which rule applies?",
+            response_class=ANSWER_CLASS_AMBIGUOUS,
+            evidence_status="ambiguous",
+        )
+    )
+    conflicting = generator.generate_from_packet(
+        AnswerPacket(
+            question="which source wins?",
+            response_class=ANSWER_CLASS_CONFLICTING,
+            evidence_status="conflicting",
+        )
+    )
+    unavailable = generator.generate_from_packet(
+        AnswerPacket(
+            question="rules?",
+            response_class=ANSWER_CLASS_RUNTIME_UNAVAILABLE,
+            evidence_status="runtime_unavailable",
+        )
+    )
+
+    assert "missing the evidence" in insufficient.text
+    assert "advancement" in insufficient.text
+    assert "narrow" in ambiguous.text
+    assert "conflict" in conflicting.text
+    assert "retrieval is unavailable" in unavailable.text
+    assert insufficient.diagnostics["answer_packet"]["response_class"] == "insufficient"
+
+
+def test_llama_prompt_consumes_answer_packet_selected_evidence_only() -> None:
+    selected = [
+        _rule_source(
+            citation="R1",
+            page=70,
+            content="Advancement rules say learning a new Discipline power costs experience and may require a teacher.",
+        )
+    ]
+    packet = AnswerPacket(
+        question="how do I learn obfuscate",
+        response_class="answer",
+        evidence_status="answerable",
+        selected_evidence=selected,
+        fallback_context=[
+            _rule_source(
+                citation="R2",
+                page=71,
+                content="Obfuscate appears on this character sheet but the chunk does not answer advancement.",
+            )
+        ],
+    )
+
+    prompt = build_llama_prompt(packet.question, selected, token_budget=96, answer_packet=packet)
+
+    assert "EVIDENCE STATUS: answerable" in prompt
+    assert "costs experience" in prompt
+    assert "character sheet" not in prompt
+
+
+def test_llama_validation_blocks_unavailable_citations_and_status_violations() -> None:
+    sources = [_rule_source(citation="R1", page=70, content="Blood Bond definition text.")]
+    insufficient_packet = AnswerPacket(
+        question="what are blood bonds?",
+        response_class=ANSWER_CLASS_INSUFFICIENT,
+        evidence_status="insufficient",
+        missing_evidence=["definition"],
+    )
+
+    assert validate_generated_answer("Blood Bonds work like this. [R2]", sources) == "bot_llama_output_unavailable_citation"
+    assert (
+        validate_generated_answer(
+            "Yes, you can learn it by spending experience and finding a teacher. [R1]",
+            sources,
+            answer_packet=insufficient_packet,
+        )
+        == "bot_llama_output_evidence_status_violation"
+    )
+    assert validate_generated_answer("The permitted sources are insufficient.", sources, answer_packet=insufficient_packet) is None
+
+
+def test_llama_generator_does_not_call_model_for_insufficient_packet() -> None:
+    client = _FakeModelClient("You can learn it by spending XP. [R1]")
+    packet = AnswerPacket(
+        question="how do I learn obfuscate",
+        response_class=ANSWER_CLASS_INSUFFICIENT,
+        evidence_status="insufficient",
+        missing_evidence=["advancement"],
+    )
+
+    answer = LlamaLocalAnswerGenerator(client=client).generate_from_packet(packet)
+
+    assert client.prompts == []
+    assert "missing the evidence" in answer.text
+    assert answer.diagnostics["model_skipped_reason"] == "evidence_status:insufficient"
 
 
 def test_answer_context_windows_use_full_source_content_near_question_terms() -> None:

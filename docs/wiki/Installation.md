@@ -25,7 +25,9 @@ Optional:
 
 ## Current Release
 
-The current release is `v0.1.28`.
+The current release is `v0.2.0`.
+
+This is a minor release. It includes the RAG v2 rules retrieval work, answer-quality diagnostics, the evidence-aware bot answer pipeline, and explicit bot runtime profiles for stronger self-hosted model services.
 
 Use the macOS/Linux installer script on macOS or Linux. Use the Windows PowerShell commands on Windows. Use the source install path only when you want the current `main` branch instead of the latest release.
 
@@ -57,7 +59,7 @@ bash install-backet.sh
 To install the current release explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash -s -- --version 0.1.28
+curl -fsSL https://raw.githubusercontent.com/jsvitkin/backet/main/scripts/install.sh | bash -s -- --version 0.2.0
 ```
 
 If your default `python3` is not Python 3.11 or newer, point the installer at the right interpreter:
@@ -73,7 +75,7 @@ Install `pipx` with the Python launcher, refresh your user PATH, then install th
 ```powershell
 py -3 -m pip install --user pipx
 py -3 -m pipx ensurepath
-py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
+py -3 -m pipx install https://github.com/jsvitkin/backet/releases/download/v0.2.0/backet-0.2.0-py3-none-any.whl
 ```
 
 Open a new PowerShell window after `ensurepath` if `backet` is not found immediately.
@@ -93,13 +95,13 @@ The Windows install path does not use the macOS/Linux `curl ... | bash` installe
 On any platform with `pipx` already available, install the release wheel directly. This is also the shortest Windows command if `pipx` is already on `PATH`:
 
 ```bash
-pipx install https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
+pipx install https://github.com/jsvitkin/backet/releases/download/v0.2.0/backet-0.2.0-py3-none-any.whl
 ```
 
 If you need to choose a specific Python interpreter for `pipx`:
 
 ```bash
-pipx install --python /path/to/python3.11 https://github.com/jsvitkin/backet/releases/download/v0.1.28/backet-0.1.28-py3-none-any.whl
+pipx install --python /path/to/python3.11 https://github.com/jsvitkin/backet/releases/download/v0.2.0/backet-0.2.0-py3-none-any.whl
 ```
 
 After installation, open a new terminal if `backet` is not found immediately.
@@ -251,6 +253,8 @@ pipx inject backet "sentence-transformers>=3.4.1"
 ```
 
 This can be a large install because it pulls in machine-learning dependencies.
+
+For Discord bot hosting, the stronger `rag-standard` and `rag-quality` profiles can also use self-hosted embedding, reranker, and answer model services configured in the bot runtime profile. Those services are separate from the base CLI install and are covered in [[Hosting Backet Bot]].
 
 ## Upgrade
 

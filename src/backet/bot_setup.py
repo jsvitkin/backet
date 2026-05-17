@@ -20,6 +20,19 @@ import yaml
 
 from backet import __version__
 from backet.bot_access import BotCommandPolicy, load_bot_config, scan_bot_visibility, summarize_visibility
+from backet.bot_profiles import (
+    DEFAULT_ENDPOINT_ENV,
+    FALLBACK_TEMPLATE,
+    MODEL_SERVICE_ROLES,
+    RUNTIME_PROFILE_LITE,
+    SERVICE_ROLE_ANSWER,
+    SERVICE_ROLE_EMBEDDING,
+    SERVICE_ROLE_RERANKER,
+    doctor_runtime_profile,
+    issues_from_runtime_health,
+    normalize_runtime_profile,
+    parse_runtime_profile_config,
+)
 from backet.distribution import load_distribution_metadata
 from backet.errors import AppError
 from backet.models import CommandResult, Issue
@@ -50,6 +63,11 @@ DEFAULT_VARIABLE_NAMES = (
     "DISCORD_GUILD_ID",
     "ORACLE_VM_HOST",
     "ORACLE_VM_USER",
+    "BACKET_RAG_PROFILE",
+    "BACKET_MODEL_CACHE",
+    "BACKET_EMBEDDING_ENDPOINT",
+    "BACKET_RERANKER_ENDPOINT",
+    "BACKET_ANSWER_MODEL_ENDPOINT",
     "BOT_COMPOSE_PROFILES",
     "LLAMA_MODEL_RELATIVE_PATH",
     "LLAMA_MODEL_SHA256",
@@ -66,6 +84,11 @@ DEPLOY_REPOSITORY_FILES = (
     "deploy/bot/smoke-test.sh",
 )
 SECRET_VALUE_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "credential",
     "token",
     "discord_token",
     "ssh_key",
@@ -914,11 +937,45 @@ def configure_answer_setup(
     if normalized_mode == "llama-local":
         answers["model"] = {str(key): str(value) for key, value in (model or {}).items() if value not in (None, "")}
     state["answers"] = answers
+    _sync_answer_service_state(state)
     _sync_runtime_config_from_setup(vault_root, state)
     save_bot_setup_state(vault_root, state)
     data = _setup_status_payload(vault_root, state)
     data["answer_setup"] = answers
     return CommandResult(message="Bot answer mode configured", data=data)
+
+
+def configure_runtime_profile_setup(
+    vault_root: Path,
+    *,
+    profile: str,
+    fallback_policy: str | None = None,
+    model_services: dict[str, Any] | None = None,
+) -> CommandResult:
+    state = load_or_initialize_setup_state(vault_root, save=True)
+    normalized_profile = normalize_runtime_profile(profile)
+    runtime = dict(state.get("runtime", {}) or {})
+    runtime["profile"] = normalized_profile
+    if fallback_policy is not None:
+        runtime["fallback_policy"] = fallback_policy
+    elif not runtime.get("fallback_policy"):
+        runtime["fallback_policy"] = parse_runtime_profile_config({"runtime_profile": normalized_profile}).fallback_policy
+    if model_services is not None:
+        runtime["model_services"] = model_services
+    state["runtime"] = parse_runtime_profile_config(
+        {
+            "runtime_profile": runtime.get("profile"),
+            "fallback_policy": runtime.get("fallback_policy"),
+            "model_services": runtime.get("model_services", {}),
+            "answer_mode": dict(state.get("answers", {}) or {}).get("mode", "template"),
+            "model": dict(dict(state.get("answers", {}) or {}).get("model", {}) or {}),
+        }
+    ).to_config()
+    _sync_runtime_config_from_setup(vault_root, state)
+    save_bot_setup_state(vault_root, state)
+    data = _setup_status_payload(vault_root, state)
+    data["runtime_profile_setup"] = state["runtime"]
+    return CommandResult(message="Bot runtime profile configured", data=data)
 
 
 def setup_doctor(vault_root: Path) -> CommandResult:
@@ -963,12 +1020,15 @@ def setup_doctor(vault_root: Path) -> CommandResult:
                 safe_to_fix=False,
             )
         )
+    runtime_health = doctor_runtime_profile(runtime.to_dict())
+    issues.extend(issues_from_runtime_health(runtime_health))
     data["doctor"] = {
         "ok": not any(issue.severity == "error" for issue in issues),
         "workflow_file": workflow.as_posix(),
         "missing_deploy_assets": missing_assets,
         "runtime_config_path": bot_config_path(vault_root).relative_to(vault_root).as_posix(),
         "setup_state_path": bot_setup_path(vault_root).relative_to(vault_root).as_posix(),
+        "runtime_health": runtime_health,
     }
     return CommandResult(message="Backet bot setup doctor complete", issues=issues, data=data)
 
@@ -1182,6 +1242,7 @@ def _setup_status_payload(vault_root: Path, state: dict[str, Any]) -> dict[str, 
         "github": _github_safe_status(safe_state),
         "oracle": safe_state.get("oracle", {}),
         "answers": safe_state.get("answers", {}),
+        "runtime": safe_state.get("runtime", {}),
     }
 
 
@@ -1219,6 +1280,47 @@ def _next_pending_phase(state: dict[str, Any]) -> str | None:
     return None
 
 
+def _runtime_config_from_setup_state(state: dict[str, Any], existing_payload: dict[str, Any]) -> dict[str, Any]:
+    runtime = dict(state.get("runtime", {}) or {})
+    answers = dict(state.get("answers", {}) or {})
+    parsed = parse_runtime_profile_config(
+        {
+            "runtime_profile": runtime.get("profile") or runtime.get("runtime_profile") or existing_payload.get("runtime_profile"),
+            "fallback_policy": runtime.get("fallback_policy") or existing_payload.get("fallback_policy"),
+            "model_services": runtime.get("model_services") or existing_payload.get("model_services") or {},
+            "answer_mode": answers.get("mode") or existing_payload.get("answer_mode") or "template",
+            "model": answers.get("model") or existing_payload.get("model") or {},
+        }
+    )
+    return parsed.to_config()
+
+
+def _sync_answer_service_state(state: dict[str, Any]) -> None:
+    answers = dict(state.get("answers", {}) or {})
+    runtime = dict(state.get("runtime", {}) or {})
+    services = dict(runtime.get("model_services", {}) or {})
+    if answers.get("mode") == "llama-local":
+        model = dict(answers.get("model", {}) or {})
+        path = str(model.get("path") or model.get("model_path") or "")
+        services[SERVICE_ROLE_ANSWER] = {
+            "provider": "local",
+            "endpoint": str(model.get("endpoint") or "") or None,
+            "endpoint_env": "BACKET_LLAMA_ENDPOINT",
+            "model": str(model.get("name") or model.get("model") or path).strip(),
+            "local_model_path": path or None,
+            "timeout_seconds": model.get("timeout_seconds") or model.get("timeout") or 20,
+            "enabled": True,
+        }
+    runtime.setdefault("profile", RUNTIME_PROFILE_LITE)
+    runtime.setdefault("fallback_policy", FALLBACK_TEMPLATE)
+    runtime["model_services"] = {
+        role: dict(services.get(role, {}) or {})
+        for role in MODEL_SERVICE_ROLES
+        if services.get(role)
+    }
+    state["runtime"] = runtime
+
+
 def _sync_runtime_config_from_setup(vault_root: Path, state: dict[str, Any]) -> None:
     discord = dict(state.get("discord", {}) or {})
     if not discord.get("guild_id"):
@@ -1252,6 +1354,11 @@ def _sync_runtime_config_from_setup(vault_root: Path, state: dict[str, Any]) -> 
     payload["answer_mode"] = str(answers.get("mode") or payload.get("answer_mode") or "template")
     if answers.get("model"):
         payload["model"] = answers["model"]
+    runtime = _runtime_config_from_setup_state(state, existing_payload)
+    payload["runtime_profile"] = runtime["runtime_profile"]
+    payload["fallback_policy"] = runtime["fallback_policy"]
+    if runtime.get("model_services"):
+        payload["model_services"] = runtime["model_services"]
     _reject_runtime_secret_values(payload)
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
@@ -1267,6 +1374,18 @@ def _github_variables_from_state(state: dict[str, Any]) -> dict[str, str]:
         variables["ORACLE_VM_HOST"] = str(oracle["host"])
     if oracle.get("user"):
         variables["ORACLE_VM_USER"] = str(oracle["user"])
+    runtime = _runtime_config_from_setup_state(state, {})
+    variables["BACKET_RAG_PROFILE"] = str(runtime["runtime_profile"])
+    variables["BACKET_MODEL_CACHE"] = "/srv/backet-bot/models"
+    services = dict(runtime.get("model_services", {}) or {})
+    for role, variable_name in [
+        (SERVICE_ROLE_EMBEDDING, DEFAULT_ENDPOINT_ENV[SERVICE_ROLE_EMBEDDING]),
+        (SERVICE_ROLE_RERANKER, DEFAULT_ENDPOINT_ENV[SERVICE_ROLE_RERANKER]),
+        (SERVICE_ROLE_ANSWER, DEFAULT_ENDPOINT_ENV[SERVICE_ROLE_ANSWER]),
+    ]:
+        service = dict(services.get(role, {}) or {})
+        if service.get("endpoint"):
+            variables[variable_name] = str(service["endpoint"])
     if answers.get("mode") == "llama-local":
         variables["BOT_COMPOSE_PROFILES"] = "llama"
     else:
@@ -1290,6 +1409,7 @@ def _default_setup_state() -> dict[str, Any]:
         "github": {"workflow_file": DEFAULT_WORKFLOW_FILE, "secret_names": [], "variable_names": []},
         "oracle": {"deploy_path": DEFAULT_DEPLOY_PATH},
         "answers": {"mode": "template"},
+        "runtime": {"profile": RUNTIME_PROFILE_LITE, "fallback_policy": FALLBACK_TEMPLATE, "model_services": {}},
     }
 
 
@@ -1318,6 +1438,11 @@ def _import_runtime_config(state: dict[str, Any], config: dict[str, Any]) -> dic
     state["answers"] = {"mode": str(config.get("answer_mode") or "template")}
     if config.get("model"):
         state["answers"]["model"] = config["model"]
+    state["runtime"] = {
+        "profile": str(config.get("runtime_profile") or RUNTIME_PROFILE_LITE),
+        "fallback_policy": str(config.get("fallback_policy") or FALLBACK_TEMPLATE),
+        "model_services": dict(config.get("model_services", {}) or {}),
+    }
     _record_phase(
         state,
         SetupPhaseResult(

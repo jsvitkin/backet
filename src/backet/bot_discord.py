@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backet.bot_access import ACCESS_TIER_STORYTELLER
+from backet.bot_profiles import doctor_runtime_profile
 from backet.bot_runtime import (
     BotAnswer,
     BotBundle,
@@ -116,6 +117,8 @@ def evaluate_discord_request(
         "source_count": len(answer.sources),
         "source_refs": [_log_source_reference(source) for source in answer.sources[:5]],
         "answer_mode": generation.get("mode"),
+        "runtime_profile": dict(answer.diagnostics.get("runtime", {}) or {}).get("profile"),
+        "degraded": dict(answer.diagnostics.get("runtime", {}) or {}).get("degraded"),
         "fallback_used": generation.get("fallback_used"),
         "fallback_reason": generation_diag.get("fallback_reason"),
         "question_fingerprint": generation_diag.get("question_fingerprint") or _fingerprint_question(question),
@@ -141,20 +144,27 @@ def evaluate_discord_request(
 
 
 def build_discord_health(bundle: BotBundle, context: DiscordRequestContext) -> dict[str, Any]:
+    runtime_health = doctor_runtime_profile(bundle.manifest, manifest=bundle.manifest)
     access = resolve_access_tier(bundle.manifest.get("bot", {}), user_id=context.user_id, role_ids=context.role_ids)
     if access.tier != ACCESS_TIER_STORYTELLER:
         return {
-            "ready": True,
+            "ready": runtime_health.get("ok", True),
             "bundle_schema_version": bundle.manifest.get("schema_version"),
             "answer_mode": bundle.manifest.get("bot", {}).get("answer_mode", "template"),
+            "runtime_profile": runtime_health.get("profile"),
+            "degraded": runtime_health.get("degraded"),
         }
     return {
-        "ready": True,
+        "ready": runtime_health.get("ok", True),
         "bundle_schema_version": bundle.manifest.get("schema_version"),
         "guild_id": bundle.manifest.get("bot", {}).get("guild_id"),
         "indexes": bundle.manifest.get("indexes", {}),
         "rules": bundle.manifest.get("rules", {}),
         "answer_mode": bundle.manifest.get("bot", {}).get("answer_mode", "template"),
+        "runtime_profile": runtime_health.get("profile"),
+        "fallback_policy": runtime_health.get("fallback_policy"),
+        "degraded": runtime_health.get("degraded"),
+        "services": runtime_health.get("services", {}),
         "exported_at": bundle.manifest.get("exported_at"),
     }
 
@@ -437,7 +447,11 @@ def _format_health(health: dict[str, Any]) -> str:
         f"ready: {_format_bool(health.get('ready'))}",
         f"bundle schema: {health.get('bundle_schema_version', 'unknown')}",
         f"answer mode: {health.get('answer_mode', 'template')}",
+        f"runtime profile: {health.get('runtime_profile', 'lite')}",
+        f"degraded: {_format_bool(health.get('degraded', False))}",
     ]
+    if health.get("fallback_policy"):
+        lines.append(f"fallback policy: {health['fallback_policy']}")
     if health.get("guild_id"):
         lines.append(f"guild id: {health['guild_id']}")
     if health.get("exported_at"):
@@ -453,6 +467,10 @@ def _format_health(health: dict[str, Any]) -> str:
         size = _format_bytes(int(rules.get("size_bytes") or 0)) if rules.get("size_bytes") else "unknown size"
         path = rules.get("path") or "unknown path"
         lines.append(f"rules: {included}, {size}, {path}")
+    services = dict(health.get("services") or {})
+    for role, service in sorted(services.items()):
+        if isinstance(service, dict):
+            lines.append(f"{role} service: {service.get('status')} ({'required' if service.get('required') else 'optional'})")
     return "\n".join(lines)
 
 
