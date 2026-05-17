@@ -59,3 +59,46 @@ The diagnostic system MUST work for template answers and model-generated answers
 - **WHEN** the bot answers through local model synthesis
 - **THEN** the trace MUST identify model mode, fallback status, validation status, and the source labels supplied to the model without exposing secrets or unbounded prompts in normal diagnostics
 
+### Requirement: QA-consumable answer diagnostics
+Answer diagnostics SHALL expose normalized fields for planner terms, retrieval mode, semantic quality, evidence status, selected source anchors, answer mode, fallback reason, and response class.
+
+#### Scenario: Workbench reads diagnostics
+- **WHEN** the QA workbench evaluates a bot answer
+- **THEN** it can classify the answer without parsing human-facing Discord text except for final answer pattern checks
+
+### Requirement: Failure reasons remain paste-safe
+Answer diagnostics SHALL avoid raw source PDF paths, secrets, full source passages, Discord tokens, and unbounded user text.
+
+#### Scenario: Diagnostic report is shared
+- **WHEN** a user shares a QA failure report
+- **THEN** the report contains source labels, page metadata, fingerprints, and bounded snippets only
+
+### Requirement: False-confidence diagnostics
+Answer diagnostics SHALL expose why evidence was considered answerable or insufficient, including entity anchors, intent evidence, semantic quality, and candidate rejection reasons.
+
+#### Scenario: Answerability fails
+- **WHEN** the rules evidence packet is insufficient
+- **THEN** diagnostics include missing entity or intent evidence and a bounded list of rejected candidates
+
+#### Scenario: Degraded retrieval answers
+- **WHEN** a lite profile answers using degraded semantic retrieval
+- **THEN** diagnostics include a warning that the answer was produced without sentence-level semantic retrieval
+
+### Requirement: Synthesis diagnostics
+Answer diagnostics SHALL include the answer outline, selected evidence IDs, final synthesis mode, validation status, and fallback reason.
+
+#### Scenario: Model validation fails
+- **WHEN** local model output is rejected
+- **THEN** diagnostics include the validation error code and the fallback policy used
+
+#### Scenario: Deterministic composer answers
+- **WHEN** the deterministic composer produces the final answer
+- **THEN** diagnostics identify the answer shape and source IDs used for each claim
+
+### Requirement: Unsupported claim checks
+Answer diagnostics SHALL expose whether final text claims are supported by selected evidence.
+
+#### Scenario: Forbidden pattern detected
+- **WHEN** final text matches a QA forbidden pattern for the case
+- **THEN** the workbench can classify the failure as synthesis rather than retrieval
+

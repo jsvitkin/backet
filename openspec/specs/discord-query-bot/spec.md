@@ -188,3 +188,68 @@ The bot MUST format evidence-aware responses for Discord without leaking hidden 
 - **WHEN** retrieved source text or user input contains Discord mention syntax
 - **THEN** the bot MUST sanitize the response and use allowed-mentions controls to prevent unwanted mentions
 
+### Requirement: Bot QA execution surface
+The bot tooling SHALL provide a local QA execution surface that runs case files through the same bundle export and answer runtime used by `bot playground`.
+
+#### Scenario: QA runs against a vault
+- **WHEN** a user runs a QA suite against a vault
+- **THEN** the system exports a temporary bundle and evaluates answers through the bot runtime
+
+#### Scenario: QA runs against an existing bundle
+- **WHEN** a user runs a QA suite against an exported bundle
+- **THEN** the system evaluates the bundle without rebuilding vault indexes
+
+### Requirement: Quality profile runtime enforcement
+The bot runtime SHALL enforce required local model service roles according to the configured runtime profile.
+
+#### Scenario: Lite profile degraded answer
+- **WHEN** lite profile runs without model services
+- **THEN** the bot may use deterministic fallback and diagnostics mark the answer as degraded
+
+#### Scenario: Quality profile service missing
+- **WHEN** quality profile requires a model service that is unavailable
+- **THEN** the bot returns runtime-unavailable rather than silently using template-only answers
+
+### Requirement: Benchmark traces
+Bot answer traces SHALL include enough runtime timing and model-service metadata for local benchmark reports.
+
+#### Scenario: Local model answer generated
+- **WHEN** a local answer model produces a response
+- **THEN** the trace includes answer mode, model ID, endpoint role, elapsed time, validation status, and fallback status
+
+### Requirement: Grounded answer outlines
+The bot SHALL build a grounded answer outline from selected evidence before producing final Discord prose.
+
+#### Scenario: Direct yes/no question
+- **WHEN** selected evidence answers whether a rule applies to a target
+- **THEN** the outline includes a stance, supporting source IDs, and any stated restrictions
+
+#### Scenario: Evidence is insufficient
+- **WHEN** the answer packet is insufficient, ambiguous, conflicting, permission-denied, or runtime-unavailable
+- **THEN** the bot does not produce a substantive answer and instead emits the appropriate non-answer response
+
+### Requirement: Selected evidence only
+Rules answer synthesis SHALL use selected evidence for claims and citations, not fallback context or rejected candidates.
+
+#### Scenario: Fallback context exists
+- **WHEN** fallback context contains related chunks but the evidence packet is insufficient
+- **THEN** synthesis abstains and does not cite fallback context as if it were selected evidence
+
+### Requirement: Source-grounded final answers
+Final Discord answers SHALL include a direct answer first, cite source labels once, and avoid unsupported claims.
+
+#### Scenario: Model output lacks citation
+- **WHEN** model-generated text omits required source citation or cites an unavailable source
+- **THEN** validation rejects it and the configured fallback policy is applied
+
+#### Scenario: Template fallback runs
+- **WHEN** deterministic fallback is allowed
+- **THEN** fallback output uses the answer outline and selected evidence rather than raw first-source sentence picking
+
+### Requirement: Quality profile fallback behavior
+Bot synthesis SHALL respect runtime profile fallback policy.
+
+#### Scenario: Quality profile model unavailable
+- **WHEN** the quality profile requires local model synthesis and the model is unavailable
+- **THEN** the bot fails closed with a runtime-unavailable answer instead of silently using low-quality template synthesis
+

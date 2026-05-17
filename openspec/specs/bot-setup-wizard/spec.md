@@ -2,9 +2,7 @@
 
 ## Purpose
 Define the guided CLI experience that configures and deploys a private Backet Discord bot through Discord, GitHub Actions, and an Oracle VM while keeping secrets out of committed vault state.
-
 ## Requirements
-
 ### Requirement: The setup wizard MUST guide the complete private bot setup flow
 The system MUST provide a guided CLI setup flow that walks a user through every supported v1 phase needed to deploy the private Discord bot to an Oracle VM through GitHub Actions.
 
@@ -213,3 +211,22 @@ The system MUST provide guided human-mode entry points for the private bot comma
 #### Scenario: Human bot command output
 - **WHEN** a user runs bot policy, export, doctor, inspect, ask, model-check, or visibility commands without `--json`
 - **THEN** the system MUST show concise summaries and guided next actions instead of raw nested structured dumps or default command recipes
+
+### Requirement: Local quality runtime setup
+The bot setup workflow SHALL configure local model runtime profiles, endpoint metadata, and fallback policy without storing secrets.
+
+#### Scenario: Configure standard profile
+- **WHEN** the user selects local standard RAG profile
+- **THEN** setup writes embedding and answer endpoint metadata and marks reranker as optional unless validated
+
+#### Scenario: Configure quality profile
+- **WHEN** the user selects local quality RAG profile
+- **THEN** setup requires embedding, reranker, and answer service doctor checks before marking the profile ready
+
+### Requirement: Runtime install guidance
+The setup workflow SHALL provide platform-specific install guidance for missing local runtime dependencies.
+
+#### Scenario: Windows AMD runtime missing
+- **WHEN** Windows detects an AMD Radeon GPU but no local runtime command is available
+- **THEN** setup recommends native Ollama first and llama.cpp Vulkan as an advanced fallback
+
