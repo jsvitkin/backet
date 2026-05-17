@@ -166,3 +166,69 @@ Rules query output SHALL include corpus health blockers relevant to the query, i
 - **WHEN** a query runs while the matching book has stale retrieval metadata or missing embeddings
 - **THEN** JSON diagnostics include the blocker and human output suggests the repair command
 
+### Requirement: Query planning resolves rules entities
+Rules query planning SHALL resolve high-value user terms to catalog entities before candidate retrieval.
+
+#### Scenario: Named mechanic resolved
+- **WHEN** a user asks about a named mechanic such as `Blush of Life`
+- **THEN** the query plan includes the resolved entity ID, canonical name, entity type, accepted aliases, and source anchors
+
+#### Scenario: Named discipline resolved
+- **WHEN** a user asks about a discipline such as `Dominate`
+- **THEN** the query plan includes the discipline entity and any requested rule aspect such as targeting, cost, dice pool, or restriction
+
+#### Scenario: Unresolved high-value term
+- **WHEN** a user question contains an unknown high-value phrase that appears to be a rule name
+- **THEN** the query plan preserves that phrase as unresolved and warns that retrieval cannot prove answerability from generic fallback alone
+
+### Requirement: Query planning extracts target groups
+Rules query planning SHALL extract target groups and situational constraints that affect answerability.
+
+#### Scenario: Other vampires target group
+- **WHEN** a user asks whether a power works on other vampires
+- **THEN** the query plan preserves a target group such as `vampire`, `kindred`, or `other vampires`
+
+#### Scenario: Eye contact constraint
+- **WHEN** a user asks about using a power without eye contact
+- **THEN** the query plan preserves `eye contact` or an accepted contact/targeting constraint as required evidence
+
+### Requirement: Query plan exposes resolution diagnostics
+Rules query planning SHALL expose entity resolution diagnostics in machine-readable output.
+
+#### Scenario: JSON query plan returned
+- **WHEN** a rules query or bot answer runs in JSON mode
+- **THEN** the query plan includes resolved entities, unresolved high-value terms, target groups, alias provenance, ambiguity warnings, and resolution confidence
+
+### Requirement: Query planning MUST include scenario-frame data
+Rules query planning MUST add scenario-frame fields to the query plan for scenario-shaped rules questions.
+
+#### Scenario: JSON query includes scenario frame
+- **WHEN** a user or agent runs a rules query in machine-readable mode for a scenario-shaped question
+- **THEN** the output MUST include actor, action, target, mechanic or entity, conditions, polarity, requested answer shape, frame confidence, and ambiguity warnings when available
+
+#### Scenario: Simple definition remains simple
+- **WHEN** a user asks a simple definition question that does not need a scenario frame
+- **THEN** the query plan MUST either provide a minimal definition frame or explicitly mark scenario framing as not required
+
+### Requirement: Query planning MUST select evidence contracts
+Rules query planning MUST select an evidence contract that corresponds to the user's question archetype and required answer facets.
+
+#### Scenario: Interaction contract selected
+- **WHEN** a user asks how two rules, powers, or conditions interact
+- **THEN** the query plan MUST select an interaction evidence contract and include retrieval hints for both mechanics and any precedence or exception evidence
+
+#### Scenario: Contract selection unavailable
+- **WHEN** the planner cannot select a reliable evidence contract
+- **THEN** the query plan MUST include a diagnostic reason and downstream stages MUST treat answerability as degraded or insufficient
+
+### Requirement: Query diagnostics MUST distinguish framing and retrieval failures
+Rules query diagnostics MUST expose whether a failure occurred during scenario framing, contract selection, retrieval, evidence assembly, or synthesis.
+
+#### Scenario: Framing failure
+- **WHEN** the planner cannot identify the requested mechanic or action
+- **THEN** diagnostics MUST mark the earliest failed stage as scenario framing or planning rather than retrieval
+
+#### Scenario: Retrieval failure after valid frame
+- **WHEN** the planner creates a valid scenario frame but retrieval finds no required source evidence
+- **THEN** diagnostics MUST mark retrieval or evidence assembly as the failing stage and include missing facets
+

@@ -220,3 +220,120 @@ Hybrid rules retrieval SHALL report stale or missing retrieval metadata that may
 - **WHEN** a query runs against chunks whose retrieval metadata schema is stale
 - **THEN** JSON output reports the stale metadata count and suggests reindexing
 
+### Requirement: Entity-first candidate generation
+Hybrid rules retrieval SHALL generate answer candidates from resolved entity anchors before broad lexical, semantic, or raw fallback channels.
+
+#### Scenario: Target block exists
+- **WHEN** the query plan resolves a named power or mechanic to source blocks
+- **THEN** retrieval includes those target blocks before considering broad fallback matches
+
+#### Scenario: System text in neighbor block
+- **WHEN** the target block contains the heading and a bounded neighbor contains its system text
+- **THEN** retrieval may include the neighbor block as selected evidence with a structured expansion reason
+
+#### Scenario: Broad fallback only
+- **WHEN** only broad fallback or semantic-only matches are available for a resolved-entity question
+- **THEN** retrieval reports those matches as fallback context and does not mark the evidence answerable unless direct entity and intent evidence gates pass
+
+### Requirement: Stricter answerability gates
+Hybrid rules retrieval SHALL mark evidence answerable only when selected evidence covers the resolved entity, requested intent, and required situational constraints.
+
+#### Scenario: Generic duration match
+- **WHEN** a query asks about `Blush of Life` and a candidate only contains `Duration: One scene` without the resolved entity or equivalent source anchor
+- **THEN** the candidate is rejected or kept as fallback context, not selected answer evidence
+
+#### Scenario: Related edge-case power
+- **WHEN** a query asks about base `Dominate` eye-contact requirements and a candidate only describes a special Famulus delivery power
+- **THEN** retrieval does not answer from that candidate unless it also identifies the base rule relationship or reports the scope as a special case
+
+#### Scenario: Target group not covered
+- **WHEN** a question asks whether a rule affects Kindred and selected evidence never addresses Kindred, vampires, or the requested target group
+- **THEN** the evidence packet is insufficient with missing target-group evidence
+
+### Requirement: Entity-first retrieval diagnostics
+Hybrid rules retrieval SHALL report how selected evidence was connected to the resolved entity and intent.
+
+#### Scenario: Evidence selected
+- **WHEN** selected evidence is returned
+- **THEN** diagnostics include target entity IDs, expansion reasons, satisfied intent evidence, satisfied target constraints, and rejected high-scoring fallback candidates
+
+#### Scenario: Evidence insufficient
+- **WHEN** evidence is insufficient
+- **THEN** diagnostics include unresolved entities, missing intent evidence, missing target constraints, and closest fallback sources without presenting them as selected evidence
+
+### Requirement: Retrieval uses structured rule blocks
+Hybrid rules retrieval SHALL prefer structured rule blocks over raw page-like chunks when current block metadata is available.
+
+#### Scenario: Structured block available
+- **WHEN** a rules query matches a block with current structure metadata
+- **THEN** selected evidence references the block ID, heading path, block kind, page range, and clean source window
+
+#### Scenario: Structured block unavailable
+- **WHEN** a rules query runs against an older store without current block metadata
+- **THEN** retrieval falls back to existing chunk behavior and reports the corpus structure blocker in diagnostics
+
+### Requirement: Source windows honor block boundaries
+Hybrid rules retrieval SHALL create excerpts and evidence windows centered on matched rule block content.
+
+#### Scenario: Matched rule starts mid-page
+- **WHEN** the matching rule block starts after page furniture or another unrelated rule
+- **THEN** the returned excerpt starts near the matched block rather than at the raw page start
+
+#### Scenario: Adjacent block needed
+- **WHEN** a named heading block and its system text are split across adjacent structured blocks
+- **THEN** retrieval may include a bounded neighbor block and reports the expansion reason
+
+### Requirement: Hybrid retrieval MUST support rule-unit candidates
+Hybrid rules retrieval MUST be able to retrieve, rank, and return rule units alongside raw chunk candidates when rule units are available.
+
+#### Scenario: Rule-unit channel available
+- **WHEN** a rules query runs against a vault with derived rule units
+- **THEN** candidate generation MUST include a rule-unit retrieval channel in addition to configured exact, semantic, metadata, and neighbor channels
+
+#### Scenario: Rule units unavailable
+- **WHEN** a rules query runs against a vault without derived rule units
+- **THEN** retrieval MUST continue using the existing chunk-based channels and report that the rule-unit channel is unavailable
+
+### Requirement: Rule-unit ranking MUST use mechanics role and facets
+Hybrid retrieval MUST rank rule units using mechanics role, authority role, entity tags, answer facets, source precedence, exact matches, semantic matches, and bounded source-neighbor context.
+
+#### Scenario: Base rule requested
+- **WHEN** a user asks for a base rule and candidates include both a base-rule unit and an example or flavor unit that mentions the same term
+- **THEN** retrieval MUST prefer the base-rule unit and mark the example or flavor unit as lower-authority evidence
+
+#### Scenario: Specific mechanic requested
+- **WHEN** a user asks about a named discipline power, ritual, formula, ceremony, merit, flaw, or table row
+- **THEN** retrieval MUST prefer rule units tagged with that specific mechanic before broader mentions
+
+### Requirement: Rule-unit evidence MUST remain auditable through chunks
+Retrieved rule units MUST carry enough source linkage for answer stages and diagnostics to inspect the bounded source chunks that produced them.
+
+#### Scenario: Rule unit selected as evidence
+- **WHEN** retrieval selects a rule unit as answer evidence
+- **THEN** the selected evidence MUST include source book, page range, heading path, unit ID, source chunk IDs, and bounded source snippets or labels
+
+### Requirement: Hybrid retrieval MUST assemble connected evidence packets
+Hybrid rules retrieval MUST assemble contract-aware evidence packets from rule units, raw chunks, exact matches, semantic matches, metadata filters, and targeted neighbor expansion.
+
+#### Scenario: Packet assembled from rule units
+- **WHEN** rule units are available for a scenario-shaped query
+- **THEN** retrieval MUST prefer rule units that satisfy the selected evidence contract and include linked chunks as bounded source context
+
+#### Scenario: Packet assembled from chunks
+- **WHEN** rule units are unavailable or incomplete but chunks satisfy required evidence facets
+- **THEN** retrieval MUST assemble a chunk-backed evidence packet and mark the evidence source type in diagnostics
+
+### Requirement: Evidence packet assembly MUST remain bounded
+Evidence packet assembly MUST enforce configured candidate, unit, chunk, and snippet limits and MUST NOT load whole rulebooks, whole chapters, or unbounded source sections.
+
+#### Scenario: Neighbor expansion requested
+- **WHEN** a contract requires nearby context for a selected source
+- **THEN** retrieval MUST expand only targeted neighbor windows within configured limits
+
+### Requirement: Retrieval MUST expose rejected near misses
+Hybrid retrieval diagnostics MUST expose bounded metadata for high-scoring candidates rejected because they did not satisfy the evidence contract.
+
+#### Scenario: High semantic match lacks required facet
+- **WHEN** a candidate scores highly but lacks a required facet such as target, cost, or restriction
+- **THEN** diagnostics MUST include the rejection reason without presenting the candidate as sufficient answer evidence
+
